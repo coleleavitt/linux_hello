@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# Face authentication daemon for pam_linux_hello.so
+
+description="linux_hello face authentication daemon"
+command="/usr/local/bin/linux_hello"
+command_args="daemon --socket /run/linux_hello.sock"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/linux_hello.log"
+error_log="/var/log/linux_hello.log"
+
+export LINUX_HELLO_MODELS="/usr/local/share/linux_hello/models"
+
+depend() {
+    need localmount
+    after udev
+}

@@ -1,0 +1,9 @@
+[package]
+name = "pam_linux_hello"
+version = "0.1.0"
+edition = "2021"
+description = "PAM module that asks the linux_hello daemon to verify the user's face"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]

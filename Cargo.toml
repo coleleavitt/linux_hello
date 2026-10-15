@@ -1,0 +1,42 @@
+[package]
+name = "linux_hello"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cole Leavitt"]
+description = "Windows Hello-compatible face authentication for Linux"
+license = "MIT"
+repository = "https://github.com/coleleavitt/linux_hello"
+
+[dependencies]
+# ONNX Runtime
+ort = { version = "2.0.0-rc.9", features = ["download-binaries", "ndarray"] }
+
+# Image processing
+image = "0.25"
+
+# V4L2 camera
+v4l = "0.14"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
+members = [".", "pam"]
+
+[features]
+default = []
+
+[profile.release]
+lto = true
+codegen-units = 1
