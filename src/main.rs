@@ -67,6 +67,16 @@ enum Commands {
     Remove { user: String },
     /// List enrolled users
     List,
+    /// Encrypt the face store with a key sealed by the TPM (see docs/tpm.md)
+    #[cfg(feature = "tpm")]
+    Seal {
+        /// Also bind the key to these SHA-256 PCRs, e.g. 7 (Secure Boot state)
+        #[arg(long, value_delimiter = ',')]
+        pcrs: Vec<u8>,
+    },
+    /// Decrypt a sealed face store back to plain JSON
+    #[cfg(feature = "tpm")]
+    Unseal,
     /// Capture one frame to /tmp/linux_hello_test.png
     Camera,
     /// Serve authentication requests from the PAM module
@@ -90,7 +100,7 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(format!("{},ort=warn", cli.verbose)))
+        .with_env_filter(EnvFilter::new(format!("{},ort=warn,tss_esapi=warn", cli.verbose)))
         .init();
 
     let models = std::env::var("LINUX_HELLO_MODELS")
@@ -150,6 +160,22 @@ fn main() -> Result<()> {
             for user in pipeline.list_enrolled() {
                 println!("{user}");
             }
+        }
+
+        #[cfg(feature = "tpm")]
+        Commands::Seal { pcrs } => {
+            let mut faces = linux_hello::FaceStore::load(&store)?;
+            faces.seal(&pcrs)?;
+            faces.save()?;
+            println!("Sealed {} ({} faces) with the TPM, PCRs {pcrs:?}", store.display(), faces.len());
+        }
+
+        #[cfg(feature = "tpm")]
+        Commands::Unseal => {
+            let mut faces = linux_hello::FaceStore::load(&store)?;
+            faces.unseal();
+            faces.save()?;
+            println!("Stored {} ({} faces) as plain JSON", store.display(), faces.len());
         }
 
         Commands::Camera => {

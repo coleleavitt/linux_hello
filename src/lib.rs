@@ -14,6 +14,8 @@ pub mod embedder;
 pub mod matcher;
 pub mod pipeline;
 pub mod store;
+#[cfg(feature = "tpm")]
+pub mod tpm;
 
 pub use antispoof::{AntiSpoof, LivenessModel};
 pub use authenticator::{Authenticator, CameraSetup, OpenCameras};
