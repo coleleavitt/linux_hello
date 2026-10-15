@@ -26,7 +26,7 @@ pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCamera
 pub use camera::{Camera, CameraType, IrCamera, IrPair};
 pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
-pub use lighting::Lighting;
+pub use lighting::{Lighting, LightingStatus};
 pub use liveness::{LivenessSession, LivenessState, Vote};
 pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
 pub use pipeline::{FacePipeline, FrameCheck};
@@ -108,13 +108,43 @@ pub struct LivenessResult {
     pub score: f32,
 }
 
-/// Outcome of checking one user's face. The daemon sends it to the PAM module as one line.
+/// Why a frame pair gives no print (F45, F46). Sent to the PAM module after `NOFACE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FaceProblem {
+    /// No face detected on the lit frame
+    NoFace,
+    /// Lit face darker than 35 (F44 status 3)
+    TooDark,
+    /// Lit face brighter than 205 (F44 status 2)
+    TooBright,
+    /// Face narrower than 72 px or 0.12 × the shorter frame side (F46)
+    TooFar,
+    /// Face closer to a frame edge than a fifth of the eye distance (F46)
+    Edge,
+}
+
+impl FaceProblem {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FaceProblem::NoFace => "no_face",
+            FaceProblem::TooDark => "too_dark",
+            FaceProblem::TooBright => "too_bright",
+            FaceProblem::TooFar => "too_far",
+            FaceProblem::Edge => "edge",
+        }
+    }
+}
+
+/// Outcome of checking one user's face. The daemon sends it to the PAM module as one line whose
+/// first word is the verdict: `MATCH 0.850`, `NOMATCH 0.310`, `NOTLIVE`, `NOFACE too_dark`,
+/// `NOTENROLLED`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
     Match { similarity: f32 },
     NoMatch { similarity: f32 },
     NotLive,
-    NoFace,
+    /// No usable face; the most frequent reason over the session
+    NoFace { problem: FaceProblem },
     NotEnrolled,
 }
 
@@ -124,7 +154,7 @@ impl std::fmt::Display for Verdict {
             Verdict::Match { similarity } => write!(f, "MATCH {similarity:.3}"),
             Verdict::NoMatch { similarity } => write!(f, "NOMATCH {similarity:.3}"),
             Verdict::NotLive => f.write_str("NOTLIVE"),
-            Verdict::NoFace => f.write_str("NOFACE"),
+            Verdict::NoFace { problem } => write!(f, "NOFACE {}", problem.as_str()),
             Verdict::NotEnrolled => f.write_str("NOTENROLLED"),
         }
     }

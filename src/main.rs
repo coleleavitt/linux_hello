@@ -189,17 +189,20 @@ fn main() -> Result<()> {
                 let check = pipeline.check(&user, &capture.pair, capture.rgb.as_ref())?;
                 let verdict = attempt.add(&check);
                 let t = start.elapsed().as_secs_f32();
-                let state = attempt.state();
-                println!("{n:4} t={t:5.2}s {} session={state:?}", describe(&check));
+                let (recognised, liveness) = (attempt.recognised(), attempt.liveness());
+                println!("{n:4} t={t:5.2}s {} recognised={recognised} liveness={liveness:?}", describe(&check));
                 save_capture(&capture, &out, &format!("{n:04}"))?;
-                let l = check.lighting;
+                let a = &check.analysis;
+                let l = a.lighting;
                 writeln!(log, "{}", serde_json::json!({
                     "n": n, "t": t, "gap_ms": capture.pair.gap.as_secs_f32() * 1000.0,
-                    "face": check.face.as_ref().map(|f| f.bbox),
+                    "face": a.face.as_ref().map(|f| f.bbox),
                     "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
-                    "good_lighting": l.map(|l| l.is_good()), "rgb_real": check.liveness,
-                    "vote": format!("{:?}", check.vote), "similarity": check.best.map(|b| b.similarity),
-                    "session": format!("{state:?}"), "verdict": verdict.map(|v| v.to_string()),
+                    "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
+                    "rgb_real": check.liveness, "vote": format!("{:?}", check.vote),
+                    "similarity": check.best.map(|b| b.similarity),
+                    "recognised": recognised, "liveness": format!("{liveness:?}"),
+                    "verdict": verdict.map(|v| v.to_string()),
                 }))?;
                 if let Some(verdict) = verdict {
                     println!("     => {verdict}; new session");

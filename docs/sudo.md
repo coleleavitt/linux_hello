@@ -15,15 +15,19 @@ service in `/tmp`). The system-wide install (`contrib/install.sh`) needs root on
 3. The daemon (root, models already loaded) re-reads `/var/lib/linux_hello/faces.json`, opens the
    RGB camera, then the IR camera and its metadata node, warms up, and reads up to 16 IR frame
    pairs (lit + ambient, told apart by the camera's per-frame emitter flag). For each pair:
-   face on the lit frame → lighting gate (emitter adds 45–205, ambient ≤ 25) → live vote, unless
-   the RGB liveness models veto it (mean of FaceNox and MiniFASNetV2 < 0.5 → spoof vote) →
-   similarity of `lit − ambient` with the closest of **that user's** prints > 0.50 ([calibration.md](calibration.md)).
-   It replies `MATCH` once 2 pairs voted live and a live pair matched; `NOTLIVE` after 3 spoof
-   votes or 16 pairs without 2 live votes; `NOMATCH` if the face was live but never matched.
-   After a match it adds that pair's print to the template and saves the store (a sealed store
+   face on the lit frame → size/edge/brightness gates → print (from `lit − ambient` when the
+   lighting is good) → similarity with the closest of **that user's** prints. Once 4 prints are in
+   and the best similarity is > 0.50 ([calibration.md](calibration.md)) the user is recognised;
+   from then on each good-lighting pair is a live vote unless the RGB liveness models veto it
+   (mean of FaceNox and MiniFASNetV2 < 0.5 → spoof vote).
+   It replies `MATCH` after 2 live votes, `NOTLIVE` after 3 spoof votes, and after 16 pairs
+   `NOTLIVE` (recognised but not live), `NOMATCH <similarity>` or `NOFACE <reason>`. After a
+   borderline match it adds that pair's print to the template and saves the store (a sealed store
    stays sealed). See [capture-and-liveness.md](capture-and-liveness.md).
 4. `MATCH` → `PAM_SUCCESS` → `sufficient` ends the stack: no password.
-   Anything else → the line is ignored and the normal password prompt runs
+   `NOMATCH`/`NOTLIVE`/`NOFACE` → the module prints a short reason ("Face too dark: move closer
+   to the camera", "Face not accepted as live", ...) and returns `PAM_AUTH_ERR`.
+   In every case but `MATCH` the line is ignored and the normal password prompt runs
    (`sufficient` = `success=done`, every other result `ignore`, per Linux-PAM `pam_handlers.c`).
 
 ## Measured

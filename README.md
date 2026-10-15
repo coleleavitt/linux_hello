@@ -11,9 +11,9 @@ Developed and tested on a ThinkPad P16 Gen 3 (Realtek camera, USB `30c9:00f3`) r
 ```
 IR metadata (/dev/video3) ─ emitter on/off per frame ─┐
 IR camera (/dev/video2) ──────────────────────────────┴▶ lit + ambient frame pair
-   lit frame ─▶ SCRFD face ─▶ lighting gate ─▶ ArcFace on (lit − ambient) ─▶ best of the user's prints
+   lit frame ─▶ SCRFD face ─▶ size/edge/brightness gates ─▶ ArcFace on (lit − ambient) ─▶ best of the user's prints
 RGB camera (/dev/video0) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 (veto if mean P(real) < 0.5)
-   per pair: liveness vote ─▶ session: 2 live pairs + a live match → MATCH; 3 spoof pairs or 16 pairs → reject
+   session: 4 prints + best similarity > 0.50 → recognised; then 2 live votes → MATCH, 3 spoof votes → reject; 16 pairs → give up
 ```
 
 Details and the Windows Hello findings behind each step: [docs/capture-and-liveness.md](docs/capture-and-liveness.md).
@@ -21,13 +21,19 @@ Details and the Windows Hello findings behind each step: [docs/capture-and-liven
 - **IR emitter:** needs no setup on this camera; it lights every other frame. The camera's
   metadata node says which frames are lit. Each lit frame is paired with the ambient frame next to
   it (< 300 ms apart), and recognition uses `lit − min(lit, ambient)`, the light the emitter added.
-- **Lighting gate:** on the face, the emitter must add 45–205 (of 255) and ambient IR must stay
-  ≤ 25. Other pairs are ignored. Screens emit no IR and show no face to the IR camera.
-- **Liveness votes:** a pair that passes the gate is a live vote; the RGB liveness models (trained
-  on visible light) can veto it, which makes it a spoof vote. They are there to catch printed photos.
+- **Frame gates:** the face must be ≥ 72 px wide, away from the frame edges, and its lit
+  brightness between 35 and 205. The emitter must add ≥ 45 and ambient IR stay ≤ 25 for the pair
+  to count as "good"; otherwise it is only used for matching. Screens emit no IR and show no face
+  to the IR camera.
+- **Recognise, then liveness:** like Windows, the user is recognised first (4 prints, best above
+  the threshold); liveness votes count from then on. A good-lighting pair is a live vote; the RGB
+  liveness models (trained on visible light) can veto it, which makes it a spoof vote. They are
+  there to catch printed photos.
 - **Several prints per user:** enrollment keeps 5 prints; a probe matches on the closest one.
-  After each successful unlock the matching frame is added as an extra print (at most 10, at most 3
-  generations), so the template follows slow changes in appearance.
+  After a successful unlock with a borderline match the frame is added as an extra print (at most
+  10, at most 3 generations), so the template follows slow changes in appearance.
+- **Feedback:** a failed attempt says why (too dark, too bright, too far, at the edge, no face,
+  not live, not recognized).
 - **1:1 verification:** a face is only ever compared with the template of the user being
   authenticated, so one enrolled face cannot unlock another account.
 - **Two cameras at once:** works only if the RGB stream starts before the IR stream.
@@ -51,15 +57,15 @@ cargo build --release            # builds target/release/linux_hello and target/
 ## Use
 
 ```sh
-linux_hello enroll cole          # keeps 5 IR prints (each must pass the lighting gate)
-linux_hello auth                 # verifies $USER: IR recognition + liveness votes
+linux_hello enroll cole          # keeps 5 IR prints (each must pass the frame gates with good lighting)
+linux_hello auth                 # verifies $USER: IR recognition, then liveness votes
 linux_hello watch --seconds 30   # logs every frame pair's scores, saves frames to /tmp/linux_hello_watch
 linux_hello camera               # saves one pair to /tmp/linux_hello_{lit,ambient,diff,rgb}.png
 ```
 
 Flags: `--device` (IR, default `/dev/video2`), `--ir-metadata` (default `/dev/video3`),
 `--no-ir-metadata` (tell lit frames by brightness), `--liveness-device` (default `/dev/video0`),
-`--no-liveness` (no RGB veto; the lighting gate still applies), `--store`.
+`--no-liveness` (no RGB veto; the lighting status still votes), `--store`.
 The face store is `/var/lib/linux_hello/faces.json` as root, `~/.local/share/linux_hello/faces.json`
 otherwise; it is written atomically with mode 0600.
 
@@ -98,8 +104,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
 
 - Not yet tested against a real printed-photo or phone-screen attack.
 - No IR anti-spoofing model: Windows votes "live" with two IR CNNs (proprietary). Here the IR
-  evidence is only the lighting gate, and the RGB models can only veto. A print or mask that
+  evidence is only the lighting status, and the RGB models can only veto. A print or mask that
   reflects IR like skin passes the gate; the RGB veto has to catch it.
+- No head-pose or occlusion check, and no face tracking across frames (Windows has all three).
 - Ambient subtraction has no motion compensation (Windows warps with an affine transform); fast
   head movement between the two frames (67 ms) leaves edges in the difference image.
 - The similarity threshold is a raw cosine value (0.50), not a per-user false-accept estimate like

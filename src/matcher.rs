@@ -10,6 +10,12 @@ use crate::Embedding;
 /// for 15 prints × 16 frames (target 1e-5, as Windows' F27); FRR 0.23% per probe frame against
 /// 15 prints.
 pub const MATCH_THRESHOLD: f32 = 0.50;
+/// A user is recognised once the session has this many prints and the best one matches (F48, F54).
+pub const MIN_PRINTS: u32 = 4;
+/// Augment only borderline matches: similarity in (MATCH_THRESHOLD, MATCH_THRESHOLD + this].
+/// Windows augments when the estimated FAR is in [FAR/2, FAR] (F53); with a raw cosine
+/// threshold, a fixed band above it stands in for that.
+pub const AUGMENT_MARGIN: f32 = 0.05;
 /// Highest generation of an augmented print: an augmented print may itself seed another one,
 /// at most this many times in a row (F31).
 pub const MAX_GENERATION: u8 = 3;
@@ -37,6 +43,13 @@ pub struct Print {
 pub struct PrintMatch {
     pub similarity: f32,
     pub generation: u8,
+}
+
+impl PrintMatch {
+    /// A match just above the threshold: the only kind that is added to the template (F53).
+    pub fn is_borderline(&self) -> bool {
+        self.similarity > MATCH_THRESHOLD && self.similarity <= MATCH_THRESHOLD + AUGMENT_MARGIN
+    }
 }
 
 /// A user's prints.
