@@ -56,8 +56,7 @@ impl FacePipeline {
 
     /// Re-read the face store, so enrollments made by another process are seen.
     pub fn reload_store(&mut self) -> Result<()> {
-        self.store = FaceStore::load(self.store.path())?;
-        Ok(())
+        self.store.reload()
     }
 
     /// Run every stage on one frame and report the raw scores. The face in `image` is compared
