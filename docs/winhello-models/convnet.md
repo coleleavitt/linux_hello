@@ -253,6 +253,7 @@ owner frames. So the BGR order is also supported by the model's behaviour.
   pooling rules; normalisation `x/127.5−1`; head (L2-normalise + 2×512 matrix, no bias) and
   softmax; slot map and threshold tables; the crop pipeline constants (template, 281, 230/127,
   140.5; thumbnail formula); BGR order for the color input (code + channel ablation).
+- **Crop cross-check:** conv-lbf re-implemented the same crop (`tools/winhello_models/lbf/crop.py`, `engine_crop_128`) and verified it bit-exact by running the DLL code under Unicorn. On the 9 owner IR frames, `msprep.align_crop` differs from it in 0.9% of pixels. Most of these are ±1 rounding differences; a few pixels at the zero-filled border differ by up to 30. The effect on p_live (115/121) is ≤ 0.018. Use `engine_crop_128` when exact pixels matter.
 - **Verified numerically:** ONNX = NumPy re-implementation of the decompiled code (≤ 2.2e-6 per
   layer). It is not compared against Microsoft's own binary output (no Windows run was possible).
 - **Assumed:** SCRFD 5-point keypoints stand in for MS landmarks 0–4 (same semantics per the
