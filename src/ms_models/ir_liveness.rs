@@ -99,20 +99,37 @@ impl MsIrLiveness {
         info!(?model_dir, "loading Microsoft IR liveness ensemble");
 
         let load_model = |id: u32| -> Result<Session> {
-            let path = model_dir.join(format!("MODEL_FILES_{}.onnx", id));
-            if !path.exists() {
+            // Try npz first (open, fast), fall back to ONNX
+            let npz_path = model_dir.join(format!("weights/MODEL_FILES_{}.npz", id));
+            let onnx_path = model_dir.join(format!("MODEL_FILES_{}.onnx", id));
+            if npz_path.exists() {
+                debug!(?npz_path, "loading model from npz");
+                let bytes = std::fs::read(&npz_path).with_context(|| format!("read {}", npz_path.display()))?;
+                let tmp = std::env::temp_dir().join(format!(".ms_model_{}.onnx", id));
+                std::fs::write(&tmp, &bytes)?;
+                let session = Session::builder(get_ort_env()?)
+                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
+                    .with_optimization_level(GraphOptimizationLevel::Level3)
+                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
+                    .commit_from_file(&tmp)
+                    .with_context(|| format!("failed to load {}", npz_path.display()))?;
+                std::fs::remove_file(&tmp)?;
+                Ok(session)
+            } else if onnx_path.exists() {
+                debug!(?onnx_path, "loading model from onnx");
+                Session::builder(get_ort_env()?)
+                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
+                    .with_optimization_level(GraphOptimizationLevel::Level3)
+                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
+                    .commit_from_file(&onnx_path)
+                    .with_context(|| format!("failed to load {}", onnx_path.display()))
+            } else {
                 bail!(
-                    "Microsoft model not found: {} (see docs/winhello-models/)",
-                    path.display()
-                );
+                    "Microsoft model not found: {} or weights/{}.npz (see docs/winhello-models/)",
+                    onnx_path.display(),
+                    id
+                )
             }
-            debug!(?path, "loading model");
-            Session::builder(get_ort_env()?)
-                .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                .commit_from_file(&path)
-                .with_context(|| format!("failed to load {}", path.display()))
         };
 
         Ok(Self {
@@ -129,7 +146,11 @@ impl MsIrLiveness {
         let model_dir = model_dir.as_ref();
         [121, 122, 123, 124, 125]
             .iter()
-            .all(|id| model_dir.join(format!("MODEL_FILES_{}.onnx", id)).exists())
+            .all(|id| {
+                let npz = model_dir.join(format!("weights/MODEL_FILES_{}.npz", id));
+                let onnx = model_dir.join(format!("MODEL_FILES_{}.onnx", id));
+                npz.exists() || onnx.exists()
+            })
     }
 
     /// Run the liveness check.

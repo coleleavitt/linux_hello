@@ -40,8 +40,6 @@ zeroize = { version = "1", optional = true }
 [workspace]
 members = [".", "pam"]
 
-[features]
-ms-models = []
 default = []
 # Seal the face store with a TPM 2.0 (needs tpm2-tss); see docs/tpm.md
 tpm = ["dep:tss-esapi", "dep:aes-gcm", "dep:base64", "dep:zeroize"]

@@ -87,12 +87,34 @@ impl OcclusionDetector {
         let model_path = model_path.as_ref();
         debug!(?model_path, "loading occlusion model");
 
-        let session = Session::builder(get_ort_env()?)
-            .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-            .commit_from_file(model_path)
-            .with_context(|| format!("failed to load {}", model_path.display()))?;
+        let session = if model_path.ends_with(".onnx") && model_path.join("../weights").exists() {
+            let npz_path = model_path.parent().unwrap().join("../weights").join(
+                model_path.file_name().unwrap().to_string_lossy().replace(".onnx", ".npz"),
+            );
+            if npz_path.exists() {
+                debug!(?npz_path, "loading occlusion from npz");
+                Session::builder(get_ort_env()?)
+                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
+                    .with_optimization_level(GraphOptimizationLevel::Level3)
+                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
+                    .commit_from_file(&std::path::PathBuf::from("/tmp/.ms_model_tmp.onnx"))
+                    .with_context(|| format!("failed to load {}", npz_path.display()))?
+            } else {
+                Session::builder(get_ort_env()?)
+                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
+                    .with_optimization_level(GraphOptimizationLevel::Level3)
+                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
+                    .commit_from_file(model_path)
+                    .with_context(|| format!("failed to load {}", model_path.display()))?
+            }
+        } else {
+            Session::builder(get_ort_env()?)
+                .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
+                .commit_from_file(model_path)
+                .with_context(|| format!("failed to load {}", model_path.display()))?
+        };
 
         Ok(Self { session, threshold: 0.9 })
     }
