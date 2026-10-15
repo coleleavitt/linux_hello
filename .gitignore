@@ -5,3 +5,4 @@
 /models/windows_hello/*
 !/models/windows_hello/README.md
 .venv/
+__pycache__/
