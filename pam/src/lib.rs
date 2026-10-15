@@ -7,7 +7,7 @@
 //!
 //! Return codes are chosen for `auth sufficient pam_linux_hello.so` placed before the password
 //! modules: a match returns PAM_SUCCESS; a face that is wrong, spoofed or missing returns
-//! PAM_AUTH_ERR; anything that means "face login is not available" (daemon down, user not
+//! PAM_AUTH_ERR and prints a short reason (`NOFACE too_dark` → "Face too dark: ..."); anything that means "face login is not available" (daemon down, user not
 //! enrolled, bad reply) returns PAM_IGNORE. Either way the stack falls through to the password.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -110,9 +110,24 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
     };
     log(pamh, &format!("pam_linux_hello: user={user} reply={reply:?}"));
     if code == PAM_AUTH_ERR {
-        message(pamh, c"Face not recognized");
+        message(pamh, failure_message(&reply));
     }
     code
+}
+
+/// A short hint for a failed face check. The daemon's reply is the verdict word, then for
+/// `NOFACE` the most frequent reason a frame was unusable.
+fn failure_message(reply: &str) -> &'static CStr {
+    let mut words = reply.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some("NOFACE"), Some("too_dark")) => c"Face too dark: move closer to the camera",
+        (Some("NOFACE"), Some("too_bright")) => c"Face too bright: move back from the camera",
+        (Some("NOFACE"), Some("too_far")) => c"Face too small: move closer to the camera",
+        (Some("NOFACE"), Some("edge")) => c"Face at the edge of the picture: center it in front of the camera",
+        (Some("NOFACE"), _) => c"No face seen by the camera",
+        (Some("NOTLIVE"), _) => c"Face not accepted as live",
+        _ => c"Face not recognized",
+    }
 }
 
 fn is_remote(pamh: *mut PamHandle) -> bool {

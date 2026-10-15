@@ -1,34 +1,63 @@
-//! Complete face authentication pipeline.
+//! Face pipeline for one IR frame pair: detection on the lit frame, frame gates, lighting
+//! status, embedding, RGB liveness veto and the liveness vote.
 
 use anyhow::{bail, Context, Result};
 use image::RgbImage;
 use std::path::Path;
-use tracing::info;
+use tracing::{debug, info};
 
+use crate::lighting::{subtract_ambient, Lighting, LightingStatus};
 use crate::{
-    AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceMatcher, FaceStore, Verdict,
+    gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, PrintMatch,
+    Template, Vote,
 };
 
-const LIVENESS_THRESHOLD: f32 = 0.5;
+/// Minimum face box width in pixels (F46, F54).
+const MIN_FACE_PX: f32 = 72.0;
+/// Minimum face box width as a fraction of the shorter frame side (F46, F54).
+const MIN_FACE_RATIO: f32 = 0.12;
+/// The face box must stay this fraction of the eye distance away from every frame edge (F46).
+const EDGE_MARGIN_EYES: f32 = 0.2;
 
-/// Scores from one frame; `None` where a stage did not run.
-#[derive(Debug, Clone, Default)]
-pub struct FrameCheck {
+/// What a frame pair gives for recognition.
+#[derive(Debug, Clone)]
+pub struct Analysis {
+    /// Largest face, detected on the lit frame
     pub face: Option<Face>,
+    pub lighting: Option<Lighting>,
+    /// Why there is no print; `None` when there is one
+    pub problem: Option<FaceProblem>,
+    /// Embedding of the face: from `lit − min(lit, ambient)` with good lighting, from the lit
+    /// frame with weak lighting (F40)
+    pub print: Option<Embedding>,
+}
+
+impl Analysis {
+    pub fn status(&self) -> Option<LightingStatus> {
+        self.lighting.map(|l| l.status())
+    }
+}
+
+/// Scores from one frame pair; `None` where a stage did not run.
+#[derive(Debug, Clone)]
+pub struct FrameCheck {
+    pub analysis: Analysis,
+    /// Mean P(real) of the RGB liveness models; only for good-lighting frames
     pub liveness: Option<f32>,
-    pub similarity: Option<f32>,
+    pub vote: Vote,
+    /// Closest print of the user's template
+    pub best: Option<PrintMatch>,
 }
 
 pub struct FacePipeline {
     detector: FaceDetector,
     embedder: FaceEmbedder,
     liveness: Vec<AntiSpoof>,
-    matcher: FaceMatcher,
     store: FaceStore,
 }
 
 impl FacePipeline {
-    /// `liveness` may be empty to skip the anti-spoofing check.
+    /// `liveness` may be empty to skip the RGB veto; the IR lighting status always applies.
     pub fn new(
         detector_path: impl AsRef<Path>,
         embedder_path: impl AsRef<Path>,
@@ -39,14 +68,12 @@ impl FacePipeline {
         let detector = FaceDetector::load(detector_path)?;
         let embedder = FaceEmbedder::load(embedder_path)?;
         let store = FaceStore::load(store_path)?;
-        let matcher = FaceMatcher::new(0.4);
-        Ok(Self { detector, embedder, liveness, matcher, store })
+        Ok(Self { detector, embedder, liveness, store })
     }
 
     /// Detect the largest face in the image.
     pub fn largest_face(&mut self, image: &RgbImage) -> Result<Option<Face>> {
         let faces = self.detector.detect(image)?;
-        let area = |f: &Face| (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]);
         Ok(faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))))
     }
 
@@ -59,70 +86,79 @@ impl FacePipeline {
         self.store.reload()
     }
 
-    /// Run every stage on one frame and report the raw scores. The face in `image` is compared
-    /// only with `user`'s template. Liveness runs on `liveness_image` when given (the RGB frame
-    /// captured alongside an IR frame), otherwise on `image`.
-    pub fn check(&mut self, user: &str, image: &RgbImage, liveness_image: Option<&RgbImage>) -> Result<FrameCheck> {
-        let Some(face) = self.largest_face(image)? else {
-            return Ok(FrameCheck::default());
+    /// Find the face on the lit frame, apply the size and edge gates (F46) and the lighting
+    /// status (F44, F45), and embed the face if the frame is usable.
+    pub fn analyze(&mut self, pair: &IrPair) -> Result<Analysis> {
+        let faces = self.detector.detect_gray(&pair.lit)?;
+        let Some(face) = faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))) else {
+            return Ok(Analysis { face: None, lighting: None, problem: Some(FaceProblem::NoFace), print: None });
         };
-        let liveness = if self.liveness.is_empty() { None } else { Some(self.liveness_score(image, &face, liveness_image)?) };
-        let similarity = match self.store.get(user).cloned() {
-            Some(template) => Some(self.embedder.embed_face(image, &face)?.similarity(&template)),
-            None => None,
-        };
-        Ok(FrameCheck { face: Some(face), liveness, similarity })
-    }
-
-    pub fn verdict(&self, check: &FrameCheck) -> Verdict {
-        match (&check.face, check.liveness, check.similarity) {
-            (None, _, _) => Verdict::NoFace,
-            (_, _, None) => Verdict::NotEnrolled,
-            (_, Some(live), _) if live < LIVENESS_THRESHOLD => Verdict::NotLive,
-            (_, _, Some(s)) if s > self.matcher.threshold() => Verdict::Match { similarity: s },
-            (_, _, Some(s)) => Verdict::NoMatch { similarity: s },
+        let lighting = Lighting::measure(&pair.lit, &pair.ambient, &face);
+        let problem = geometry_problem(&face, pair.lit.width(), pair.lit.height()).or(match lighting.status() {
+            LightingStatus::TooDark => Some(FaceProblem::TooDark),
+            LightingStatus::TooBright => Some(FaceProblem::TooBright),
+            LightingStatus::Good | LightingStatus::Weak => None,
+        });
+        if let Some(problem) = problem {
+            debug!(?problem, lit = lighting.lit, ambient = lighting.ambient, "frame rejected");
+            return Ok(Analysis { face: Some(face), lighting: Some(lighting), problem: Some(problem), print: None });
         }
+        let image = match lighting.status() {
+            LightingStatus::Good => subtract_ambient(&pair.lit, &pair.ambient),
+            _ => pair.lit.clone(),
+        };
+        let print = self.embedder.embed_face(&gray_to_rgb(&image), &face)?;
+        Ok(Analysis { face: Some(face), lighting: Some(lighting), problem: None, print: Some(print) })
     }
 
-    /// Mean "real" probability over all liveness models; 0 when the liveness frame has no face.
-    fn liveness_score(&mut self, image: &RgbImage, face: &Face, liveness_image: Option<&RgbImage>) -> Result<f32> {
-        let (live_image, live_face) = match liveness_image {
-            Some(other) => match self.largest_face(other)? {
-                Some(f) => (other, f),
-                None => return Ok(0.0),
-            },
-            None => (image, face.clone()),
+    /// Run every stage on one frame pair. The face is compared only with `user`'s template.
+    /// The RGB liveness models run on `rgb`, the frame captured alongside the pair, for
+    /// good-lighting frames only: the others cannot vote live.
+    pub fn check(&mut self, user: &str, pair: &IrPair, rgb: Option<&RgbImage>) -> Result<FrameCheck> {
+        let analysis = self.analyze(pair)?;
+        let Some(print) = &analysis.print else {
+            return Ok(FrameCheck { analysis, liveness: None, vote: Vote::Abstain, best: None });
         };
+        let best = self.store.get(user).and_then(|t| t.best_match(print));
+        let good = analysis.status() == Some(LightingStatus::Good);
+        let liveness = if good && !self.liveness.is_empty() { Some(self.rgb_liveness(rgb)?) } else { None };
+        let vote = Vote::from_evidence(good, liveness);
+        Ok(FrameCheck { analysis, liveness, vote, best })
+    }
+
+    /// Mean "real" probability over the RGB liveness models; 0 (a veto) when there is no RGB
+    /// frame or no face in it.
+    fn rgb_liveness(&mut self, rgb: Option<&RgbImage>) -> Result<f32> {
+        let Some(image) = rgb else { return Ok(0.0) };
+        let Some(face) = self.largest_face(image)? else { return Ok(0.0) };
         let mut total = 0.0;
         for model in &mut self.liveness {
-            total += model.check(live_image, &live_face)?.score;
+            total += model.check(image, &face)?.score;
         }
         Ok(total / self.liveness.len() as f32)
     }
 
-    /// Enroll from several frames; the stored template is the mean of their embeddings.
-    pub fn enroll(&mut self, user_id: &str, images: &[RgbImage]) -> Result<usize> {
-        let mut sum: Vec<f32> = Vec::new();
-        let mut used = 0;
-        for image in images {
-            let Some(face) = self.largest_face(image)? else { continue };
-            let emb = self.embedder.embed_face(image, &face)?;
-            if sum.is_empty() {
-                sum = vec![0.0; emb.features.len()];
-            }
-            sum.iter_mut().zip(&emb.features).for_each(|(s, f)| *s += f);
-            used += 1;
+    /// Store one print per enrollment frame (no averaging, F28) and save.
+    pub fn enroll(&mut self, user_id: &str, prints: Vec<Embedding>) -> Result<()> {
+        if prints.is_empty() {
+            bail!("no enrollment prints");
         }
-        if used == 0 {
-            bail!("no face detected in any of the {} enrollment frames", images.len());
-        }
-
-        let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let features = sum.iter().map(|x| x / norm).collect();
-        self.store.add(user_id.to_string(), Embedding { features });
+        let count = prints.len();
+        self.store.add(user_id.to_string(), Template::enrolled(prints));
         self.store.save().context("saving face store")?;
-        info!(user_id, frames = used, "enrolled");
-        Ok(used)
+        info!(user_id, prints = count, "enrolled");
+        Ok(())
+    }
+
+    /// Add a print from a successful unlock to the user's template and save the store (F31).
+    /// Returns whether the print was added.
+    pub fn augment(&mut self, user_id: &str, print: &Embedding, matched: PrintMatch) -> Result<bool> {
+        let Some(template) = self.store.get_mut(user_id) else { return Ok(false) };
+        if !template.augment(print, matched) {
+            return Ok(false);
+        }
+        self.store.save().context("saving face store")?;
+        Ok(true)
     }
 
     pub fn unenroll(&mut self, user_id: &str) -> Result<bool> {
@@ -135,5 +171,46 @@ impl FacePipeline {
 
     pub fn list_enrolled(&self) -> Vec<&str> {
         self.store.list_users()
+    }
+}
+
+fn area(f: &Face) -> f32 {
+    (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+}
+
+/// Size and edge gates of Windows' per-frame check (F46). Pose (|yaw| ≤ 20°, |pitch| ≤ 25°) and
+/// occlusion are not checked: they need models linux_hello does not have.
+fn geometry_problem(face: &Face, width: u32, height: u32) -> Option<FaceProblem> {
+    let [x1, y1, x2, y2] = face.bbox;
+    if x2 - x1 < MIN_FACE_PX.max(MIN_FACE_RATIO * width.min(height) as f32) {
+        return Some(FaceProblem::TooFar);
+    }
+    let [le, re, ..] = face.landmarks;
+    let margin = EDGE_MARGIN_EYES * (re[0] - le[0]).hypot(re[1] - le[1]);
+    let (w, h) = (width as f32, height as f32);
+    if x1 < margin || y1 < margin || x2 > w - margin || y2 > h - margin {
+        return Some(FaceProblem::Edge);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn face(bbox: [f32; 4], eye_distance: f32) -> Face {
+        let cx = (bbox[0] + bbox[2]) / 2.0;
+        let eyes = [[cx - eye_distance / 2.0, bbox[1] + 40.0], [cx + eye_distance / 2.0, bbox[1] + 40.0]];
+        Face { bbox, score: 1.0, landmarks: [eyes[0], eyes[1], [cx, 0.0], [cx, 0.0], [cx, 0.0]] }
+    }
+
+    #[test]
+    fn frame_gates() {
+        assert_eq!(geometry_problem(&face([200.0, 100.0, 300.0, 230.0], 40.0), 640, 360), None);
+        assert_eq!(geometry_problem(&face([200.0, 100.0, 270.0, 230.0], 30.0), 640, 360), Some(FaceProblem::TooFar));
+        // 8 px margin needed (40 / 5): 5 px from the top is too close, 10 px is enough.
+        assert_eq!(geometry_problem(&face([200.0, 5.0, 300.0, 230.0], 40.0), 640, 360), Some(FaceProblem::Edge));
+        assert_eq!(geometry_problem(&face([200.0, 10.0, 300.0, 350.0], 40.0), 640, 360), None);
+        assert_eq!(geometry_problem(&face([545.0, 100.0, 635.0, 230.0], 40.0), 640, 360), Some(FaceProblem::Edge));
     }
 }

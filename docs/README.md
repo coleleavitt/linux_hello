@@ -3,6 +3,7 @@
 | Doc | Status |
 |-----|--------|
 | [sudo.md](sudo.md) | sudo face login: flow, measurements, install, caveats |
+| [capture-and-liveness.md](capture-and-liveness.md) | IR lit/ambient pairs, ambient subtraction, lighting gate, liveness votes, multi-print matching, template augmentation |
 | [windows-hello-re.md](windows-hello-re.md) | Windows Hello Face reverse engineering (IDA/idalib, public PDBs) + runtime checks on this camera |
 | [feature-gap.md](feature-gap.md) | Every Windows Hello face-path behaviour vs linux_hello: done / in progress / missing / won't do |
 | [calibration.md](calibration.md) | LFW threshold calibration (0.50 cosine for per-attempt FAR ≤ 1e-5) |

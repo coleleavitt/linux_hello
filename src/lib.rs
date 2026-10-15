@@ -3,7 +3,9 @@
 //! A Rust implementation of face-based authentication using open-source ONNX models:
 //! - Face detection: SCRFD (InsightFace)
 //! - Face embedding: ArcFace (InsightFace) 
-//! - Anti-spoofing: FaceNox / Silent-Face
+//! - Anti-spoofing: FaceNox / Silent-Face (RGB veto) plus the IR lighting gate
+//!
+//! The capture, liveness and matching pipeline is described in `docs/capture-and-liveness.md`.
 
 pub mod antispoof;
 pub mod authenticator;
@@ -11,6 +13,8 @@ pub mod camera;
 pub mod daemon;
 pub mod detector;
 pub mod embedder;
+pub mod lighting;
+pub mod liveness;
 pub mod matcher;
 pub mod pipeline;
 pub mod store;
@@ -18,11 +22,13 @@ pub mod store;
 pub mod tpm;
 
 pub use antispoof::{AntiSpoof, LivenessModel};
-pub use authenticator::{Authenticator, CameraSetup, OpenCameras};
-pub use camera::{Camera, CameraType};
+pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCameras};
+pub use camera::{Camera, CameraType, IrCamera, IrPair};
 pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
-pub use matcher::FaceMatcher;
+pub use lighting::{Lighting, LightingStatus};
+pub use liveness::{LivenessSession, LivenessState, Vote};
+pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
 pub use pipeline::{FacePipeline, FrameCheck};
 pub use store::FaceStore;
 
@@ -81,14 +87,16 @@ pub struct Embedding {
 impl Embedding {
     /// Compute cosine similarity with another embedding
     pub fn similarity(&self, other: &Embedding) -> f32 {
-        if self.features.len() != other.features.len() {
-            return 0.0;
-        }
-        self.features.iter()
-            .zip(other.features.iter())
-            .map(|(a, b)| a * b)
-            .sum()
+        cosine(&self.features, &other.features)
     }
+}
+
+/// Cosine similarity of two L2-normalized vectors (their dot product); 0 if the lengths differ.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Liveness detection result
@@ -100,13 +108,43 @@ pub struct LivenessResult {
     pub score: f32,
 }
 
-/// Outcome of checking one user's face. The daemon sends it to the PAM module as one line.
+/// Why a frame pair gives no print (F45, F46). Sent to the PAM module after `NOFACE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FaceProblem {
+    /// No face detected on the lit frame
+    NoFace,
+    /// Lit face darker than 35 (F44 status 3)
+    TooDark,
+    /// Lit face brighter than 205 (F44 status 2)
+    TooBright,
+    /// Face narrower than 72 px or 0.12 × the shorter frame side (F46)
+    TooFar,
+    /// Face closer to a frame edge than a fifth of the eye distance (F46)
+    Edge,
+}
+
+impl FaceProblem {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FaceProblem::NoFace => "no_face",
+            FaceProblem::TooDark => "too_dark",
+            FaceProblem::TooBright => "too_bright",
+            FaceProblem::TooFar => "too_far",
+            FaceProblem::Edge => "edge",
+        }
+    }
+}
+
+/// Outcome of checking one user's face. The daemon sends it to the PAM module as one line whose
+/// first word is the verdict: `MATCH 0.850`, `NOMATCH 0.310`, `NOTLIVE`, `NOFACE too_dark`,
+/// `NOTENROLLED`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
     Match { similarity: f32 },
     NoMatch { similarity: f32 },
     NotLive,
-    NoFace,
+    /// No usable face; the most frequent reason over the session
+    NoFace { problem: FaceProblem },
     NotEnrolled,
 }
 
@@ -116,7 +154,7 @@ impl std::fmt::Display for Verdict {
             Verdict::Match { similarity } => write!(f, "MATCH {similarity:.3}"),
             Verdict::NoMatch { similarity } => write!(f, "NOMATCH {similarity:.3}"),
             Verdict::NotLive => f.write_str("NOTLIVE"),
-            Verdict::NoFace => f.write_str("NOFACE"),
+            Verdict::NoFace { problem } => write!(f, "NOFACE {}", problem.as_str()),
             Verdict::NotEnrolled => f.write_str("NOTENROLLED"),
         }
     }

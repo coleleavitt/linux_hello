@@ -116,7 +116,7 @@ fn main() -> Result<()> {
                         let b = embed(&mut det, &mut emb, &gray_rgb, centre)?;
                         rgb.lock().unwrap()[i] = Some(a);
                         gray.lock().unwrap()[i] = Some(b);
-                        if i % 500 == 0 {
+                        if i.is_multiple_of(500) {
                             eprintln!("{i}/{n} {:.0}s", start.elapsed().as_secs_f32());
                         }
                     }

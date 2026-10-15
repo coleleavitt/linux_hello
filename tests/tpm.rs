@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use linux_hello::{Embedding, FaceStore};
+use linux_hello::{Embedding, FaceStore, Template};
 
 struct Swtpm {
     child: Child,
@@ -92,10 +92,10 @@ fn free_port_pair() -> Result<u16> {
     bail!("no free pair of TCP ports")
 }
 
-fn template(seed: f32) -> Embedding {
-    Embedding {
+fn template(seed: f32) -> Template {
+    Template::enrolled([Embedding {
         features: (0..512).map(|i| (i as f32 * seed).sin()).collect(),
-    }
+    }])
 }
 
 fn sealed_store(path: &Path, users: &[&str], pcrs: &[u8]) -> Result<()> {
@@ -153,7 +153,7 @@ fn round_trip(dir: &Path) -> Result<()> {
     );
     ensure!(store.len() == 2, "expected 2 faces, got {}", store.len());
     ensure!(
-        store.get("bob").unwrap().features == template(2.0).features,
+        store.get("bob").unwrap().prints[0].features == template(2.0).prints[0].features,
         "bob's template changed"
     );
     ensure!(
@@ -188,10 +188,10 @@ fn unseal_to_plain(dir: &Path) -> Result<()> {
     let mut store = FaceStore::load(&path)?;
     store.unseal();
     store.save()?;
-    let plain: std::collections::HashMap<String, Embedding> =
+    let plain: std::collections::HashMap<String, Template> =
         serde_json::from_slice(&std::fs::read(&path)?)?;
     ensure!(
-        plain["alice"].features == template(1.0).features,
+        plain["alice"].prints[0].features == template(1.0).prints[0].features,
         "plain store differs"
     );
     ensure!(
