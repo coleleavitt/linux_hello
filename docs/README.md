@@ -3,6 +3,7 @@
 | Doc | Status |
 |-----|--------|
 | [sudo.md](sudo.md) | sudo face login: flow, measurements, install, caveats |
+| [capture-and-liveness.md](capture-and-liveness.md) | IR lit/ambient pairs, ambient subtraction, lighting gate, liveness votes, multi-print matching, template augmentation |
 | [windows-hello-re.md](windows-hello-re.md) | Windows Hello Face reverse engineering (IDA/idalib, public PDBs) + runtime checks on this camera |
 | [tpm.md](tpm.md) | Optional TPM 2.0 sealing of the face store (`--features tpm`, `linux_hello seal/unseal`); tested on swtpm |
 | Screen lock | On hold: swaylock dropped; needs a locker that starts PAM without waiting for Enter |

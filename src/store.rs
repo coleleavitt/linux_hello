@@ -1,6 +1,8 @@
-//! Face embedding store (persistent storage).
+//! Face template store (persistent storage).
 //!
-//! The file is a JSON map from user to template. With the `tpm` feature it can instead be sealed:
+//! The file is a JSON map from user to [`Template`]: `{"<user>": {"prints": [{"features": [512
+//! floats], "generation": 0, "source": "enroll"}, ...]}}`. Stores from before multi-print
+//! templates (one averaged `features` vector per user) are not read; re-enroll. With the `tpm` feature it can instead be sealed:
 //! encrypted under a key that only this machine's TPM can unseal (see [`crate::tpm`]). A sealed
 //! store stays sealed when it is saved again.
 
@@ -12,12 +14,12 @@ use tracing::debug;
 
 #[cfg(feature = "tpm")]
 use crate::tpm::{DataKey, SealedFile};
-use crate::Embedding;
+use crate::Template;
 
-/// Persistent face embedding store
+/// Persistent face template store
 pub struct FaceStore {
     path: PathBuf,
-    faces: HashMap<String, Embedding>,
+    faces: HashMap<String, Template>,
     /// Set when the store is sealed.
     #[cfg(feature = "tpm")]
     key: Option<DataKey>,
@@ -54,8 +56,7 @@ impl FaceStore {
         if value.get("format").is_some_and(serde_json::Value::is_string) {
             self.load_sealed(value)?;
         } else {
-            self.faces = serde_json::from_value(value)
-                .with_context(|| format!("parsing face store {}", self.path.display()))?;
+            self.faces = serde_json::from_value(value).with_context(|| self.format_error())?;
             #[cfg(feature = "tpm")]
             {
                 self.key = None;
@@ -74,7 +75,7 @@ impl FaceStore {
             _ => DataKey::unseal(file.key()).with_context(|| format!("opening sealed face store {}", self.path.display()))?,
         };
         let json = key.decrypt(&file).with_context(|| format!("opening sealed face store {}", self.path.display()))?;
-        self.faces = serde_json::from_slice(&json)?;
+        self.faces = serde_json::from_slice(&json).with_context(|| self.format_error())?;
         self.key = Some(key);
         Ok(())
     }
@@ -85,6 +86,10 @@ impl FaceStore {
             "face store {} is sealed with a TPM, but linux_hello was built without the `tpm` feature",
             self.path.display()
         )
+    }
+
+    fn format_error(&self) -> String {
+        format!("parsing face store {} (stores from before multi-print templates must be re-enrolled)", self.path.display())
     }
 
     pub fn path(&self) -> &Path {
@@ -144,9 +149,9 @@ impl FaceStore {
         Ok(serde_json::to_vec_pretty(&self.faces)?)
     }
 
-    /// Add a face embedding
-    pub fn add(&mut self, user_id: String, embedding: Embedding) {
-        self.faces.insert(user_id, embedding);
+    /// Set a user's template, replacing any earlier one
+    pub fn add(&mut self, user_id: String, template: Template) {
+        self.faces.insert(user_id, template);
     }
     
     /// Remove a face by user ID
@@ -154,16 +159,13 @@ impl FaceStore {
         self.faces.remove(user_id).is_some()
     }
     
-    /// Get embedding by user ID
-    pub fn get(&self, user_id: &str) -> Option<&Embedding> {
+    /// Get a user's template
+    pub fn get(&self, user_id: &str) -> Option<&Template> {
         self.faces.get(user_id)
     }
-    
-    /// Get all enrolled faces
-    pub fn get_all(&self) -> Vec<(String, Embedding)> {
-        self.faces.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+
+    pub fn get_mut(&mut self, user_id: &str) -> Option<&mut Template> {
+        self.faces.get_mut(user_id)
     }
     
     /// List all user IDs
@@ -191,10 +193,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("linux_hello_store_{}", std::process::id()));
         let path = dir.join("faces.json");
         let mut store = FaceStore::load(&path).unwrap();
-        store.add("alice".into(), Embedding { features: vec![0.6, 0.8] });
+        store.add("alice".into(), Template::enrolled([crate::Embedding { features: vec![0.6, 0.8] }]));
         store.save().unwrap();
         let reloaded = FaceStore::load(&path).unwrap();
-        assert_eq!(reloaded.get("alice").unwrap().features, vec![0.6, 0.8]);
+        assert_eq!(reloaded.get("alice").unwrap().prints[0].features, vec![0.6, 0.8]);
+
+        // A store from before multi-print templates is refused, not silently misread.
+        fs::write(&path, r#"{"alice": {"features": [0.6, 0.8]}}"#).unwrap();
+        let err = FaceStore::load(&path).err().unwrap();
+        assert!(format!("{err:#}").contains("re-enrolled"));
         fs::remove_dir_all(dir).unwrap();
     }
 }

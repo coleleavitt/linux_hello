@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::Authenticator;
 
-pub fn serve(auth: &mut Authenticator, socket: &Path, attempts: usize) -> Result<()> {
+pub fn serve(auth: &mut Authenticator, socket: &Path) -> Result<()> {
     if socket.exists() {
         std::fs::remove_file(socket).with_context(|| format!("removing stale {}", socket.display()))?;
     }
@@ -31,7 +31,7 @@ pub fn serve(auth: &mut Authenticator, socket: &Path, attempts: usize) -> Result
                 continue;
             }
         };
-        let reply = match handle(auth, &mut stream, attempts) {
+        let reply = match handle(auth, &mut stream) {
             Ok(verdict) => verdict.to_string(),
             Err(e) => {
                 warn!(error = format!("{e:#}"), "request failed");
@@ -45,7 +45,7 @@ pub fn serve(auth: &mut Authenticator, socket: &Path, attempts: usize) -> Result
     Ok(())
 }
 
-fn handle(auth: &mut Authenticator, stream: &mut UnixStream, attempts: usize) -> Result<crate::Verdict> {
+fn handle(auth: &mut Authenticator, stream: &mut UnixStream) -> Result<crate::Verdict> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut line = String::new();
     BufReader::new(stream.take(256)).read_line(&mut line)?;
@@ -57,8 +57,10 @@ fn handle(auth: &mut Authenticator, stream: &mut UnixStream, attempts: usize) ->
         bail!("invalid user name");
     }
 
+    // Re-read the store for enrollments made meanwhile; `verify` saves it again after a
+    // successful unlock adds a print (a sealed store stays sealed).
     auth.pipeline.reload_store()?;
-    let verdict = auth.verify(user, attempts)?;
+    let verdict = auth.verify(user)?;
     info!(user, %verdict, "request");
     Ok(verdict)
 }

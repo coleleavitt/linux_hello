@@ -3,7 +3,9 @@
 //! A Rust implementation of face-based authentication using open-source ONNX models:
 //! - Face detection: SCRFD (InsightFace)
 //! - Face embedding: ArcFace (InsightFace) 
-//! - Anti-spoofing: FaceNox / Silent-Face
+//! - Anti-spoofing: FaceNox / Silent-Face (RGB veto) plus the IR lighting gate
+//!
+//! The capture, liveness and matching pipeline is described in `docs/capture-and-liveness.md`.
 
 pub mod antispoof;
 pub mod authenticator;
@@ -11,6 +13,8 @@ pub mod camera;
 pub mod daemon;
 pub mod detector;
 pub mod embedder;
+pub mod lighting;
+pub mod liveness;
 pub mod matcher;
 pub mod pipeline;
 pub mod store;
@@ -18,11 +22,13 @@ pub mod store;
 pub mod tpm;
 
 pub use antispoof::{AntiSpoof, LivenessModel};
-pub use authenticator::{Authenticator, CameraSetup, OpenCameras};
-pub use camera::{Camera, CameraType};
+pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCameras};
+pub use camera::{Camera, CameraType, IrCamera, IrPair};
 pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
-pub use matcher::FaceMatcher;
+pub use lighting::Lighting;
+pub use liveness::{LivenessSession, LivenessState, Vote};
+pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
 pub use pipeline::{FacePipeline, FrameCheck};
 pub use store::FaceStore;
 
@@ -81,14 +87,16 @@ pub struct Embedding {
 impl Embedding {
     /// Compute cosine similarity with another embedding
     pub fn similarity(&self, other: &Embedding) -> f32 {
-        if self.features.len() != other.features.len() {
-            return 0.0;
-        }
-        self.features.iter()
-            .zip(other.features.iter())
-            .map(|(a, b)| a * b)
-            .sum()
+        cosine(&self.features, &other.features)
     }
+}
+
+/// Cosine similarity of two L2-normalized vectors (their dot product); 0 if the lengths differ.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Liveness detection result

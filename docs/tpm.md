@@ -175,7 +175,8 @@ temporary directory and checks:
 The tests run without the libtest harness (`harness = false`) because the TPM is selected
 with an environment variable, which must not change while other test threads run.
 
-End to end with the release binary and swtpm (no cameras):
+End to end with the release binary and swtpm (no cameras; `enroll --image` has since been removed,
+enrollment now needs the IR camera):
 `enroll dummy --image` into a temporary store → `seal` (no user names left in the file) →
 `list` → `enroll` a second user (still sealed) → `seal --pcrs 7` → `list` → `unseal` → plain
 JSON. A binary built without `tpm` and a missing `/dev/tpmrm0` both give the errors quoted above.
