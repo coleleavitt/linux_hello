@@ -18,6 +18,10 @@ pub mod liveness;
 pub mod matcher;
 pub mod pipeline;
 pub mod store;
+pub mod lid;
+pub mod tracker;
+#[cfg(feature = "ms-models")]
+pub mod ms_models;
 #[cfg(feature = "tpm")]
 pub mod tpm;
 
@@ -31,6 +35,8 @@ pub use liveness::{LivenessSession, LivenessState, Vote};
 pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
 pub use pipeline::{FacePipeline, FrameCheck};
 pub use store::FaceStore;
+pub use lid::{get_lid_state, should_suppress_auth, LidState};
+pub use tracker::{FaceTracker, Track, TrackState};
 
 use ort::environment::Environment;
 use serde::{Deserialize, Serialize};
