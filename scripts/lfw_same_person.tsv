@@ -1,0 +1,33 @@
+# LFW identity pairs whose cross-identity scores are NOT impostor comparisons.
+# Audited by eye for every identity pair with an impostor score >= 0.5 (RGB, centred face).
+# Kept as impostors (not listed): twins, siblings, look-alikes, and anything uncertain.
+# identity_a	identity_b	reason
+Abdullah_Gul	Recep_Tayyip_Erdogan	Recep_Tayyip_Erdogan_0004 shows Abdullah Gul
+Andrew_Caldecott	Andrew_Gilligan	same photograph
+Anja_Paerson	Janica_Kostelic	Janica_Kostelic_0002 shows Anja Paerson
+Bart_Hendricks	Ricky_Ray	same photograph
+Bill_Pryor	William_Pryor_Jr	same person, two names
+Bison_Dele	Brian_Williams	same person (name change)
+Carlos_Beltran	Raul_Ibanez	same photograph
+Carlos_Ruckauf	Eduardo_Duhalde	Carlos_Ruckauf_0001 shows Eduardo Duhalde
+Choi_Sung-hong	Sung_Hong_Choi	same person, two names
+Chyung_Dai-chul	Dai_Chul_Chyung	same person, two names
+Cristina_Fernandez	Cristina_Kirchner	same person, two names
+Doc_Rivers	Glenn_Rivers	same person, two names
+Donald_Rumsfeld	Richard_Myers	Donald_Rumsfeld_0041: subject not detected, the face found is Richard Myers
+Emmy_Rossum	Eva_Amurri	same photograph
+Felipe_De_Borbon	Prince_Felipe	same person, two names
+Gabrielle_Rose	Martha_Bowen	same photograph
+Hasan_Wirayuda	Hassan_Wirajuda	same person, two spellings
+John_Gruden	Jon_Gruden	same person, two spellings
+Joseph_Blatter	Sepp_Blatter	same person, two names
+Michael_Schumacher	Rubens_Barrichello	Michael_Schumacher_0008 shows Rubens Barrichello
+Mireya_Elisa_Moscoso_Rodriguez	Mireya_Moscoso	same person, two names
+Nan_Wang	Wang_Nan	same person, name order
+Noer_Moeis	Noer_Muis	same person, two spellings
+Odai_Hussein	Uday_Hussein	same person, two spellings
+Ruano_Pascual	Virgina_Ruano_Pascal	same person, two names
+Shinya_Taniguchi	Takahiro_Mori	same photograph
+Stephan_Eberharter	Stephen_Ebberharter	same person, two spellings
+Talisa_Bratt	Talisa_Soto	same person, two names
+Wang_Yingfan	Yingfan_Wang	same person, name order
