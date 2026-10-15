@@ -5,8 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::Embedding;
 
-/// Cosine similarity a probe must exceed to match a print.
-pub const MATCH_THRESHOLD: f32 = 0.4;
+/// Cosine similarity a probe must exceed to match a print. Calibrated on grayscale LFW (see
+/// docs/calibration.md): one comparison FAR ≈ 4e-8 (tail fit), simulated per-attempt FAR ≈ 1.8e-6
+/// for 15 prints × 16 frames (target 1e-5, as Windows' F27); FRR 0.23% per probe frame against
+/// 15 prints.
+pub const MATCH_THRESHOLD: f32 = 0.50;
 /// Highest generation of an augmented print: an augmented print may itself seed another one,
 /// at most this many times in a row (F31).
 pub const MAX_GENERATION: u8 = 3;

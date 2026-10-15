@@ -94,9 +94,13 @@ Unlock is accepted when the liveness session is live **and** at least one live f
 verdict carries the best similarity of the matched live frames. Faces are compared only with the
 template of the user being authenticated (1:1).
 
-Difference from Windows: Windows converts the distance into an estimated false-positive rate and
-accepts below 1e-5 (F27, F29). `linux_hello` thresholds the raw cosine similarity; the threshold is
-being calibrated separately.
+`MATCH_THRESHOLD` is 0.50, calibrated on grayscale LFW ([calibration.md](calibration.md)): one
+comparison FAR ≈ 4e-8 (tail fit), simulated per-attempt FAR ≈ 1.8e-6 for 15 prints × 16 frames,
+FRR 0.23% per probe frame against 15 prints.
+
+Difference from Windows: Windows converts the distance into an estimated false-positive rate per
+user and accepts below 1e-5 (F27, F29). `linux_hello` uses one fixed cosine threshold chosen for the
+same 1e-5 target per attempt.
 
 ### 6. Template augmentation (F31)
 

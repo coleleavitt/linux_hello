@@ -17,7 +17,7 @@ service in `/tmp`). The system-wide install (`contrib/install.sh`) needs root on
    pairs (lit + ambient, told apart by the camera's per-frame emitter flag). For each pair:
    face on the lit frame → lighting gate (emitter adds 45–205, ambient ≤ 25) → live vote, unless
    the RGB liveness models veto it (mean of FaceNox and MiniFASNetV2 < 0.5 → spoof vote) →
-   similarity of `lit − ambient` with the closest of **that user's** prints > 0.4.
+   similarity of `lit − ambient` with the closest of **that user's** prints > 0.50 ([calibration.md](calibration.md)).
    It replies `MATCH` once 2 pairs voted live and a live pair matched; `NOTLIVE` after 3 spoof
    votes or 16 pairs without 2 live votes; `NOMATCH` if the face was live but never matched.
    After a match it adds that pair's print to the template and saves the store (a sealed store

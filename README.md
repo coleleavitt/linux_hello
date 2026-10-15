@@ -102,8 +102,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   reflects IR like skin passes the gate; the RGB veto has to catch it.
 - Ambient subtraction has no motion compensation (Windows warps with an affine transform); fast
   head movement between the two frames (67 ms) leaves edges in the difference image.
-- The similarity threshold is a raw cosine value (0.4), not a calibrated false-accept rate like
-  Windows' 1e-5; calibration is in progress.
+- The similarity threshold is a raw cosine value (0.50), not a per-user false-accept estimate like
+  Windows' GFP. It was calibrated on grayscale LFW photos for a per-attempt FAR ≤ 1e-5
+  ([docs/calibration.md](docs/calibration.md)), not yet on IR captures.
 - The RGB camera underexposes 2–3 frames about every 5 s; `OpenCameras` skips frames much darker
   than the recent average, and a frame with no face in the RGB image counts as a veto.
 - Templates are stored unencrypted (root-only file) unless the store is sealed with the TPM
