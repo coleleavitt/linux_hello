@@ -71,6 +71,14 @@ password prompt runs. The module returns `PAM_IGNORE` immediately if the daemon 
 and `PAM_AUTH_ERR` for a wrong, spoofed or missing face. Module options: `socket=PATH`
 (default `/run/linux_hello.sock`), `timeout=SECONDS` (default 10).
 
+## TPM sealing (optional)
+
+Built with `--features tpm`, `linux_hello seal [--pcrs 7]` encrypts the face store with
+AES-256-GCM under a key sealed by the TPM 2.0, so the file is useless away from this machine.
+The daemon unseals it by itself; `linux_hello unseal` turns it back into plain JSON. The TPM is
+chosen with `TPM2TOOLS_TCTI` (default `device:/dev/tpmrm0`). See [docs/tpm.md](docs/tpm.md) for
+what this does and does not protect, PCR binding, enabling the TPM in the BIOS, and migration.
+
 ## Measured on the P16 Gen 3
 
 | | |
@@ -85,7 +93,8 @@ and `PAM_AUTH_ERR` for a wrong, spoofed or missing face. Module options: `socket
 - Not yet tested against a real printed-photo or phone-screen attack.
 - The RGB camera underexposes 2–3 frames about every 5 s; liveness rejects those frames and
   `auth` moves on to the next one.
-- Templates are stored unencrypted (root-only file). No TPM sealing.
+- Templates are stored unencrypted (root-only file) unless the store is sealed with the TPM
+  (optional, see below).
 
 ## Licenses
 
