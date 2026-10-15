@@ -1,3 +1,6 @@
 /target
 /models/**/*.onnx
 *.json.tmp
+# Microsoft proprietary models: never commit
+/models/windows_hello/*
+!/models/windows_hello/README.md
