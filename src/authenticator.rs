@@ -2,11 +2,20 @@
 
 use anyhow::Result;
 use image::RgbImage;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{Camera, CameraType, FacePipeline, FrameCheck, Verdict};
 
 const LIVENESS_BUFFERS: u32 = 2;
+const MAX_DARK_SKIPS: usize = 4;
+const DARK_RATIO: f32 = 0.5;
+
+/// Mean pixel value over a sparse sample of the image.
+fn brightness(image: &RgbImage) -> f32 {
+    let raw = image.as_raw();
+    let sample: Vec<u8> = raw.iter().step_by(97).copied().collect();
+    sample.iter().map(|&v| v as f32).sum::<f32>() / sample.len().max(1) as f32
+}
 
 pub struct CameraSetup {
     pub device: String,
@@ -19,6 +28,8 @@ pub struct CameraSetup {
 pub struct OpenCameras {
     main: Camera,
     liveness: Option<Camera>,
+    /// Running mean brightness of accepted RGB frames
+    rgb_level: Option<f32>,
 }
 
 impl OpenCameras {
@@ -36,14 +47,35 @@ impl OpenCameras {
         if let Some(cam) = liveness.as_mut() {
             cam.skip(LIVENESS_BUFFERS as usize)?;
         }
-        Ok(Self { main, liveness })
+        Ok(Self { main, liveness, rgb_level: None })
     }
 
     /// One recognition frame plus, if configured, the RGB frame for liveness.
     pub fn capture(&mut self) -> Result<(RgbImage, Option<RgbImage>)> {
         let frame = self.main.capture()?;
-        let live = self.liveness.as_mut().map(|c| c.capture()).transpose()?;
+        let live = self.capture_liveness()?;
         Ok((frame, live))
+    }
+
+    /// The RGB camera underexposes 2-3 frames about every 5 s, and the liveness models reject
+    /// those. Skip frames much darker than the recent average (up to a few in a row).
+    fn capture_liveness(&mut self) -> Result<Option<RgbImage>> {
+        let Some(cam) = self.liveness.as_mut() else { return Ok(None) };
+        let mut frame = cam.capture()?;
+        for _ in 0..MAX_DARK_SKIPS {
+            let level = brightness(&frame);
+            match self.rgb_level {
+                Some(avg) if level < DARK_RATIO * avg => {
+                    debug!(level, avg, "skipping underexposed RGB frame");
+                    frame = cam.capture()?;
+                }
+                _ => {
+                    self.rgb_level = Some(self.rgb_level.map_or(level, |avg| 0.8 * avg + 0.2 * level));
+                    break;
+                }
+            }
+        }
+        Ok(Some(frame))
     }
 }
 

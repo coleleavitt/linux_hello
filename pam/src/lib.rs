@@ -3,12 +3,14 @@
 //!
 //! Module arguments: `socket=PATH` (default `/run/linux_hello.sock`), `timeout=SECONDS` (default 10).
 //!
+//! Face login is skipped (PAM_IGNORE) for remote sessions: SSH_CONNECTION/SSH_TTY set or PAM_RHOST set.
+//!
 //! Return codes are chosen for `auth sufficient pam_linux_hello.so` placed before the password
 //! modules: a match returns PAM_SUCCESS; a face that is wrong, spoofed or missing returns
 //! PAM_AUTH_ERR; anything that means "face login is not available" (daemon down, user not
 //! enrolled, bad reply) returns PAM_IGNORE. Either way the stack falls through to the password.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::ptr;
@@ -26,6 +28,7 @@ pub struct PamHandle {
 #[link(name = "pam")]
 extern "C" {
     fn pam_get_user(pamh: *mut PamHandle, user: *mut *const c_char, prompt: *const c_char) -> c_int;
+    fn pam_get_item(pamh: *const PamHandle, item_type: c_int, item: *mut *const c_void) -> c_int;
     // pam_info() is a macro over pam_prompt() in pam_ext.h, so call pam_prompt directly.
     fn pam_prompt(pamh: *mut PamHandle, style: c_int, response: *mut *mut c_char, fmt: *const c_char, ...) -> c_int;
     fn pam_syslog(pamh: *const PamHandle, priority: c_int, fmt: *const c_char, ...);
@@ -33,6 +36,7 @@ extern "C" {
 
 const LOG_NOTICE: c_int = 5;
 const PAM_TEXT_INFO: c_int = 4;
+const PAM_RHOST: c_int = 4;
 
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
@@ -70,6 +74,12 @@ fn args(argc: c_int, argv: *const *const c_char) -> Args {
 }
 
 fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
+    // The camera sees whoever sits at this machine, not the remote caller: someone logged in
+    // over SSH must not be granted access because the owner happens to be at the laptop.
+    if is_remote(pamh) {
+        return PAM_IGNORE;
+    }
+
     let mut user_ptr: *const c_char = ptr::null();
     // SAFETY: pamh comes from libpam; on success user_ptr points to a string libpam owns.
     if unsafe { pam_get_user(pamh, &mut user_ptr, ptr::null()) } != PAM_SUCCESS || user_ptr.is_null() {
@@ -103,6 +113,16 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
         message(pamh, c"Face not recognized");
     }
     code
+}
+
+fn is_remote(pamh: *mut PamHandle) -> bool {
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+        return true;
+    }
+    let mut rhost: *const c_void = ptr::null();
+    // SAFETY: PAM_RHOST is a C string item owned by libpam, or NULL when unset.
+    let ok = unsafe { pam_get_item(pamh, PAM_RHOST, &mut rhost) } == PAM_SUCCESS;
+    ok && !rhost.is_null() && !unsafe { CStr::from_ptr(rhost.cast()) }.to_bytes().is_empty()
 }
 
 fn message(pamh: *mut PamHandle, text: &CStr) {

@@ -52,24 +52,12 @@ otherwise; it is written atomically with mode 0600.
 ## Install (as root)
 
 ```sh
-install -m755 target/release/linux_hello /usr/local/bin/
-install -m755 target/release/libpam_linux_hello.so /lib64/security/pam_linux_hello.so
-mkdir -p /usr/local/share/linux_hello && cp -r models /usr/local/share/linux_hello/
-install -m755 contrib/openrc/linux_hello /etc/init.d/ && rc-service linux_hello start
-LINUX_HELLO_MODELS=/usr/local/share/linux_hello/models linux_hello enroll cole
+sudo contrib/install.sh      # installs, enrolls $SUDO_USER, enables face login for sudo and sudo -i
+sudo contrib/uninstall.sh    # undo (add --purge to delete the face store)
 ```
 
-Then add this line to `/etc/pam.d/sudo` **above** `auth substack system-auth`, and keep a root
-shell open while testing:
-
-```
-auth  sufficient  pam_linux_hello.so
-```
-
-`sufficient` means a match skips the password; every other result is ignored and the normal
-password prompt runs. The module returns `PAM_IGNORE` immediately if the daemon is not running,
-and `PAM_AUTH_ERR` for a wrong, spoofed or missing face. Module options: `socket=PATH`
-(default `/run/linux_hello.sock`), `timeout=SECONDS` (default 10).
+Details, flow and caveats: [docs/sudo.md](docs/sudo.md). Face login is skipped for SSH sessions
+(`SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST`), because the camera sees whoever sits at the laptop.
 
 ## Measured on the P16 Gen 3
 
