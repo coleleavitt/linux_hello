@@ -60,16 +60,18 @@ fn main() -> Result<()> {
     let (mut kept, mut seen) = (0usize, 0usize);
     while kept < wanted && start.elapsed() < Duration::from_secs(seconds) {
         let pair = camera.capture_pair()?;
-        let analysis = pipeline.analyze(&pair)?;
+        // The largest face (analyze returns the faces largest first).
+        let analysis = pipeline.analyze(&pair)?.into_iter().next();
         seen += 1;
-        if let Some(face) = &analysis.face {
-            camera.expose_on(face.bbox);
+        if let Some(a) = &analysis {
+            camera.expose_on(a.face.bbox);
         }
-        let (Some(face), Some(lighting), true) = (&analysis.face, analysis.lighting, analysis.print.is_some()) else {
-            print!(
-                "\r{kept}/{wanted} ({seen} pairs, skipped: {})",
-                analysis.problem.map_or("weak lighting", |p| p.as_str())
-            );
+        let Some((face, lighting)) = analysis.as_ref().and_then(|a| match (a.lighting, a.print.is_some()) {
+            (Some(l), true) => Some((&a.face, l)),
+            _ => None,
+        }) else {
+            let reason = analysis.as_ref().map_or("no_face", |a| a.problem.map_or("weak lighting", |p| p.as_str()));
+            print!("\r{kept}/{wanted} ({seen} pairs, skipped: {reason})");
             let _ = std::io::stdout().flush();
             continue;
         };

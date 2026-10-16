@@ -88,7 +88,11 @@ fn prints(tools: &mut Tools, dir: &Path) -> Result<Vec<(String, String, Embeddin
         // Timestamps far apart, so that the ambient warp never links two unrelated frames (F13).
         let at = Duration::from_secs(10 * i as u64 + 10);
         let pair = IrPair { lit, ambient, lit_at: at, ambient_at: at - Duration::from_millis(67) };
-        let analysis = tools.pipeline.analyze(&pair)?;
+        // The largest face (analyze returns the faces largest first).
+        let Some(analysis) = tools.pipeline.analyze(&pair)?.into_iter().next() else {
+            println!("{name}: no face");
+            continue;
+        };
         let status = analysis.status();
         match (analysis.print, status) {
             (Some(print), Some(LightingStatus::Good)) => out.push((name.clone(), kind.to_string(), print)),
