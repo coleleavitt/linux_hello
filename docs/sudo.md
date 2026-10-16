@@ -86,6 +86,10 @@ echo 'LINUX_HELLO_ARGS="--enroll-on-failure"' > /etc/conf.d/linux_hello
 rc-service linux_hello restart
 ```
 
+Other daemon options go in the same variable, e.g. `LINUX_HELLO_ARGS="--enroll-on-failure --rotate 180"`
+for a camera mounted upside down (`--rotate 0|90|180|270`, degrees counter-clockwise, applied to
+the IR and RGB frames before detection; the same option works for `enroll`, `auth` and `watch`).
+
 The PAM configuration stays as installed; no extra line is needed:
 
 ```

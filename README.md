@@ -71,7 +71,8 @@ linux_hello camera               # saves one pair to /tmp/linux_hello_{lit,ambie
 
 Flags: `--device` (IR, default `/dev/video2`), `--ir-metadata` (default `/dev/video3`),
 `--no-ir-metadata` (tell lit frames by brightness), `--liveness-device` (default `/dev/video0`),
-`--no-liveness` (no RGB veto; the lighting status still votes), `--store`.
+`--no-liveness` (no RGB veto; the lighting status still votes), `--rotate 0|90|180|270` (turn the
+frames of a sideways or upside-down camera upright, counter-clockwise), `--store`.
 The face store is `/var/lib/linux_hello/faces.json` as root, `~/.local/share/linux_hello/faces.json`
 otherwise; it is written atomically with mode 0600.
 

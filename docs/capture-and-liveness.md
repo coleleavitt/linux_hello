@@ -82,6 +82,16 @@ saturated after an abnormal start (L7) are rejected by the F44 gates until expos
 `examples/ir_exposure [--frames N] [x1,y1,x2,y2 | full ...]` prints the per-frame brightness
 from stream start and after each region change.
 
+**Rotation (F10, F63).** `--rotate 0|90|180|270` (global option, so also
+`daemon … --rotate 180` through `LINUX_HELLO_ARGS`) turns every IR and RGB frame counter-clockwise
+by that angle right after capture (`Camera::rotate`), before the lit/ambient pairing and detection
+see it; the pairing is by sequence number and timestamp and does not change. The exposure region is
+mapped back to sensor coordinates (`Rotation::to_sensor`). Windows rotates by the camera's mount
+angle from its ACPI `_PLD` (or the `OrientationCW` registry override), not by the live display
+orientation (F63); linux_hello has no automatic source either: this ThinkPad has no IIO
+accelerometer (`/sys/bus/iio` is absent) and no iio-sensor-proxy, so the angle is the option only.
+Default 0; the built-in camera of this laptop needs none.
+
 ### 2. Frame gates (F45, F46)
 
 The face (largest SCRFD detection) is found on the lit frame. With the Windows Hello models, the

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::camera;
+use crate::camera::{self, Rotation};
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::pipeline::Analysis;
@@ -49,6 +49,8 @@ pub struct CameraSetup {
     pub ir_metadata: Option<String>,
     /// RGB camera for the liveness models (they only work on visible light)
     pub liveness_device: Option<String>,
+    /// Rotation that turns both cameras' frames upright (F10)
+    pub rotation: Rotation,
 }
 
 /// One IR frame pair and, if configured, the RGB frame captured right after it.
@@ -70,15 +72,18 @@ impl OpenCameras {
         // IR first: alone, its stream delivers the first frame in ≈ 90 ms. The RGB stream's
         // first frame takes ≈ 245 ms when it starts first and ≈ 50 ms after the IR stream
         // (docs/capture-and-liveness.md §1).
-        let ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
-        let liveness = setup.liveness_device.as_deref().map(Self::open_rgb).transpose()?.flatten();
+        let mut ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
+        ir.rotate(setup.rotation);
+        let liveness =
+            setup.liveness_device.as_deref().map(|d| Self::open_rgb(d, setup.rotation)).transpose()?.flatten();
         Ok(Self { ir, liveness, rgb_level: None })
     }
 
     /// The RGB camera after its first frame, or `None` if that frame did not come within
     /// [`RGB_FRAME_TIMEOUT`].
-    fn open_rgb(device: &str) -> Result<Option<Camera>> {
+    fn open_rgb(device: &str, rotation: Rotation) -> Result<Option<Camera>> {
         let mut camera = Camera::open_with(device, CameraType::Rgb, 0, LIVENESS_BUFFERS)?;
+        camera.rotate(rotation);
         camera.set_timeout(RGB_FRAME_TIMEOUT);
         without_rgb_on_timeout(camera.skip(1).map(|()| camera), "no first RGB frame")
     }
@@ -517,6 +522,7 @@ impl Authenticator {
         let existing = collected.len();
         let mut skipped: BTreeMap<&'static str, u32> = BTreeMap::new();
         let mut ir = IrCamera::open(&self.cameras.device, self.cameras.ir_metadata.as_deref())?;
+        ir.rotate(self.cameras.rotation);
         self.pipeline.set_enrolling(true);
         let start = Instant::now();
         while collected.len() - existing < wanted && start.elapsed() < ENROLL_TIMEOUT {

@@ -49,6 +49,58 @@ pub enum CameraType {
     Ir,
 }
 
+/// Rotation applied to every frame before detection, for a camera mounted sideways or upside
+/// down: the angle that turns the frame upright, counter-clockwise, as Windows'
+/// `RotateImageToAlignWithDisplayOrientation` rotates frames by the sensor mount angle (F10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rotation {
+    #[default]
+    None,
+    Ccw90,
+    Ccw180,
+    Ccw270,
+}
+
+impl Rotation {
+    /// `0`, `90`, `180` or `270` degrees counter-clockwise.
+    pub fn from_degrees(degrees: u32) -> Option<Self> {
+        match degrees {
+            0 => Some(Self::None),
+            90 => Some(Self::Ccw90),
+            180 => Some(Self::Ccw180),
+            270 => Some(Self::Ccw270),
+            _ => None,
+        }
+    }
+
+    fn apply<P: image::Pixel + 'static>(
+        self,
+        image: image::ImageBuffer<P, Vec<P::Subpixel>>,
+    ) -> image::ImageBuffer<P, Vec<P::Subpixel>> {
+        match self {
+            Self::None => image,
+            // `imageops::rotate90` turns clockwise.
+            Self::Ccw90 => image::imageops::rotate270(&image),
+            Self::Ccw180 => image::imageops::rotate180(&image),
+            Self::Ccw270 => image::imageops::rotate90(&image),
+        }
+    }
+
+    /// A rectangle `[x1, y1, x2, y2]` in the rotated frame mapped back to the sensor frame
+    /// (`width`, `height` are the sensor's).
+    fn to_sensor(self, rect: [f32; 4], width: f32, height: f32) -> [f32; 4] {
+        let [x1, y1, x2, y2] = rect;
+        match self {
+            Self::None => rect,
+            // Rotated (x, y) came from sensor (width − y, x).
+            Self::Ccw90 => [width - y2, x1, width - y1, x2],
+            Self::Ccw180 => [width - x2, height - y2, width - x1, height - y1],
+            // Rotated (x, y) came from sensor (y, height − x).
+            Self::Ccw270 => [y1, height - x2, y2, height - x1],
+        }
+    }
+}
+
 /// One grayscale frame with its V4L2 buffer sequence number and timestamp.
 struct GrayFrame {
     image: GrayImage,
@@ -59,10 +111,12 @@ struct GrayFrame {
 /// V4L2 camera wrapper
 pub struct Camera {
     stream: MmapStream<'static>,
+    /// Sensor frame size, before rotation
     width: u32,
     height: u32,
     fourcc: [u8; 4],
     camera_type: CameraType,
+    rotation: Rotation,
 }
 
 impl Camera {
@@ -92,9 +146,14 @@ impl Camera {
         debug!(width, height, fourcc = ?fourcc, "camera format");
 
         let stream = MmapStream::with_buffers(&device, Type::VideoCapture, buffers)?;
-        let mut camera = Self { stream, width, height, fourcc, camera_type };
+        let mut camera = Self { stream, width, height, fourcc, camera_type, rotation: Rotation::None };
         camera.skip(warmup)?;
         Ok(camera)
+    }
+
+    /// Rotate every frame from now on ([`Rotation`]).
+    pub fn rotate(&mut self, rotation: Rotation) {
+        self.rotation = rotation;
     }
 
     /// Read and drop `n` frames.
@@ -126,7 +185,7 @@ impl Camera {
             other => bail!("unsupported format: {:?}", other),
         };
         let time = Duration::from_secs(meta.timestamp.sec as u64) + Duration::from_micros(meta.timestamp.usec as u64);
-        Ok(GrayFrame { image, sequence: meta.sequence, time })
+        Ok(GrayFrame { image: self.rotation.apply(image), sequence: meta.sequence, time })
     }
 
     /// Capture a single frame as RGB
@@ -148,7 +207,8 @@ impl Camera {
             }
         }
 
-        RgbImage::from_raw(self.width, self.height, rgb).context("invalid RGB conversion")
+        let image = RgbImage::from_raw(self.width, self.height, rgb).context("invalid RGB conversion")?;
+        Ok(self.rotation.apply(image))
     }
 
     pub fn width(&self) -> u32 {
@@ -200,6 +260,11 @@ impl IrCamera {
     /// Open the IR camera and, if given, its metadata node (e.g. `/dev/video3`).
     pub fn open(device: &str, metadata: Option<&str>) -> Result<Self> {
         Self::open_with(device, metadata, WARMUP_FRAMES)
+    }
+
+    /// Rotate every frame from now on ([`Rotation`]); the exposure region is mapped back.
+    pub fn rotate(&mut self, rotation: Rotation) {
+        self.video.rotate(rotation);
     }
 
     /// Open with an explicit warm-up frame count.
@@ -262,13 +327,13 @@ impl IrCamera {
         Ok(IrFrame { image: frame.image, time: frame.time, lit })
     }
 
-    /// Meter auto-exposure on the face box `[x1, y1, x2, y2]` (lit-frame pixels) instead of the
-    /// whole frame, as Windows' `SensorController` does (Q1). No-op on cameras without the
-    /// controls; a camera that rejects the rectangle is left as it is.
+    /// Meter auto-exposure on the face box `[x1, y1, x2, y2]` (lit-frame pixels, as delivered,
+    /// i.e. after rotation) instead of the whole frame, as Windows' `SensorController` does (Q1).
+    /// No-op on cameras without the controls; a camera that rejects the rectangle is left as it is.
     pub fn expose_on(&mut self, bbox: [f32; 4]) {
         let Some(exposure) = self.exposure.as_mut() else { return };
         let (w, h) = (self.video.width as f32, self.video.height as f32);
-        let [x1, y1, x2, y2] = bbox;
+        let [x1, y1, x2, y2] = self.video.rotation.to_sensor(bbox, w, h);
         let (left, top) = (x1.clamp(0.0, w - 2.0).round(), y1.clamp(0.0, h - 2.0).round());
         let rect = v4l2_rect {
             left: left as i32,
@@ -521,6 +586,35 @@ mod tests {
 
     /// 41 `uvc_meta_buf` blocks recorded from /dev/video3 while /dev/video2 streamed: one
     /// header-only block, then 40 frames whose illumination flag alternates.
+    #[test]
+    fn rotation_turns_frames_counter_clockwise_and_maps_boxes_back() {
+        // 4×2 sensor frame, pixel value = x + 10·y.
+        let sensor = GrayImage::from_fn(4, 2, |x, y| image::Luma([(x + 10 * y) as u8]));
+        let ccw90 = Rotation::Ccw90.apply(sensor.clone());
+        assert_eq!(ccw90.dimensions(), (2, 4));
+        // The sensor's top-right pixel (3, 0) ends up top-left.
+        assert_eq!(ccw90.get_pixel(0, 0).0[0], 3);
+        assert_eq!(ccw90.get_pixel(1, 3).0[0], 10);
+        let ccw270 = Rotation::Ccw270.apply(sensor.clone());
+        assert_eq!(ccw270.get_pixel(0, 0).0[0], 10);
+        assert_eq!(ccw270.get_pixel(1, 3).0[0], 3);
+        assert_eq!(Rotation::Ccw180.apply(sensor).get_pixel(0, 0).0[0], 13);
+
+        // A box around one rotated pixel maps back onto that sensor pixel.
+        for rotation in [Rotation::None, Rotation::Ccw90, Rotation::Ccw180, Rotation::Ccw270] {
+            let (w, h) = (640.0, 360.0);
+            let rotated =
+                rotation.apply(GrayImage::from_fn(640, 360, |x, y| image::Luma([((x * 7 + y * 13) % 251) as u8])));
+            for (rx, ry) in [(0, 0), (5, 100), (rotated.width() - 1, rotated.height() - 1)] {
+                let [x1, y1, x2, y2] =
+                    rotation.to_sensor([rx as f32, ry as f32, rx as f32 + 1.0, ry as f32 + 1.0], w, h);
+                assert_eq!((x2 - x1, y2 - y1), (1.0, 1.0), "{rotation:?}");
+                let expected = ((x1 as u32 * 7 + y1 as u32 * 13) % 251) as u8;
+                assert_eq!(rotated.get_pixel(rx, ry).0[0], expected, "{rotation:?} ({rx}, {ry})");
+            }
+        }
+    }
+
     #[test]
     fn parses_recorded_uvcm_metadata() {
         let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/ir_meta_uvcm.bin")).unwrap();
