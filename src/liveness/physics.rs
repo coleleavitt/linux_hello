@@ -6,14 +6,14 @@
 //! frames, and none has one yet (`VETO_THRESHOLDS`).
 
 use anyhow::Result;
-use image::GrayImage;
+use image::{GrayImage, RgbImage};
 
-use crate::liveness::check::{Check, Frame};
+use crate::liveness::check::{Check, Frame, Observed};
 use crate::{FaceCheck, Vote};
 
 /// The checks, in the order they are logged.
 pub fn all() -> Vec<Box<dyn Check>> {
-    vec![Box::new(Glint), Box::new(Shape)]
+    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker)]
 }
 
 /// Score every check on every face of `check` that has a print, record the scores in
@@ -212,6 +212,110 @@ impl Check for Shape {
     }
 }
 
+/// Flicker fingerprint: a lamp on mains flickers at 100/120 Hz and a screen refreshes at
+/// 60–120 Hz; a rolling-shutter camera turns either into bands whose phase drifts from frame
+/// to frame, so the mean brightness of a region wanders over the pairs of a session. A face
+/// and the wall behind it are lit by the same lamps and wander together; a screen held up as
+/// the face carries its own refresh pattern, and a print its own only if it is lit by another
+/// lamp than the background. Score = over the ambient IR frames and the RGB frames of the
+/// face's track, the standard deviation of the difference between the face region's and the
+/// background's relative change from one pair to the next (the larger of the two frames'
+/// values); needs [`FLICKER_PAIRS`] pairs and an ambient frame that is not blank.
+pub struct Flicker;
+
+/// Pairs the series needs (three changes).
+pub const FLICKER_PAIRS: usize = 4;
+/// The background is the frame outside the face box grown by this fraction per side.
+const BACKGROUND_MARGIN: f32 = 0.5;
+/// Every n-th pixel in both directions is read for the region means.
+const REGION_STEP: u32 = 4;
+
+/// Mean over the face box and over the background of an image of `width` × `height` read
+/// through `at`; the background mean is `None` when the grown box covers the frame.
+fn regions(width: u32, height: u32, bbox: &[f32; 4], at: impl Fn(u32, u32) -> f32) -> (f32, Option<f32>) {
+    let [x1, y1, x2, y2] = *bbox;
+    let (w, h) = (x2 - x1, y2 - y1);
+    let clamp = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
+    let face = [clamp(x1, width), clamp(y1, height), clamp(x2, width), clamp(y2, height)];
+    let grown = [
+        clamp(x1 - BACKGROUND_MARGIN * w, width),
+        clamp(y1 - BACKGROUND_MARGIN * h, height),
+        clamp(x2 + BACKGROUND_MARGIN * w, width),
+        clamp(y2 + BACKGROUND_MARGIN * h, height),
+    ];
+    let inside = |r: &[u32; 4], x, y| x >= r[0] && x < r[2] && y >= r[1] && y < r[3];
+    let (mut face_sum, mut face_n, mut back_sum, mut back_n) = (0.0, 0u32, 0.0, 0u32);
+    for y in (0..height).step_by(REGION_STEP as usize) {
+        for x in (0..width).step_by(REGION_STEP as usize) {
+            if inside(&face, x, y) {
+                face_sum += at(x, y);
+                face_n += 1;
+            } else if !inside(&grown, x, y) {
+                back_sum += at(x, y);
+                back_n += 1;
+            }
+        }
+    }
+    (face_sum / face_n.max(1) as f32, (back_n > 0).then(|| back_sum / back_n as f32))
+}
+
+/// Luminance of an RGB pixel (Rec. 601).
+fn luma(rgb: &RgbImage, x: u32, y: u32) -> f32 {
+    let [r, g, b] = rgb.get_pixel(x, y).0;
+    0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+}
+
+/// Face and background means of the ambient frame and of the RGB frame of one pair.
+fn pair_regions(o: &Observed, face: usize) -> (Option<(f32, f32)>, Option<(f32, f32)>) {
+    let f = &o.check.faces[face];
+    let ir = o.capture.pair.ambient_image().and_then(|a| {
+        let (face, back) = regions(a.width(), a.height(), &f.analysis.face.bbox, |x, y| a.get_pixel(x, y).0[0] as f32);
+        Some((face, back?))
+    });
+    let rgb = o.capture.rgb.as_ref().zip(f.rgb_face.as_ref()).and_then(|(image, face)| {
+        let (face, back) = regions(image.width(), image.height(), &face.bbox, |x, y| luma(image, x, y));
+        Some((face, back?))
+    });
+    (ir, rgb)
+}
+
+/// Standard deviation of (face relative change − background relative change) over consecutive
+/// samples; `None` with fewer than [`FLICKER_PAIRS`] samples or a region reading 0.
+fn mismatch(series: &[(f32, f32)]) -> Option<f32> {
+    if series.len() < FLICKER_PAIRS || series.iter().any(|(f, b)| *f <= 0.0 || *b <= 0.0) {
+        return None;
+    }
+    let changes: Vec<f32> = series.windows(2).map(|w| (w[1].0 / w[0].0 - 1.0) - (w[1].1 / w[0].1 - 1.0)).collect();
+    let mean = changes.iter().sum::<f32>() / changes.len() as f32;
+    Some((changes.iter().map(|c| (c - mean) * (c - mean)).sum::<f32>() / changes.len() as f32).sqrt())
+}
+
+impl Check for Flicker {
+    fn name(&self) -> &str {
+        "flicker"
+    }
+
+    fn higher_is_live(&self) -> bool {
+        false
+    }
+
+    fn score(&mut self, frame: &Frame, face: usize) -> Result<Option<f32>> {
+        let mut pairs: Vec<(&Observed, usize)> = frame.history(face).collect();
+        pairs.reverse();
+        pairs.push((frame.current, face));
+        let (mut ir, mut rgb) = (Vec::new(), Vec::new());
+        for (o, i) in pairs {
+            let (a, b) = pair_regions(o, i);
+            ir.extend(a);
+            rgb.extend(b);
+        }
+        Ok(match (mismatch(&ir), mismatch(&rgb)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +361,24 @@ mod tests {
             (z.iter().map(|z| z * z).sum::<f32>() / 9.0).sqrt()
         };
         assert!(z(&face) < z(&flat), "{} < {}", z(&face), z(&flat));
+    }
+
+    #[test]
+    fn flicker_mismatch_is_the_face_wandering_apart_from_the_background() {
+        // Face and background flicker together: no mismatch.
+        let together: Vec<(f32, f32)> = [1.0, 1.1, 0.9, 1.05, 1.0].iter().map(|&k| (50.0 * k, 10.0 * k)).collect();
+        assert!(mismatch(&together).unwrap() < 1e-6);
+        // The face carries its own pattern.
+        let apart = [(50.0, 10.0), (55.0, 10.0), (45.0, 10.0), (52.0, 10.0)];
+        assert!(mismatch(&apart).unwrap() > 0.1);
+        assert_eq!(mismatch(&apart[..3]), None);
+        assert_eq!(mismatch(&[(0.0, 10.0), (1.0, 10.0), (1.0, 10.0), (1.0, 10.0)]), None);
+        // Region means: a 10×10 face box at (20, 20) in a 100×100 frame, background outside the 20×20 grown box.
+        let image = GrayImage::from_fn(100, 100, |x, y| {
+            image::Luma([if (20..30).contains(&x) && (20..30).contains(&y) { 200 } else { 20 }])
+        });
+        let (face, back) = regions(100, 100, &[20.0, 20.0, 30.0, 30.0], |x, y| image.get_pixel(x, y).0[0] as f32);
+        assert_eq!((face, back), (200.0, Some(20.0)));
+        assert_eq!(regions(100, 100, &[-100.0, -100.0, 200.0, 200.0], |_, _| 1.0).1, None);
     }
 }

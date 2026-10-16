@@ -106,3 +106,38 @@ spread across people, distances and cameras is unmeasured: the table is one pers
 
 **Role.** Logged; no threshold (a 99 % genuine-frame threshold would be ≈ 3; whether prints sit
 above it is for the attack set).
+
+## 3. Flicker fingerprint (`flicker`)
+
+**Physics.** A lamp on mains flickers at 100/120 Hz and a screen refreshes at 60–120 Hz. A
+rolling-shutter camera turns either into bands whose phase drifts from frame to frame, so the
+mean brightness of a region wanders over the pairs of a session (in `lh_view` the ambient IR
+frames wandered by 4.6 % from pair to pair, face and background together, correlation 0.98).
+A face and the wall behind it are lit by the same lamps and wander together. A screen held up as
+the face carries its own refresh pattern; a print carries its own only when it is lit by another
+lamp than the background (a phone torch).
+
+**Measure.** Over the ambient IR frames and the RGB frames of the face's track (the session's
+pairs, at most 16): the mean of the face box (SCRFD's IR box; the colour face's box in RGB) and
+of the background (outside the box grown by 50 % per side), every 4th pixel in both directions;
+from pair to pair the relative change of the face minus the relative change of the background;
+score = the standard deviation of those differences, the larger of the two frames' values. It
+needs four pairs (three changes) and an ambient frame that is not blank, so in a dark room it
+runs on the RGB frames alone (and reads nothing when the RGB frame is dark).
+
+**Genuine** (running value as the session grows; the first three pairs read nothing):
+
+| Set | frames | min | p10 | p50 | p90 | max | session max (min / median) |
+|---|---|---|---|---|---|---|---|
+| lh_lock | 47 | 0.003 | 0.004 | 0.008 | 0.017 | 0.019 | 0.006 / 0.011 |
+| lh_now | 43 | 0.002 | 0.003 | 0.009 | 0.023 | 0.027 | 0.007 / 0.015 |
+| lh_view | 22 | 0.009 | 0.010 | 0.017 | 0.022 | 0.022 | 0.013 / 0.022 |
+| validation_frames (four frames from different moments, not a session) | 1 | 0.097 | | | | | |
+
+The head moving changes what the face box holds, which is the 0.02 of the moving sessions; a
+still sitter reads 0.003–0.01. The screen case is the one this measures; a print under the
+room's lamps should read as a face does.
+
+**Attack set.** Not recorded yet.
+
+**Role.** Logged; no threshold (genuine 99th percentile ≈ 0.025 on three recordings).
