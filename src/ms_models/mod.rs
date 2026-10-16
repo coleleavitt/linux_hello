@@ -38,12 +38,41 @@ fn load_session(path: &Path) -> Result<Session> {
         .with_context(|| format!("loading {} (see docs/winhello-models/)", path.display()))
 }
 
-/// The converted Windows Hello models that linux_hello runs: the anti-spoofing nets and the
-/// occlusion classifier. They come from `scripts/extract_windows_hello_models.py` and the
-/// converters in `tools/winhello_models`.
+/// Frontal limits of `FaceOrientationResult` (F59).
+pub const YAW_LIMIT: f32 = 20.0;
+pub const PITCH_LIMIT: f32 = 25.0;
+
+/// Windows' `FaceOrientationResult`: angles in degrees and the four pose flags at +12..15.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceOrientation {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+    /// yaw > 20, yaw < −20, pitch > 25, pitch < −25
+    pub flags: [bool; 4],
+    /// Nose margin inside the eye/mouth quad (+16); only the legacy estimator sets it
+    pub frontal_margin: f32,
+}
+
+impl FaceOrientation {
+    fn new(pitch: f32, yaw: f32, roll: f32) -> Self {
+        let flags = [yaw > YAW_LIMIT, yaw < -YAW_LIMIT, pitch > PITCH_LIMIT, pitch < -PITCH_LIMIT];
+        Self { pitch, yaw, roll, flags, frontal_margin: 0.0 }
+    }
+
+    /// `IsFrontal` 0x18001a404: no flag set.
+    pub fn is_frontal(&self) -> bool {
+        !self.flags.contains(&true)
+    }
+}
+
+/// The converted Windows Hello models that linux_hello runs: the anti-spoofing nets, the
+/// occlusion classifier and the IR Retina detector for the frontal check. They come from
+/// `scripts/extract_windows_hello_models.py` and the converters in `tools/winhello_models`.
 pub struct WindowsHelloModels {
     pub liveness: MsIrLiveness,
     pub occlusion: OcclusionDetector,
+    pub retina: MsRetinaDetector,
 }
 
 impl WindowsHelloModels {
@@ -53,6 +82,7 @@ impl WindowsHelloModels {
         Ok(Self {
             liveness: MsIrLiveness::load(dir.join("convnet"))?,
             occlusion: OcclusionDetector::load(dir.join("occlusion/MODEL_FILES_120.onnx"))?,
+            retina: MsRetinaDetector::load(dir.join("ldmf/ort/MODEL_FILES_110.ort"), RetinaModelType::Standard)?,
         })
     }
 }

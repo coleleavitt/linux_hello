@@ -16,6 +16,7 @@ use ort::value::TensorRef;
 use std::path::Path;
 use tracing::debug;
 
+use super::FaceOrientation;
 use crate::Face;
 
 /// Model configuration by type.
@@ -57,9 +58,9 @@ pub struct MsRetinaFace {
     /// 6-DoF pose (rotation vector + translation), only for Standard model.
     /// De-normalized from the model output.
     pub dofs: Option<[f32; 6]>,
-    /// Decoded rotation angles (pitch, yaw, roll) in degrees.
-    /// Extracted from dofs using the img2pose-style decode.
-    pub rotation: Option<[f32; 3]>,
+    /// Head pose as `RetinaEngine::ComputeOrientation` (0x18003d6f0) reports it, only for the
+    /// Standard model. Windows' frontal check (F46, F59).
+    pub orientation: Option<FaceOrientation>,
 }
 
 // Configuration constants from RetinaEngine::Initialize
@@ -189,13 +190,13 @@ impl MsRetinaDetector {
                         }
 
                         // Decode 6-DoF pose if available
-                        let (dofs, rotation) = if let Some(dofs_raw) = &dofs_data {
+                        let (dofs, orientation) = if let Some(dofs_raw) = &dofs_data {
                             let mut d = [0.0f32; 6];
                             for i in 0..6 {
                                 d[i] = dofs_raw[p * 6 + i] * POSE_STD[i] + POSE_MEAN[i];
                             }
-                            let rot = decode_rotation(&d[..3], ax, ay, w as f32, h as f32);
-                            (Some(d), Some(rot))
+                            let [pitch, yaw, roll] = decode_rotation(&d[..3], ax, ay, w as f32, h as f32);
+                            (Some(d), Some(FaceOrientation::new(pitch, yaw, roll)))
                         } else {
                             (None, None)
                         };
@@ -207,7 +208,7 @@ impl MsRetinaDetector {
                                 landmarks: lms,
                             },
                             dofs,
-                            rotation,
+                            orientation,
                         });
                     }
                 }
@@ -245,6 +246,20 @@ impl MsRetinaDetector {
         Ok(kept)
     }
 
+    /// The Retina face that best overlaps `face` (IoU ≥ 0.5), e.g. the SCRFD detection of the same
+    /// frame, with its IoU.
+    pub fn matching(&mut self, image: &GrayImage, face: &Face) -> Result<Option<(MsRetinaFace, f32)>> {
+        Ok(self
+            .detect(image)?
+            .into_iter()
+            .map(|f| {
+                let iou = iou(&f.face.bbox, &face.bbox);
+                (f, iou)
+            })
+            .filter(|(_, iou)| *iou >= 0.5)
+            .max_by(|a, b| a.1.total_cmp(&b.1)))
+    }
+
     /// Convert to standard Face structs (discarding pose info).
     pub fn detect_faces(&mut self, image: &GrayImage) -> Result<Vec<Face>> {
         Ok(self.detect(image)?.into_iter().map(|f| f.face).collect())
@@ -265,10 +280,16 @@ fn boxes_intersect(a: &[f32; 4], b: &[f32; 4]) -> bool {
     a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
 }
 
-/// Decode rotation vector to pitch/yaw/roll angles.
-///
-/// Uses img2pose-style decode with camera matrices K_box and K_img.
-/// Returns (pitch, yaw, roll) in degrees.
+fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+    let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    let inter = w * h;
+    inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+}
+
+/// `DecodeRotationVec` 0x18001a8a8: img2pose-style decode with camera matrices K_box and K_img.
+/// Returns (pitch, yaw, roll) in degrees, the order in which `ProcessResultCandidates` stores them
+/// at candidate +0x38/+0x3C/+0x40 and `ComputeOrientation` reads them (pitch flags ±25°, yaw ±20°).
 fn decode_rotation(rv: &[f32], ax: f32, ay: f32, w: f32, h: f32) -> [f32; 3] {
     use std::f32::consts::PI;
 

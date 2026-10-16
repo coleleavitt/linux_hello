@@ -51,6 +51,8 @@ fn main() -> Result<()> {
         };
 
         let ms_faces = retina.detect(&lit)?;
+        let retina_frontal =
+            retina.matching(&lit, &face)?.and_then(|(f, _)| f.orientation).is_some_and(|o| o.is_frontal());
         let (head, frontal) = pose.check(&lit, &face)?;
         let occ = occlusion.check(&lit, &face)?;
         let rgb_face = match &rgb {
@@ -69,8 +71,12 @@ fn main() -> Result<()> {
                 "frame": name,
                 "face": { "bbox": face.bbox, "landmarks": face.landmarks, "score": face.score },
                 "retina": ms_faces.iter().map(|f| serde_json::json!({
-                    "bbox": f.face.bbox, "landmarks": f.face.landmarks, "score": f.face.score, "rotation": f.rotation,
+                    "bbox": f.face.bbox, "landmarks": f.face.landmarks, "score": f.face.score,
+                    "pose": f.orientation.map(|o| serde_json::json!({
+                        "pitch": o.pitch, "yaw": o.yaw, "roll": o.roll, "frontal": o.is_frontal(),
+                    })),
                 })).collect::<Vec<_>>(),
+                "frontal": retina_frontal,
                 "pose": { "pitch": head.pitch, "yaw": head.yaw, "frontal": frontal },
                 "occlusion": { "probs": occ.probs, "occluded": occ.is_occluded },
                 "liveness": {

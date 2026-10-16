@@ -39,7 +39,7 @@ pub use tracker::{FaceTracker, Track, TrackState};
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{OcclusionDetector, OcclusionType, OcclusionResult};
 pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
-pub use ms_models::{HeadPose, PoseChecker, PoseConfig, WindowsHelloModels};
+pub use ms_models::{FaceOrientation, HeadPose, PoseChecker, PoseConfig, WindowsHelloModels};
 
 use ort::environment::Environment;
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,9 @@ pub enum FaceProblem {
     Occluded,
     /// Face closer to a frame edge than a fifth of the eye distance (F46)
     Edge,
+    /// Head turned beyond |yaw| 20° or |pitch| 25°, or no pose from the Windows Hello IR detector
+    /// (F46, F59)
+    NotFrontal,
 }
 
 impl FaceProblem {
@@ -143,6 +146,7 @@ impl FaceProblem {
             FaceProblem::TooFar => "too_far",
             FaceProblem::Edge => "edge",
             FaceProblem::Occluded => "occluded",
+            FaceProblem::NotFrontal => "not_frontal",
         }
     }
 }

@@ -25,9 +25,11 @@ install -m644 "$repo/models/antispoof/facenox_antispoof.onnx" "$repo/models/anti
 # Converted Windows Hello models (git-ignored, docs/winhello-models/): used when present.
 ms="$repo/models/windows_hello/converted"
 if [ -d "$ms" ]; then
-    install -d -m755 "$share/models/windows_hello/converted/convnet" "$share/models/windows_hello/converted/occlusion"
+    install -d -m755 "$share/models/windows_hello/converted/convnet" "$share/models/windows_hello/converted/occlusion" \
+        "$share/models/windows_hello/converted/ldmf/ort"
     install -m644 "$ms"/convnet/MODEL_FILES_12[1-5].onnx "$share/models/windows_hello/converted/convnet/"
     install -m644 "$ms/occlusion/MODEL_FILES_120.onnx" "$share/models/windows_hello/converted/occlusion/"
+    install -m644 "$ms/ldmf/ort/MODEL_FILES_110.ort" "$share/models/windows_hello/converted/ldmf/ort/"
 fi
 install -m755 "$repo/contrib/openrc/linux_hello" /etc/init.d/linux_hello
 
