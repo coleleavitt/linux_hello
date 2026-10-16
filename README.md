@@ -76,7 +76,8 @@ linux_hello camera               # saves one pair to /tmp/linux_hello_{lit,ambie
 
 Flags: `--device` (IR, default `/dev/video2`), `--ir-metadata` (default `/dev/video3`),
 `--no-ir-metadata` (tell lit frames by brightness), `--liveness-device` (default `/dev/video0`),
-`--no-liveness` (no RGB veto; the lighting status still votes), `--store`.
+`--no-liveness` (no RGB veto; the lighting status still votes), `--rotate 0|90|180|270` (turn the
+frames of a sideways or upside-down camera upright, counter-clockwise), `--store`.
 The face store is `/var/lib/linux_hello/faces.json` as root, `~/.local/share/linux_hello/faces.json`
 otherwise; it is written atomically with mode 0600.
 
@@ -139,7 +140,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   print in the template × 16 frame pairs) comes from a calibration table built on grayscale LFW
   photos ([docs/calibration.md](docs/calibration.md)), not yet on IR captures.
 - The RGB camera underexposes 2–3 frames about every 5 s; `OpenCameras` skips frames much darker
-  than the recent average, and a frame with no face in the RGB image counts as a veto.
+  than the recent average, and a frame with no face in the RGB image counts as a veto. An RGB
+  camera that delivers no frame for 1 s is dropped for the session (the colour net is skipped;
+  without the Windows Hello models the open RGB models then veto every frame).
 - Templates are stored unencrypted (root-only file) unless the store is sealed with the TPM
   (optional, see below).
 

@@ -14,8 +14,10 @@
 //! a token is remembered in this PAM transaction (`pam_set_data`). If the application then calls
 //! `pam_setcred` to establish or reinitialise credentials, which it does only after the whole
 //! auth stack succeeded (with the password, since the face failed), the module sends
-//! `ENROLL_ON_FAILURE <user> <token>` to the daemon. A face match or a later face check in the same
-//! transaction forgets the token. sudo calls `pam_setcred` by default (`Defaults pam_setcred`).
+//! `ENROLL_ON_FAILURE <user> <token>` to the daemon and, when the daemon added the print, tells the
+//! user so (PAM_TEXT_INFO "Face print added after password login"). A face match or a later face
+//! check in the same transaction forgets the token. sudo calls `pam_setcred` by default
+//! (`Defaults pam_setcred`).
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{BufRead, BufReader, Write};
@@ -188,6 +190,9 @@ fn report_password_success(pamh: *mut PamHandle, args: Args) {
     let Ok(stream) = UnixStream::connect(&args.socket) else { return };
     let reply = ask(stream, &format!("ENROLL_ON_FAILURE {user} {token}"), Duration::from_secs(5));
     log(pamh, &format!("pam_linux_hello: enroll-on-failure user={user} reply={reply:?}"));
+    if reply.starts_with("ADDED ") {
+        message(pamh, c"Face print added after password login");
+    }
 }
 
 /// Keep `"<user> <token>"` in the PAM handle until `pam_setcred`, or forget it (`None`).

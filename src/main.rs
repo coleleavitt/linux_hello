@@ -12,7 +12,7 @@ use linux_hello::authenticator::{describe, describe_skipped, ENROLL_PRINTS};
 use linux_hello::lighting::subtract_ambient;
 use linux_hello::{
     calibration, daemon, sysfs, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras,
-    Session, Verdict, WindowsHelloModels,
+    Rotation, Session, Verdict, WindowsHelloModels,
 };
 
 #[derive(Parser)]
@@ -44,6 +44,11 @@ struct Cli {
     /// Skip the RGB anti-spoofing veto (the IR lighting gate still applies)
     #[arg(long, global = true)]
     no_liveness: bool,
+
+    /// Turn the camera frames upright: degrees counter-clockwise (0, 90, 180, 270) for a camera
+    /// mounted sideways or upside down
+    #[arg(long, default_value = "0", value_parser = rotation, global = true)]
+    rotate: Rotation,
 
     /// Do not use the converted Windows Hello models (anti-spoofing vote, occlusion gate) even
     /// when `<models>/windows_hello/converted` exists
@@ -125,6 +130,7 @@ fn main() -> Result<()> {
         device: cli.device.clone(),
         ir_metadata: (!cli.no_ir_metadata).then(|| cli.ir_metadata.clone()),
         liveness_device: (!cli.no_liveness).then(|| cli.liveness_device.clone()),
+        rotation: cli.rotate,
     };
     // Fails closed: if the liveness models are wanted but do not load, nothing runs.
     let liveness = || -> Result<Vec<AntiSpoof>> {
@@ -297,6 +303,10 @@ fn save_capture(capture: &linux_hello::Capture, dir: &std::path::Path, prefix: &
         rgb.save(dir.join(format!("{prefix}_rgb.png")))?;
     }
     Ok(())
+}
+
+fn rotation(s: &str) -> Result<Rotation, String> {
+    s.parse().ok().and_then(Rotation::from_degrees).ok_or_else(|| "must be 0, 90, 180 or 270".to_string())
 }
 
 fn default_store() -> PathBuf {

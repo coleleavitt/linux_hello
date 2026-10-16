@@ -86,6 +86,10 @@ echo 'LINUX_HELLO_ARGS="--enroll-on-failure"' > /etc/conf.d/linux_hello
 rc-service linux_hello restart
 ```
 
+Other daemon options go in the same variable, e.g. `LINUX_HELLO_ARGS="--enroll-on-failure --rotate 180"`
+for a camera mounted upside down (`--rotate 0|90|180|270`, degrees counter-clockwise, applied to
+the IR and RGB frames before detection; the same option works for `enroll`, `auth` and `watch`).
+
 The PAM configuration stays as installed; no extra line is needed:
 
 ```
@@ -106,6 +110,8 @@ password, and a stub daemon):
 | Case | Daemon receives |
 |------|-----------------|
 | `NOMATCH … <token>`, password ok, `PAM_USER` changed to root, `pam_setcred(REINITIALIZE)` | `ENROLL_ON_FAILURE cole <token>` once |
+| `NOMATCH … <token>`, password ok, `pam_setcred(ESTABLISH)`, daemon answers `ADDED 0.432` | the same, and the conversation gets `PAM_TEXT_INFO` "Face print added after password login" (`scripts/pam_harness.py`) |
+| … daemon answers `REFUSED too_far 0.3` | the same, no message (syslog only) |
 | `MATCH`, `pam_setcred` | nothing |
 | `NOMATCH … <token>`, then a second face check `NOFACE`, password ok, `pam_setcred` | nothing |
 | `NOMATCH` without token, `pam_setcred` | nothing |
@@ -114,11 +120,16 @@ password, and a stub daemon):
 | `NOMATCH … <token>`, password wrong | auth fails, no `pam_setcred` |
 
 The real daemon, run as a normal user, refuses `ENROLL_ON_FAILURE` with `ERROR … from uid 1000:
-only root may add prints`. Not tested: a full sudo run as root with the camera.
+only root may add prints`. Not tested: a full sudo run as root with the camera, so whether sudo
+shows the "Face print added" line on the terminal at `pam_setcred` time is assumed from its
+conversation function, not seen. `scripts/pam_harness.py <module.so> <socket> 'reply|reply'`
+reproduces the libpam checks above without root or a camera.
 
 **Risk:** anyone who knows your password can add their face this way if it is already similar to
 yours (similarity ≥ 0.40), and then use sudo with their face. The daemon logs every
-`enroll-on-failure` result; `linux_hello enroll <user>` resets the template.
+`enroll-on-failure` result, and when a print is added the PAM module prints "Face print added
+after password login" right after the password, so an addition you did not expect is visible;
+`linux_hello enroll <user>` resets the template.
 
 ## Caveats
 

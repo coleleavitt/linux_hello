@@ -66,7 +66,14 @@ logs once (warn) and keeps whatever it has.
 the IR stream did not reproduce in 20 runs). The metadata node is read along with the warm-up
 frames so that it is in step with the video by the first pair. The first pair with its RGB frame
 is ready ≈ 0.54 s after opening (before: ≈ 1.6 s with RGB first and 16 warm-up frames; measured
-on 2026-10-16 with a scratch example, 8 runs each). 4 warm-up frames because the camera resumes
+on 2026-10-16 with a scratch example, 8 runs each). The wait for an RGB frame is bounded by
+`RGB_FRAME_TIMEOUT = 1 s` (4× the slowest first frame measured): the stall seen once early on
+would otherwise hang the unlock. After a timeout, at the first frame or later, the session goes on
+without the RGB camera (`warn` log): the colour net is skipped, as Windows skips a classifier
+whose input is missing (F25 status 6/7); the IR nets still vote. Without the Windows Hello models
+the open RGB models veto a frame with no RGB face, so there every frame then votes spoof
+(`NOTLIVE`, fail closed). The timeout is a `poll` timeout on the V4L2 stream (`Camera::set_timeout`);
+no stalled device was at hand, so only the error path is unit-tested. 4 warm-up frames because the camera resumes
 near its last exposure and converges by 1–2 % per lit frame: the first lit frame was 17–45 %
 off after 30–300 s idle, frame 4–5 is within ≈ 30 %, and after that it only drifts; a ±35 %
 brightness change moves a print's cosine similarity by < 0.015 and the cross-sitting match
@@ -74,6 +81,16 @@ score by < 0.02 (`examples/embed_dir` on brightness-scaled validation frames). F
 saturated after an abnormal start (L7) are rejected by the F44 gates until exposure comes down.
 `examples/ir_exposure [--frames N] [x1,y1,x2,y2 | full ...]` prints the per-frame brightness
 from stream start and after each region change.
+
+**Rotation (F10, F63).** `--rotate 0|90|180|270` (global option, so also
+`daemon … --rotate 180` through `LINUX_HELLO_ARGS`) turns every IR and RGB frame counter-clockwise
+by that angle right after capture (`Camera::rotate`), before the lit/ambient pairing and detection
+see it; the pairing is by sequence number and timestamp and does not change. The exposure region is
+mapped back to sensor coordinates (`Rotation::to_sensor`). Windows rotates by the camera's mount
+angle from its ACPI `_PLD` (or the `OrientationCW` registry override), not by the live display
+orientation (F63); linux_hello has no automatic source either: this ThinkPad has no IIO
+accelerometer (`/sys/bus/iio` is absent) and no iio-sensor-proxy, so the angle is the option only.
+Default 0; the built-in camera of this laptop needs none.
 
 ### 2. Frame gates (F45, F46)
 
@@ -404,8 +421,11 @@ print from a failed face attempt after the user signs in another way. Here:
      targets for unlocking (F27);
    - no other enrolled user matches it (estimated FAR < 1e-5, as a recognition).
 
-   It replies `ADDED 0.432` or `REFUSED no_pending | not_enrolled | too_far <s> | other_user <user> <s>`;
-   the PAM module only logs the reply.
+   It replies `ADDED 0.432` or `REFUSED no_pending | not_enrolled | too_far <s> | other_user <user> <s>`
+   and logs the result at info (`enroll-on-failure user=cole result=ADDED 0.432`); the PAM module logs
+   the reply and, after `ADDED`, tells the user from the same `pam_sm_setcred`
+   (`PAM_TEXT_INFO` "Face print added after password login"), so a print never appears in the
+   template without the user hearing of it. A refusal is only logged.
 
 New prints get `source: "on_failure"` and generation 3, so a later match against them never adds
 an augmented print. At most 5 per user, the oldest dropped first. They are matched like any other
