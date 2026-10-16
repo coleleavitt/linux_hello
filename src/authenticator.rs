@@ -102,6 +102,9 @@ impl OpenCameras {
 /// Frame pairs read per authentication before giving up. Windows stops after 48 frames or when
 /// its counter passes 16 (F25); one pair is two camera frames.
 pub const MAX_PAIRS: u32 = 16;
+/// Consecutive occluded frames that end an attempt still identifying the face (F46,
+/// `IdentifyAsGuest(3)`): a mask or a hand will not go away within the pair budget.
+pub const OCCLUDED_GIVE_UP: u32 = 4;
 
 /// One authentication: up to [`MAX_PAIRS`] frame pairs, once more after a re-attempt (F49). The
 /// largest face is tracked across pairs and each track gets its own [`Attempt`] (F37, F47), so the
@@ -115,6 +118,8 @@ pub struct Session {
     attempt: Attempt,
     /// What the tracked face did over the attempt's frames
     motion: FaceMotion,
+    /// Consecutive occluded frames of the track
+    occluded: u32,
     /// Pairs since the session, or the re-attempt, started
     pairs: u32,
     reattempted: bool,
@@ -137,9 +142,14 @@ impl Session {
             self.track = track;
             self.attempt = Attempt::default();
             self.motion = FaceMotion::default();
+            self.occluded = 0;
         }
         if let Some(face) = &check.analysis.face {
             self.motion.add(face, check.analysis.frame, check.analysis.lighting.map(|l| l.lit));
+        }
+        self.occluded = if check.analysis.problem == Some(FaceProblem::Occluded) { self.occluded + 1 } else { 0 };
+        if self.occluded >= OCCLUDED_GIVE_UP && !self.attempt.recognised() {
+            return Some(Verdict::NoFace { problem: FaceProblem::Occluded });
         }
         let verdict =
             self.attempt.add(check).or_else(|| (self.pairs >= MAX_PAIRS).then(|| self.attempt.give_up(&self.problems)));
@@ -665,6 +675,36 @@ mod tests {
         let last = dark.add(&rejected_at(shifted(160.0), FaceProblem::TooDark));
         assert_eq!(last, Some(Verdict::NoFace { problem: FaceProblem::TooDark }));
         assert!(!dark.reattempted());
+    }
+
+    #[test]
+    fn four_consecutive_occluded_frames_give_up_while_identifying() {
+        let occluded = || rejected(FaceProblem::Occluded);
+        let mut s = Session::default();
+        for _ in 1..OCCLUDED_GIVE_UP {
+            assert_eq!(s.add(&occluded()), None);
+        }
+        assert_eq!(s.add(&occluded()), Some(Verdict::NoFace { problem: FaceProblem::Occluded }));
+
+        // A clear frame in between starts the count over.
+        let mut broken = Session::default();
+        for _ in 1..OCCLUDED_GIVE_UP {
+            broken.add(&occluded());
+        }
+        assert_eq!(broken.add(&usable(Vote::Live, 0.3)), None);
+        for _ in 1..OCCLUDED_GIVE_UP {
+            assert_eq!(broken.add(&occluded()), None);
+        }
+
+        // Once recognised, occluded frames only run out the budget (no vote).
+        let mut recognised = Session::default();
+        for _ in 0..MIN_PRINTS {
+            recognised.add(&usable(Vote::Abstain, 0.9));
+        }
+        for _ in 0..OCCLUDED_GIVE_UP + 2 {
+            assert_eq!(recognised.add(&occluded()), None);
+        }
+        assert!(recognised.attempt().recognised());
     }
 
     #[test]

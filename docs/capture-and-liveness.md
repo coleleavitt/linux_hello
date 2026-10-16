@@ -262,7 +262,11 @@ whole session (twice, after a re-attempt, below).
    similarity>`; else ≥ 3 spoof votes → `NOTLIVE`.
 3. **Give up** after 16 frame pairs (Windows: 48 frames or a counter > 16; one pair is two frames):
    the current track recognised → `NOTLIVE`; ≥ 4 prints but no match → `NOMATCH <best>`; fewer
-   than 4 prints → `NOFACE <most frequent rejection reason over the session>`.
+   than 4 prints → `NOFACE <most frequent rejection reason over the session>`. Earlier, while the
+   track is not yet recognised, 4 consecutive occluded frames (§2) end the session with `NOFACE
+   occluded` (F46, `IdentifyAsGuest(3)`): a mask or a hand will not go away within the budget, so
+   the password prompt comes ≈ 1.6 s sooner. A clear frame in between starts the count over; a new
+   track starts it over too.
 
 The earliest possible `MATCH` is therefore at the 5th pair (4 prints, the 4th frame votes live,
 the 5th too), where voting from the first pair allowed a match at the 2nd pair.
