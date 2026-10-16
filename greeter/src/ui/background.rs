@@ -51,11 +51,19 @@ mod imp {
             snapshot.append_color(&gtk::gdk::RGBA::new(0.09, 0.11, 0.16, 1.0), &bounds);
             if self.picture.paintable().is_some() {
                 if amount > 0.0 {
-                    snapshot.push_blur(40.0 * amount);
-                }
-                widget.snapshot_child(&self.picture, snapshot);
-                if amount > 0.0 {
+                    // Blur samples past the edges, so draw the image enlarged by the radius
+                    // on every side, clipped to the screen: no dark border.
+                    let radius = 40.0 * amount;
+                    snapshot.push_clip(&bounds);
+                    snapshot.push_blur(radius);
+                    let (w, h) = (f64::from(widget.width()), f64::from(widget.height()));
+                    snapshot.translate(&gtk::graphene::Point::new(-radius as f32, -radius as f32));
+                    snapshot.scale(((w + 2.0 * radius) / w) as f32, ((h + 2.0 * radius) / h) as f32);
+                    widget.snapshot_child(&self.picture, snapshot);
                     snapshot.pop();
+                    snapshot.pop();
+                } else {
+                    widget.snapshot_child(&self.picture, snapshot);
                 }
             }
             if amount > 0.0 {
