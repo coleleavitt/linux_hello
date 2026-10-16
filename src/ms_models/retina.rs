@@ -96,12 +96,7 @@ impl MsRetinaDetector {
 
         let session = super::load_session(model_path)?;
 
-        Ok(Self {
-            session,
-            model_type,
-            conf_threshold: CONF_THRESHOLD,
-            max_faces: 10,
-        })
+        Ok(Self { session, model_type, conf_threshold: CONF_THRESHOLD, max_faces: 10 })
     }
 
     /// Set detection threshold (default: 0.925).
@@ -202,11 +197,7 @@ impl MsRetinaDetector {
                         };
 
                         candidates.push(MsRetinaFace {
-                            face: Face {
-                                bbox: [x1, y1, x2, y2],
-                                score,
-                                landmarks: lms,
-                            },
+                            face: Face { bbox: [x1, y1, x2, y2], score, landmarks: lms },
                             dofs,
                             orientation,
                         });
@@ -236,9 +227,7 @@ impl MsRetinaDetector {
         let kept: Vec<MsRetinaFace> = kept
             .into_iter()
             .filter(|f| {
-                f.face.landmarks.iter().all(|lm| {
-                    lm[0] >= 0.0 && lm[0] < w as f32 && lm[1] >= 0.0 && lm[1] < h as f32
-                })
+                f.face.landmarks.iter().all(|lm| lm[0] >= 0.0 && lm[0] < w as f32 && lm[1] >= 0.0 && lm[1] < h as f32)
             })
             .collect();
 
@@ -267,11 +256,7 @@ impl MsRetinaDetector {
 
     #[allow(dead_code)]
     fn num_priors(&self, h: usize, w: usize) -> usize {
-        self.model_type
-            .strides()
-            .iter()
-            .map(|&s| 2 * h.div_ceil(s) * w.div_ceil(s))
-            .sum()
+        self.model_type.strides().iter().map(|&s| 2 * h.div_ceil(s) * w.div_ceil(s)).sum()
     }
 }
 
@@ -300,32 +285,16 @@ fn decode_rotation(rv: &[f32], ax: f32, ay: f32, w: f32, h: f32) -> [f32; 3] {
 
     // Build rotation matrix from rotation vector (Rodrigues)
     let th = (rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]).sqrt();
-    let k = if th > 0.001 {
-        (th * 0.5).sin() / th
-    } else {
-        0.5 - th * th / 48.0 + th.powi(4) / 3840.0
-    };
+    let k = if th > 0.001 { (th * 0.5).sin() / th } else { 0.5 - th * th / 48.0 + th.powi(4) / 3840.0 };
 
     let (x, y, z) = (k * rv[0], k * rv[1], k * rv[2]);
     let w_quat = (th * 0.5).cos();
 
     // Quaternion to rotation matrix
     let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - z * w_quat),
-            2.0 * (x * z + y * w_quat),
-        ],
-        [
-            2.0 * (x * y + z * w_quat),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - x * w_quat),
-        ],
-        [
-            2.0 * (x * z - y * w_quat),
-            2.0 * (y * z + x * w_quat),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w_quat), 2.0 * (x * z + y * w_quat)],
+        [2.0 * (x * y + z * w_quat), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w_quat)],
+        [2.0 * (x * z - y * w_quat), 2.0 * (y * z + x * w_quat), 1.0 - 2.0 * (x * x + y * y)],
     ];
 
     // M = K_img^-1 * K_box * R
@@ -345,16 +314,8 @@ fn decode_rotation(rv: &[f32], ax: f32, ay: f32, w: f32, h: f32) -> [f32; 3] {
     // Compute M = K_img^-1 * K_box * R
     // First: K_box * R
     let kb_r = [
-        [
-            f * r[0][0] + ax * r[2][0],
-            f * r[0][1] + ax * r[2][1],
-            f * r[0][2] + ax * r[2][2],
-        ],
-        [
-            f * r[1][0] + ay * r[2][0],
-            f * r[1][1] + ay * r[2][1],
-            f * r[1][2] + ay * r[2][2],
-        ],
+        [f * r[0][0] + ax * r[2][0], f * r[0][1] + ax * r[2][1], f * r[0][2] + ax * r[2][2]],
+        [f * r[1][0] + ay * r[2][0], f * r[1][1] + ay * r[2][1], f * r[1][2] + ay * r[2][2]],
         [r[2][0], r[2][1], r[2][2]],
     ];
 

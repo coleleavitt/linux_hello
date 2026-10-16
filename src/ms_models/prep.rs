@@ -9,7 +9,7 @@ use image::GrayImage;
 /// Template landmarks in the 281×281 aligned face space.
 /// Source: `unk_1800D7F68` in `FaceRecognitionEngineAdapter.dll`.
 const TEMPLATE_281: [[f32; 2]; 5] = [
-    [97.82990264892578, 127.7791976928711], // left eye (image left)
+    [97.82990264892578, 127.7791976928711],   // left eye (image left)
     [181.05320739746094, 126.33809661865234], // right eye
     [139.57400512695312, 179.00059509277344], // nose tip
     [102.69640350341797, 216.70140075683594], // left mouth corner
@@ -130,11 +130,7 @@ fn warp_281(img: &GrayImage, m: &[[f32; 3]; 2]) -> GrayImage {
             let yf = y as f32;
             let sx = xf * inv[0][0] + yf * inv[0][1] + inv[0][2];
             let sy = xf * inv[1][0] + yf * inv[1][1] + inv[1][2];
-            out.put_pixel(
-                x as u32,
-                y as u32,
-                image::Luma([bilinear_sample(img, sx, sy)]),
-            );
+            out.put_pixel(x as u32, y as u32, image::Luma([bilinear_sample(img, sx, sy)]));
         }
     }
 
@@ -152,11 +148,7 @@ fn resize_281_to_128(img281: &GrayImage) -> GrayImage {
         for x in 0..OUTPUT_SIZE {
             let sx = (x as f32 - half) * scale + 140.5;
             let sy = (y as f32 - half) * scale + 140.5;
-            out.put_pixel(
-                x as u32,
-                y as u32,
-                image::Luma([bilinear_sample(img281, sx, sy)]),
-            );
+            out.put_pixel(x as u32, y as u32, image::Luma([bilinear_sample(img281, sx, sy)]));
         }
     }
 
@@ -186,11 +178,7 @@ pub fn thumbnail(frame: &GrayImage) -> GrayImage {
         for x in 0..OUTPUT_SIZE {
             let sx = (x as f32 - 63.5) * (w * 0.0078125) + (w - 1.0) * 0.5;
             let sy = (y as f32 - 63.5) * (h * 0.0078125) + (h - 1.0) * 0.5;
-            out.put_pixel(
-                x as u32,
-                y as u32,
-                image::Luma([bilinear_sample(frame, sx, sy)]),
-            );
+            out.put_pixel(x as u32, y as u32, image::Luma([bilinear_sample(frame, sx, sy)]));
         }
     }
 

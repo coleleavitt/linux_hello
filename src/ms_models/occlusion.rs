@@ -100,10 +100,7 @@ impl OcclusionDetector {
         let data = box_input(lit, face.bbox);
 
         // Run inference: input shape is 1x1x128x128
-        let input = TensorRef::from_array_view((
-            [1i64, 1, INPUT_SIZE as i64, INPUT_SIZE as i64],
-            data.as_slice(),
-        ))?;
+        let input = TensorRef::from_array_view(([1i64, 1, INPUT_SIZE as i64, INPUT_SIZE as i64], data.as_slice()))?;
         let outputs = self.session.run(ort::inputs![input])?;
         let (_, raw) = outputs[0].try_extract_tensor::<f32>()?;
 
@@ -113,11 +110,7 @@ impl OcclusionDetector {
         let occlusion_score = 1.0 - clear_prob;
 
         // Find argmax
-        let (max_idx, _) = probs
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.total_cmp(b))
-            .unwrap();
+        let (max_idx, _) = probs.iter().enumerate().max_by(|(_, a), (_, b)| a.total_cmp(b)).unwrap();
         let occlusion_type = OcclusionType::from_index(max_idx);
 
         let is_occluded = occlusion_score > self.threshold;
@@ -130,12 +123,7 @@ impl OcclusionDetector {
             "occlusion check"
         );
 
-        Ok(OcclusionResult {
-            clear_prob,
-            occlusion_type,
-            is_occluded,
-            probs,
-        })
+        Ok(OcclusionResult { clear_prob, occlusion_type, is_occluded, probs })
     }
 }
 
@@ -144,12 +132,7 @@ fn softmax_4(logits: &[f32]) -> [f32; 4] {
     let max = logits.iter().copied().fold(f32::MIN, f32::max);
     let exp: Vec<f32> = logits.iter().map(|v| (v - max).exp()).collect();
     let sum: f32 = exp.iter().sum();
-    [
-        exp[0] / sum,
-        exp[1] / sum,
-        exp[2] / sum,
-        exp[3] / sum,
-    ]
+    [exp[0] / sum, exp[1] / sum, exp[2] / sum, exp[3] / sum]
 }
 
 // ============================================================================

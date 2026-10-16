@@ -90,7 +90,11 @@ pub fn face_brightness(image: &GrayImage, face: &Face) -> f32 {
             n += 1;
         }
     }
-    if n == 0 { 0.0 } else { sum as f32 / n as f32 }
+    if n == 0 {
+        0.0
+    } else {
+        sum as f32 / n as f32
+    }
 }
 
 #[cfg(test)]

@@ -163,7 +163,10 @@ fn main() -> Result<()> {
 
         Commands::Remove { user } => {
             let mut pipeline = FacePipeline::new(&detector, &embedder, Vec::new(), &store)?;
-            println!("{}", if pipeline.unenroll(&user)? { format!("Removed {user}") } else { format!("{user} is not enrolled") });
+            println!(
+                "{}",
+                if pipeline.unenroll(&user)? { format!("Removed {user}") } else { format!("{user} is not enrolled") }
+            );
         }
 
         Commands::List => {
@@ -223,20 +226,24 @@ fn main() -> Result<()> {
                 save_capture(&capture, &out, &format!("{n:04}"))?;
                 let a = &check.analysis;
                 let l = a.lighting;
-                writeln!(log, "{}", serde_json::json!({
-                    "n": n, "t": t, "gap_ms": capture.pair.gap.as_secs_f32() * 1000.0,
-                    "face": a.face.as_ref().map(|f| f.bbox),
-                    "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
-                    "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
-                    "rgb_real": check.liveness, "vote": format!("{:?}", check.vote),
-                    "windows": check.windows.as_ref().map(|w| serde_json::json!({
-                        "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
-                        "border": w.scores.border, "hh": w.scores.hh,
-                    })),
-                    "similarity": check.best.map(|b| b.similarity), "track": track,
-                    "recognised": recognised, "liveness": format!("{liveness:?}"),
-                    "verdict": verdict.map(|v| v.to_string()),
-                }))?;
+                writeln!(
+                    log,
+                    "{}",
+                    serde_json::json!({
+                        "n": n, "t": t, "gap_ms": capture.pair.gap.as_secs_f32() * 1000.0,
+                        "face": a.face.as_ref().map(|f| f.bbox),
+                        "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
+                        "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
+                        "rgb_real": check.liveness, "vote": format!("{:?}", check.vote),
+                        "windows": check.windows.as_ref().map(|w| serde_json::json!({
+                            "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
+                            "border": w.scores.border, "hh": w.scores.hh,
+                        })),
+                        "similarity": check.best.map(|b| b.similarity), "track": track,
+                        "recognised": recognised, "liveness": format!("{liveness:?}"),
+                        "verdict": verdict.map(|v| v.to_string()),
+                    })
+                )?;
                 if let Some(verdict) = verdict {
                     println!("     => {verdict}; new session");
                     session = Session::default();

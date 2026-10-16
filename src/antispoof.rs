@@ -5,8 +5,8 @@
 
 use anyhow::{Context, Result};
 use image::RgbImage;
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
 use ort::value::TensorRef;
 use std::path::Path;
 use tracing::debug;

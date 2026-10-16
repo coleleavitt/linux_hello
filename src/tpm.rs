@@ -12,7 +12,7 @@ use std::str::FromStr;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use tss_esapi::attributes::{ObjectAttributesBuilder, SessionAttributesBuilder};
 use tss_esapi::constants::SessionType;
@@ -22,18 +22,8 @@ use tss_esapi::interface_types::ecc::EccCurve;
 use tss_esapi::interface_types::resource_handles::Hierarchy;
 use tss_esapi::interface_types::session_handles::{AuthSession, PolicySession};
 use tss_esapi::structures::{
-    Digest,
-    EccPoint,
-    KeyedHashScheme,
-    PcrSelectionListBuilder,
-    PcrSlot,
-    Private,
-    Public,
-    PublicBuilder,
-    PublicEccParametersBuilder,
-    PublicKeyedHashParameters,
-    SensitiveData,
-    SymmetricDefinition,
+    Digest, EccPoint, KeyedHashScheme, PcrSelectionListBuilder, PcrSlot, Private, Public, PublicBuilder,
+    PublicEccParametersBuilder, PublicKeyedHashParameters, SensitiveData, SymmetricDefinition,
     SymmetricDefinitionObject,
 };
 use tss_esapi::tcti_ldr::TctiNameConf;
@@ -92,10 +82,7 @@ impl DataKey {
 
     pub fn unseal(sealed: &SealedKey) -> Result<Self> {
         let key = Tpm::open()?.unseal(sealed)?;
-        Ok(Self {
-            sealed: sealed.clone(),
-            key,
-        })
+        Ok(Self { sealed: sealed.clone(), key })
     }
 
     pub fn sealed(&self) -> &SealedKey {
@@ -110,49 +97,22 @@ impl DataKey {
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = self
             .cipher()
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: plaintext,
-                    aad: FORMAT.as_bytes(),
-                },
-            )
+            .encrypt(&nonce, Payload { msg: plaintext, aad: FORMAT.as_bytes() })
             .map_err(|_| anyhow!("encrypting the face store failed"))?;
-        Ok(SealedFile {
-            format: FORMAT.to_string(),
-            key: self.sealed.clone(),
-            nonce: nonce.to_vec(),
-            ciphertext,
-        })
+        Ok(SealedFile { format: FORMAT.to_string(), key: self.sealed.clone(), nonce: nonce.to_vec(), ciphertext })
     }
 
     pub fn decrypt(&self, file: &SealedFile) -> Result<Zeroizing<Vec<u8>>> {
         if file.format != FORMAT {
-            bail!(
-                "unsupported sealed store format {:?} (expected {FORMAT:?})",
-                file.format
-            );
+            bail!("unsupported sealed store format {:?} (expected {FORMAT:?})", file.format);
         }
         if file.nonce.len() != 12 {
-            bail!(
-                "sealed store has a {}-byte nonce, expected 12",
-                file.nonce.len()
-            );
+            bail!("sealed store has a {}-byte nonce, expected 12", file.nonce.len());
         }
         let plaintext = self
             .cipher()
-            .decrypt(
-                Nonce::from_slice(&file.nonce),
-                Payload {
-                    msg: &file.ciphertext,
-                    aad: FORMAT.as_bytes(),
-                },
-            )
-            .map_err(|_| {
-                anyhow!(
-                    "face store does not decrypt: it was modified, or its key does not belong to it"
-                )
-            })?;
+            .decrypt(Nonce::from_slice(&file.nonce), Payload { msg: &file.ciphertext, aad: FORMAT.as_bytes() })
+            .map_err(|_| anyhow!("face store does not decrypt: it was modified, or its key does not belong to it"))?;
         Ok(Zeroizing::new(plaintext))
     }
 
@@ -173,16 +133,13 @@ impl Tpm {
         let name = std::env::var("TPM2TOOLS_TCTI")
             .or_else(|_| std::env::var("TCTI"))
             .unwrap_or_else(|_| DEFAULT_TCTI.to_string());
-        let tcti =
-            TctiNameConf::from_str(&name).with_context(|| format!("invalid TCTI {name:?}"))?;
+        let tcti = TctiNameConf::from_str(&name).with_context(|| format!("invalid TCTI {name:?}"))?;
         let mut ctx = tss_esapi::Context::new(tcti).with_context(|| {
             format!("cannot reach the TPM through {name:?}: enable the TPM in the firmware, or set TPM2TOOLS_TCTI")
         })?;
         let template = primary_template()?;
         let primary = ctx
-            .execute_with_nullauth_session(|c| {
-                c.create_primary(Hierarchy::Owner, template, None, None, None, None)
-            })
+            .execute_with_nullauth_session(|c| c.create_primary(Hierarchy::Owner, template, None, None, None, None))
             .context("creating the TPM storage primary key")?
             .key_handle;
         Ok(Self { ctx, primary })
@@ -214,16 +171,11 @@ impl Tpm {
             .build()?;
         let data = SensitiveData::try_from(secret)?;
         // Encrypt the command parameter so that the key does not cross the TPM bus in the clear.
-        let session = self.session(
-            SessionType::Hmac,
-            SessionAttributesBuilder::new().with_decrypt(true),
-        )?;
+        let session = self.session(SessionType::Hmac, SessionAttributesBuilder::new().with_decrypt(true))?;
         let primary = self.primary;
         let created = self
             .ctx
-            .execute_with_session(Some(session), |c| {
-                c.create(primary, public, None, Some(data), None, None)
-            })
+            .execute_with_session(Some(session), |c| c.create(primary, public, None, Some(data), None, None))
             .context("sealing the data key")?;
         Ok(SealedKey {
             public: created.out_public.marshall()?,
@@ -234,8 +186,7 @@ impl Tpm {
 
     fn unseal(&mut self, sealed: &SealedKey) -> Result<Zeroizing<[u8; 32]>> {
         let public = Public::unmarshall(&sealed.public).context("malformed sealed key")?;
-        let private =
-            Private::try_from(sealed.private.as_slice()).context("malformed sealed key")?;
+        let private = Private::try_from(sealed.private.as_slice()).context("malformed sealed key")?;
         let primary = self.primary;
         let object = self
             .ctx
@@ -258,20 +209,13 @@ impl Tpm {
                 [] => "unsealing the data key".to_string(),
                 pcrs => format!("unsealing the data key: PCRs {pcrs:?} changed since sealing (firmware or Secure Boot change?); re-enroll"),
             })?;
-        let key: [u8; 32] = data
-            .value()
-            .try_into()
-            .context("sealed data key is not 32 bytes")?;
+        let key: [u8; 32] = data.value().try_into().context("sealed data key is not 32 bytes")?;
         Ok(Zeroizing::new(key))
     }
 
     /// Start a session salted with the primary key, which is what lets parameter encryption hide
     /// secrets from someone listening on the bus.
-    fn session(
-        &mut self,
-        kind: SessionType,
-        attributes: SessionAttributesBuilder,
-    ) -> Result<AuthSession> {
+    fn session(&mut self, kind: SessionType, attributes: SessionAttributesBuilder) -> Result<AuthSession> {
         let session = self
             .ctx
             .start_auth_session(
@@ -297,9 +241,7 @@ impl Tpm {
                 _ => bail!("PCR {pcr} does not exist (0-23)"),
             })
             .collect::<Result<Vec<_>>>()?;
-        let selection = PcrSelectionListBuilder::new()
-            .with_selection(HashingAlgorithm::Sha256, &slots)
-            .build()?;
+        let selection = PcrSelectionListBuilder::new().with_selection(HashingAlgorithm::Sha256, &slots).build()?;
         // An empty digest makes the TPM use the PCRs' current values.
         self.ctx.policy_pcr(session, Digest::default(), selection)?;
         Ok(())
@@ -333,8 +275,8 @@ fn primary_template() -> Result<Public> {
 }
 
 mod base64_bytes {
-    use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
@@ -342,8 +284,6 @@ mod base64_bytes {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        STANDARD
-            .decode(String::deserialize(deserializer)?)
-            .map_err(serde::de::Error::custom)
+        STANDARD.decode(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }

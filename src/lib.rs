@@ -2,7 +2,7 @@
 //!
 //! A Rust implementation of face-based authentication using open-source ONNX models:
 //! - Face detection: SCRFD (InsightFace)
-//! - Face embedding: ArcFace (InsightFace) 
+//! - Face embedding: ArcFace (InsightFace)
 //! - Anti-spoofing: FaceNox / Silent-Face (RGB veto) plus the IR lighting gate
 //!
 //! The capture, liveness and matching pipeline is described in `docs/capture-and-liveness.md`.
@@ -13,16 +13,16 @@ pub mod camera;
 pub mod daemon;
 pub mod detector;
 pub mod embedder;
+pub mod lid;
 pub mod lighting;
 pub mod liveness;
 pub mod matcher;
+pub mod ms_models;
 pub mod pipeline;
 pub mod store;
-pub mod lid;
-pub mod tracker;
-pub mod ms_models;
 #[cfg(feature = "tpm")]
 pub mod tpm;
+pub mod tracker;
 
 pub use antispoof::{AntiSpoof, LivenessModel};
 pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCameras, Outcome, Session};
@@ -32,13 +32,13 @@ pub use embedder::FaceEmbedder;
 pub use lighting::{Lighting, LightingStatus};
 pub use liveness::{LivenessSession, LivenessState, Vote};
 pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
+pub use ms_models::{FaceOrientation, IrFaceOrientation, LbfAligner, WindowsHelloModels};
+pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
+pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
+pub use ms_models::{OcclusionDetector, OcclusionResult, OcclusionType};
 pub use pipeline::{FacePipeline, FrameCheck};
 pub use store::{FaceStore, OnFailure};
 pub use tracker::FaceTracker;
-pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
-pub use ms_models::{OcclusionDetector, OcclusionType, OcclusionResult};
-pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
-pub use ms_models::{FaceOrientation, IrFaceOrientation, LbfAligner, WindowsHelloModels};
 
 use ort::environment::Environment;
 use serde::{Deserialize, Serialize};
@@ -53,16 +53,13 @@ pub fn get_ort_env() -> anyhow::Result<&'static Environment> {
     if let Some(env) = ORT_ENV.get() {
         return Ok(env);
     }
-    
+
     // Initialize
-    let env = ort::init()
-        .with_name("linux_hello")
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to init ORT: {}", e))?;
-    
+    let env = ort::init().with_name("linux_hello").build().map_err(|e| anyhow::anyhow!("failed to init ORT: {}", e))?;
+
     // Store (ignore if another thread beat us)
     let _ = ORT_ENV.set(env);
-    
+
     Ok(ORT_ENV.get().expect("just set"))
 }
 
@@ -157,11 +154,17 @@ impl FaceProblem {
 /// unknown word `UNAVAILABLE` the same way.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
-    Match { similarity: f32 },
-    NoMatch { similarity: f32 },
+    Match {
+        similarity: f32,
+    },
+    NoMatch {
+        similarity: f32,
+    },
     NotLive,
     /// No usable face; the most frequent reason over the session
-    NoFace { problem: FaceProblem },
+    NoFace {
+        problem: FaceProblem,
+    },
     NotEnrolled,
     /// The lid is closed and the IR camera is built in (`IsLidClosedScenario`)
     LidClosed,
@@ -189,7 +192,7 @@ mod tests {
         let a = Embedding { features: vec![1.0, 0.0, 0.0] };
         let b = Embedding { features: vec![1.0, 0.0, 0.0] };
         assert!((a.similarity(&b) - 1.0).abs() < 1e-6);
-        
+
         let c = Embedding { features: vec![0.0, 1.0, 0.0] };
         assert!(a.similarity(&c).abs() < 1e-6);
     }

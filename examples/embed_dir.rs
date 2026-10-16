@@ -78,11 +78,8 @@ fn main() -> Result<()> {
     anyhow::ensure!(args.len() >= 5, "usage: embed_dir <models_dir> <image_root> <list.txt> <out_prefix> [workers]");
     let models = PathBuf::from(&args[1]);
     let root = PathBuf::from(&args[2]);
-    let paths: Vec<String> = std::fs::read_to_string(&args[3])?
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
+    let paths: Vec<String> =
+        std::fs::read_to_string(&args[3])?.lines().filter(|l| !l.is_empty()).map(String::from).collect();
     let prefix = args[4].clone();
     let workers: usize = args.get(5).map(|s| s.parse()).transpose()?.unwrap_or(1);
     let centre = match args.get(6).map(String::as_str) {

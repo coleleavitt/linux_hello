@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result};
 use image::RgbImage;
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
 use ort::value::TensorRef;
 use std::path::Path;
 use tracing::debug;
@@ -13,13 +13,8 @@ use crate::{get_ort_env, Embedding, Face};
 const INPUT_SIZE: u32 = 112;
 
 /// Where ArcFace expects the eyes, nose tip and mouth corners in its 112x112 input.
-const ARCFACE_TEMPLATE: [[f32; 2]; 5] = [
-    [38.2946, 51.6963],
-    [73.5318, 51.5014],
-    [56.0252, 71.7366],
-    [41.5493, 92.3655],
-    [70.7299, 92.2041],
-];
+const ARCFACE_TEMPLATE: [[f32; 2]; 5] =
+    [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]];
 
 /// ArcFace face embedder
 pub struct FaceEmbedder {

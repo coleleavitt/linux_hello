@@ -102,7 +102,8 @@ impl FaceStore {
             .with_context(|| format!("parsing sealed face store {}", self.path.display()))?;
         let key = match self.key.take() {
             Some(key) if key.sealed() == file.key() => key,
-            _ => DataKey::unseal(file.key()).with_context(|| format!("opening sealed face store {}", self.path.display()))?,
+            _ => DataKey::unseal(file.key())
+                .with_context(|| format!("opening sealed face store {}", self.path.display()))?,
         };
         let json = key.decrypt(&file).with_context(|| format!("opening sealed face store {}", self.path.display()))?;
         self.faces = serde_json::from_slice(&json).with_context(|| self.format_error())?;
@@ -119,7 +120,10 @@ impl FaceStore {
     }
 
     fn format_error(&self) -> String {
-        format!("parsing face store {} (stores from before multi-print templates must be re-enrolled)", self.path.display())
+        format!(
+            "parsing face store {} (stores from before multi-print templates must be re-enrolled)",
+            self.path.display()
+        )
     }
 
     pub fn path(&self) -> &Path {
@@ -183,12 +187,12 @@ impl FaceStore {
     pub fn add(&mut self, user_id: String, template: Template) {
         self.faces.insert(user_id, template);
     }
-    
+
     /// Remove a face by user ID
     pub fn remove(&mut self, user_id: &str) -> bool {
         self.faces.remove(user_id).is_some()
     }
-    
+
     /// Get a user's template
     pub fn get(&self, user_id: &str) -> Option<&Template> {
         self.faces.get(user_id)
@@ -235,12 +239,12 @@ impl FaceStore {
     pub fn list_users(&self) -> Vec<&str> {
         self.faces.keys().map(|s| s.as_str()).collect()
     }
-    
+
     /// Number of enrolled faces
     pub fn len(&self) -> usize {
         self.faces.len()
     }
-    
+
     /// Check if store is empty
     pub fn is_empty(&self) -> bool {
         self.faces.is_empty()

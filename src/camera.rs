@@ -329,19 +329,19 @@ fn metadata_items(buf: &[u8]) -> Vec<(u32, &[u8])> {
 /// Find IR camera on the system
 pub fn find_ir_camera() -> Result<String> {
     let candidates = ["/dev/video2", "/dev/video3", "/dev/video4"];
-    
+
     for path in candidates {
         if let Ok(device) = Device::with_path(path) {
             let caps = device.query_caps().ok();
             let name = caps.as_ref().map(|c| c.card.as_str()).unwrap_or("");
-            
+
             if name.to_lowercase().contains("ir") || name.to_lowercase().contains("infrared") {
                 info!(path, name, "found IR camera");
                 return Ok(path.to_string());
             }
         }
     }
-    
+
     bail!("no IR camera found")
 }
 

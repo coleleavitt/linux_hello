@@ -21,7 +21,7 @@ pub use ir_liveness::{MsFrame, MsIrLiveness, MsModelScores};
 
 pub use lbf::{Alignment, LbfAligner};
 
-pub use occlusion::{OcclusionDetector, OcclusionType, OcclusionResult};
+pub use occlusion::{OcclusionDetector, OcclusionResult, OcclusionType};
 
 pub use retina::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
 

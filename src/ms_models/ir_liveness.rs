@@ -65,7 +65,6 @@ pub struct MsFrame {
     pub scores: MsModelScores,
 }
 
-
 /// - Net votes > 0 → live, otherwise spoof.
 pub struct MsIrLiveness {
     /// Slot 11: general IR CNN
@@ -102,9 +101,7 @@ impl MsIrLiveness {
     /// Check if the models directory contains all required files.
     pub fn models_available(model_dir: impl AsRef<Path>) -> bool {
         let model_dir = model_dir.as_ref();
-        [121, 122, 123, 124, 125]
-            .iter()
-            .all(|id| model_dir.join(format!("MODEL_FILES_{id}.onnx")).exists())
+        [121, 122, 123, 124, 125].iter().all(|id| model_dir.join(format!("MODEL_FILES_{id}.onnx")).exists())
     }
 
     /// Score one frame pair (F24, F25, F42).
@@ -195,8 +192,8 @@ fn run_color(session: &mut Session, rgb: &RgbImage, landmarks: &[[f32; 2]; 5]) -
         let i = y as usize * 128 + x as usize;
         // BGR order: Blue = channel 0, Green = channel 1, Red = channel 2
         // BGR planar layout (plane 0 = B, plane 1 = G, plane 2 = R)
-        data[i] = px.0[2] as f32;             // B from RGB R position
-        data[plane + i] = px.0[1] as f32;     // G
+        data[i] = px.0[2] as f32; // B from RGB R position
+        data[plane + i] = px.0[1] as f32; // G
         data[2 * plane + i] = px.0[0] as f32; // R from RGB B position
     }
 
@@ -310,16 +307,8 @@ fn invert_affine_rgb(m: &[[f32; 3]; 2]) -> [[f32; 3]; 2] {
 
     let inv_det = 1.0 / det;
     [
-        [
-            (d * inv_det) as f32,
-            (-b * inv_det) as f32,
-            ((b * ty - d * tx) * inv_det) as f32,
-        ],
-        [
-            (-c * inv_det) as f32,
-            (a * inv_det) as f32,
-            ((c * tx - a * ty) * inv_det) as f32,
-        ],
+        [(d * inv_det) as f32, (-b * inv_det) as f32, ((b * ty - d * tx) * inv_det) as f32],
+        [(-c * inv_det) as f32, (a * inv_det) as f32, ((c * tx - a * ty) * inv_det) as f32],
     ]
 }
 
@@ -347,10 +336,7 @@ fn bilinear_sample_rgb(img: &RgbImage, sx: f32, sy: f32) -> [u8; 3] {
 
     let mut result = [0u8; 3];
     for c in 0..3 {
-        let val = p00[c] as f32 * gy * gx
-            + p01[c] as f32 * gy * fx
-            + p10[c] as f32 * fy * gx
-            + p11[c] as f32 * fy * fx;
+        let val = p00[c] as f32 * gy * gx + p01[c] as f32 * gy * fx + p10[c] as f32 * fy * gx + p11[c] as f32 * fy * fx;
         result[c] = val.trunc() as u8;
     }
     result

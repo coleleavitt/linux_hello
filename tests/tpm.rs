@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use linux_hello::{Embedding, FaceStore, Template};
 
 struct Swtpm {
@@ -20,8 +20,7 @@ struct Swtpm {
 
 impl Swtpm {
     fn start(name: &str) -> Result<Self> {
-        let dir =
-            std::env::temp_dir().join(format!("linux_hello_swtpm_{}_{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("linux_hello_swtpm_{}_{name}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let port = free_port_pair()?;
         let child = Command::new("swtpm")
@@ -41,10 +40,7 @@ impl Swtpm {
         let swtpm = Self { child, dir, port };
         let start = Instant::now();
         while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            ensure!(
-                start.elapsed() < Duration::from_secs(5),
-                "swtpm did not start listening on port {port}"
-            );
+            ensure!(start.elapsed() < Duration::from_secs(5), "swtpm did not start listening on port {port}");
             std::thread::sleep(Duration::from_millis(20));
         }
         Ok(swtpm)
@@ -64,8 +60,7 @@ impl Swtpm {
         use tss_esapi::interface_types::algorithm::HashingAlgorithm;
         use tss_esapi::structures::{Digest, DigestValues};
 
-        let mut ctx =
-            tss_esapi::Context::new(tss_esapi::tcti_ldr::TctiNameConf::from_str(&self.tcti())?)?;
+        let mut ctx = tss_esapi::Context::new(tss_esapi::tcti_ldr::TctiNameConf::from_str(&self.tcti())?)?;
         let mut values = DigestValues::new();
         values.set(HashingAlgorithm::Sha256, Digest::try_from(vec![0x42; 32])?);
         ctx.execute_with_nullauth_session(|c| c.pcr_extend(PcrHandle::Pcr7, values))?;
@@ -93,9 +88,7 @@ fn free_port_pair() -> Result<u16> {
 }
 
 fn template(seed: f32) -> Template {
-    Template::enrolled([Embedding {
-        features: (0..512).map(|i| (i as f32 * seed).sin()).collect(),
-    }])
+    Template::enrolled([Embedding { features: (0..512).map(|i| (i as f32 * seed).sin()).collect() }])
 }
 
 fn sealed_store(path: &Path, users: &[&str], pcrs: &[u8]) -> Result<()> {
@@ -136,49 +129,25 @@ fn round_trip(dir: &Path) -> Result<()> {
     sealed_store(&path, &["alice", "bob"], &[])?;
 
     let text = std::fs::read_to_string(&path)?;
-    ensure!(
-        text.contains("linux_hello-tpm-v1"),
-        "file is not a sealed store"
-    );
-    ensure!(
-        !text.contains("alice") && !text.contains("features"),
-        "plaintext leaked into the sealed file"
-    );
+    ensure!(text.contains("linux_hello-tpm-v1"), "file is not a sealed store");
+    ensure!(!text.contains("alice") && !text.contains("features"), "plaintext leaked into the sealed file");
 
     let start = Instant::now();
     let mut store = FaceStore::load(&path)?;
-    println!(
-        "    open (create primary + load + unseal + decrypt): {:?}",
-        start.elapsed()
-    );
+    println!("    open (create primary + load + unseal + decrypt): {:?}", start.elapsed());
     ensure!(store.len() == 2, "expected 2 faces, got {}", store.len());
-    ensure!(
-        store.get("bob").unwrap().prints[0].features == template(2.0).prints[0].features,
-        "bob's template changed"
-    );
-    ensure!(
-        store.sealed_pcrs() == Some(&[][..]),
-        "store should be sealed without PCRs"
-    );
+    ensure!(store.get("bob").unwrap().prints[0].features == template(2.0).prints[0].features, "bob's template changed");
+    ensure!(store.sealed_pcrs() == Some(&[][..]), "store should be sealed without PCRs");
 
     // Saving keeps the store sealed and under the same key.
     store.add("carol".into(), template(3.0));
     store.save()?;
     let start = Instant::now();
     store.reload()?;
-    println!(
-        "    reload with the key already unsealed: {:?}",
-        start.elapsed()
-    );
+    println!("    reload with the key already unsealed: {:?}", start.elapsed());
     let reopened = FaceStore::load(&path)?;
-    ensure!(
-        reopened.len() == 3 && reopened.get("carol").is_some(),
-        "carol was not saved"
-    );
-    ensure!(
-        !std::fs::read_to_string(&path)?.contains("carol"),
-        "plaintext leaked after save"
-    );
+    ensure!(reopened.len() == 3 && reopened.get("carol").is_some(), "carol was not saved");
+    ensure!(!std::fs::read_to_string(&path)?.contains("carol"), "plaintext leaked after save");
     Ok(())
 }
 
@@ -188,16 +157,9 @@ fn unseal_to_plain(dir: &Path) -> Result<()> {
     let mut store = FaceStore::load(&path)?;
     store.unseal();
     store.save()?;
-    let plain: std::collections::HashMap<String, Template> =
-        serde_json::from_slice(&std::fs::read(&path)?)?;
-    ensure!(
-        plain["alice"].prints[0].features == template(1.0).prints[0].features,
-        "plain store differs"
-    );
-    ensure!(
-        FaceStore::load(&path)?.sealed_pcrs().is_none(),
-        "store still sealed"
-    );
+    let plain: std::collections::HashMap<String, Template> = serde_json::from_slice(&std::fs::read(&path)?)?;
+    ensure!(plain["alice"].prints[0].features == template(1.0).prints[0].features, "plain store differs");
+    ensure!(FaceStore::load(&path)?.sealed_pcrs().is_none(), "store still sealed");
     Ok(())
 }
 
@@ -248,10 +210,7 @@ fn tpm_unavailable(dir: &Path, tpm: &Swtpm) -> Result<()> {
     let path = dir.join("unavailable.json");
     sealed_store(&path, &["alice"], &[])?;
     let port = free_port_pair()?;
-    std::env::set_var(
-        "TPM2TOOLS_TCTI",
-        format!("swtpm:host=127.0.0.1,port={port}"),
-    );
+    std::env::set_var("TPM2TOOLS_TCTI", format!("swtpm:host=127.0.0.1,port={port}"));
     let result = expect_error(FaceStore::load(&path), "cannot reach the TPM");
     tpm.select();
     result

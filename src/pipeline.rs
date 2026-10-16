@@ -152,7 +152,9 @@ impl FacePipeline {
         };
         let liveness = (!self.liveness.is_empty()).then(|| self.rgb_liveness(rgb_face.as_ref())).transpose()?;
         let windows = match &mut self.windows {
-            Some(w) => Some(w.liveness.frame(&pair.lit, Some(&pair.ambient), face, rgb_face.as_ref().map(|(i, f)| (*i, f)))?),
+            Some(w) => {
+                Some(w.liveness.frame(&pair.lit, Some(&pair.ambient), face, rgb_face.as_ref().map(|(i, f)| (*i, f)))?)
+            }
             None => None,
         };
         let vote = Vote::from_evidence(true, liveness, windows.as_ref().map(|w| w.total));

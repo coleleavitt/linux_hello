@@ -1,9 +1,9 @@
 //! Face detection using SCRFD (InsightFace).
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use image::{GrayImage, RgbImage};
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
 use ort::value::TensorRef;
 use std::path::Path;
 use tracing::debug;
