@@ -29,12 +29,21 @@ pub enum AuthEvent {
 }
 
 /// What the user interface sends back to the attempt's thread.
-#[derive(Debug)]
 pub enum Reply {
-    /// The answer to the pending prompt; `None` cancels the attempt.
+    /// The answer to the pending prompt; `None` cancels the attempt. Never logged.
     Answer(Option<String>),
     /// After `Success` under greetd: run this command as the session.
     StartSession { cmd: Vec<String>, env: Vec<String> },
+}
+
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reply::Answer(None) => f.write_str("Answer(None)"),
+            Reply::Answer(Some(_)) => f.write_str("Answer(<redacted>)"),
+            Reply::StartSession { cmd, .. } => write!(f, "StartSession({cmd:?})"),
+        }
+    }
 }
 
 /// The user interface's handle on a running attempt.

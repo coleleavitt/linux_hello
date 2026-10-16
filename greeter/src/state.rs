@@ -45,12 +45,12 @@ pub enum Face {
     Failed(Option<String>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Input {
     /// A key press or click on the lock screen.
     Wake,
     Auth(AuthEvent),
-    /// The password box was submitted.
+    /// The password box was submitted. Never logged.
     Submit(String),
     /// "Sign-in options → face".
     RetryFace,
@@ -58,9 +58,10 @@ pub enum Input {
     UsePassword,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Effect {
     StartAttempt,
+    /// The answer to the prompt. Never logged: it is the password.
     Answer(String),
     /// greetd: start the session (one more `Success` follows, then `Exit`).
     StartSession,
@@ -68,6 +69,31 @@ pub enum Effect {
     Unlock,
     Exit,
     FocusPassword,
+}
+
+impl std::fmt::Debug for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Input::Wake => f.write_str("Wake"),
+            Input::Auth(e) => write!(f, "Auth({e:?})"),
+            Input::Submit(_) => f.write_str("Submit(<redacted>)"),
+            Input::RetryFace => f.write_str("RetryFace"),
+            Input::UsePassword => f.write_str("UsePassword"),
+        }
+    }
+}
+
+impl std::fmt::Debug for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Effect::StartAttempt => f.write_str("StartAttempt"),
+            Effect::Answer(text) => write!(f, "Answer({})", if text.is_empty() { "empty" } else { "<redacted>" }),
+            Effect::StartSession => f.write_str("StartSession"),
+            Effect::Unlock => f.write_str("Unlock"),
+            Effect::Exit => f.write_str("Exit"),
+            Effect::FocusPassword => f.write_str("FocusPassword"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
