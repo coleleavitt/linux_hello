@@ -26,10 +26,12 @@ install -m644 "$repo/models/antispoof/facenox_antispoof.onnx" "$repo/models/anti
 ms="$repo/models/windows_hello/converted"
 if [ -d "$ms" ]; then
     install -d -m755 "$share/models/windows_hello/converted/convnet" "$share/models/windows_hello/converted/occlusion" \
-        "$share/models/windows_hello/converted/ldmf/ort"
+        "$share/models/windows_hello/converted/ldmf/ort" "$share/models/windows_hello/converted/cefa"
     install -m644 "$ms"/convnet/MODEL_FILES_12[1-5].onnx "$share/models/windows_hello/converted/convnet/"
     install -m644 "$ms/occlusion/MODEL_FILES_120.onnx" "$share/models/windows_hello/converted/occlusion/"
     install -m644 "$ms/ldmf/ort/MODEL_FILES_110.ort" "$share/models/windows_hello/converted/ldmf/ort/"
+    # The face recogniser and, in the JSON, Microsoft's distance → FAR table of its container header.
+    install -m644 "$ms/cefa/MODEL_FILES_123.onnx" "$ms/cefa/MODEL_FILES_123.json" "$share/models/windows_hello/converted/cefa/"
 fi
 install -m755 "$repo/contrib/openrc/linux_hello" /etc/init.d/linux_hello
 

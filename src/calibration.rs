@@ -3,7 +3,7 @@
 //! recognition model carries (FPR, TAR, distance) tables per camera hardware model and a face is
 //! recognised when the estimated FAR is below [`TARGET_FAR`]. `models/calibration.json` holds the
 //! same for ArcFace, in cosine similarity, keyed by the IR camera's USB `vid:pid`
-//! (docs/calibration.md).
+//! (docs/calibration.md); [`load_windows`] reads Microsoft's own table for its recogniser.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -105,6 +105,32 @@ pub fn load(path: impl AsRef<Path>, camera: Option<&str>) -> Result<CalibrationT
     CalibrationTable::new(name, table.rows.iter().copied())
 }
 
+#[derive(Deserialize)]
+struct WindowsFile {
+    calibration: Vec<WindowsTable>,
+}
+
+/// One (FPR, TAR, distance) table of a `.cefa` header (docs/winhello-models/cefa.md §2.2).
+#[derive(Deserialize)]
+struct WindowsTable {
+    hardware_model: u32,
+    rows_fpr_tar_distance: Vec<(f64, f64, f32)>,
+}
+
+/// Microsoft's distance → FAR table of a recognition model (F51), from the JSON that
+/// `tools/winhello_models/cefa unpack` writes next to the model, as a table in similarity =
+/// 1 − distance. The first hardware model's table is taken: the five shipped tables are identical,
+/// and which camera classes the ids mean is not known (cefa.md §7).
+pub fn load_windows(path: impl AsRef<Path>) -> Result<CalibrationTable> {
+    let path = path.as_ref();
+    let file: WindowsFile =
+        serde_json::from_slice(&fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+            .with_context(|| format!("parsing {}", path.display()))?;
+    let table = file.calibration.first().with_context(|| format!("{}: no calibration table", path.display()))?;
+    let rows = table.rows_fpr_tar_distance.iter().map(|&(fpr, tar, distance)| (fpr, tar, 1.0 - distance));
+    CalibrationTable::new(&format!("windows_v5/{}", table.hardware_model), rows)
+}
+
 /// The shipped table, for tests of the decision rules.
 #[cfg(test)]
 pub(crate) fn lfw_gray() -> CalibrationTable {
@@ -148,6 +174,26 @@ mod tests {
         assert_eq!(t.pair_far(0.65), 1e-5, "FAR 1e-5 ↔ distance 0.350");
         assert!(close(t.pair_far(0.6475), 1e-5 + 0.0025 / 0.031 * (3.08245e-05 - 1e-5), 1e-6));
         assert!(close(t.pair_far(0.8), 2.03519e-06 * ((0.2 - 0.305f64) / 0.305).exp(), 1e-5));
+    }
+
+    #[test]
+    fn reads_the_windows_container_header() {
+        let dir = std::env::temp_dir().join(format!("linux_hello_windows_table_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MODEL_FILES_123.json");
+        fs::write(
+            &path,
+            r#"{"tech": 11, "calibration": [
+              {"hardware_model": 0, "ids": [], "rows_fpr_tar_distance": [[2.03519e-06, 0.995666, 0.305], [1e-05, 0.997664, 0.35]]},
+              {"hardware_model": 1, "ids": [], "rows_fpr_tar_distance": [[2.03519e-06, 0.995666, 0.305], [1e-05, 0.997664, 0.35]]}]}"#,
+        )
+        .unwrap();
+        let t = load_windows(&path).unwrap();
+        assert_eq!(t.name(), "windows_v5/0");
+        assert_eq!(t.rows().len(), 2);
+        assert!(close(t.pair_far(0.65), 1e-5, 1e-6), "FAR 1e-5 ↔ distance 0.350");
+        assert!(t.pair_far(0.66) < 1e-5 && t.pair_far(0.64) > 1e-5);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
