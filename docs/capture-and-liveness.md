@@ -15,7 +15,7 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
      good ─▶ embed lit − min(lit, warped ambient) ─▶ live vote unless the RGB models veto
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
-/dev/video0 (RGB) ─▶ SCRFD faces ─▶ the one overlapping the registered IR box (none: colour net skipped) ─▶ colour net veto
+/dev/video0 (RGB 640x360) ─▶ whole, not dark ─▶ SCRFD faces ─▶ the one overlapping the registered IR box (none: colour net skipped) ─▶ colour net veto
                                         (without the Windows models: FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5)
   track: every analysed face followed by box overlap and print similarity; a new face starts a new attempt
   attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50), no other face
@@ -75,6 +75,44 @@ disturb the exposure (measured over 40 re-sets). The driver default (`(0,0)/640x
 written when the camera opens, in case an earlier run died, and when it closes. A camera without
 the controls logs once (debug) and meters the whole frame; a camera that rejects a rectangle
 logs once (warn) and keeps whatever it has.
+
+**RGB capture.** The RGB camera streams YUYV 640×360, the IR frame's size and a centre crop of its
+4:3 sensor frame (the 640×480 frame less 60 rows at the top and at the bottom: the two modes
+differ by 1.4 grey levels per pixel at that offset, 4.7 if the 480-row frame is scaled instead).
+640×480 does not work next to the IR stream on this laptop's USB 2.0 link (both cameras hang off
+one 480 Mb/s port): alone it delivers whole frames, but with the IR stream running every frame
+arrives truncated at 155–173 KB of 614 400 and flagged `V4L2_BUF_FLAG_ERROR`, at 30 fps as at
+8 fps (`v4l2-ctl --stream-mmap --verbose`, 2026-10-16; 640×360 YUYV and MJPEG 640×480 arrive
+whole). The mapped buffer comes back whole whatever `bytesused` says, so such a frame showed as
+the top 133 rows of the picture over a green block (YUYV zeros), and SCRFD found no face in it:
+74 of 74 frames in two `watch` runs that morning, when `rgb_real=-` hid that the colour net never
+ran. `Camera::capture_rgb` now drops a frame the driver flags as broken or that is shorter than
+the format; `OpenCameras::capture_liveness` reads past at most `MAX_RGB_SKIPS` = 4 broken or
+dark frames per pair, then the pair has no RGB frame and the colour net is skipped (`color=no_rgb`,
+no vote; without the Windows Hello models the open RGB models veto, as for a dropped camera).
+The IR-to-RGB registration (§5) is the 640×480 fit moved up by the 60 cropped rows.
+
+**RGB exposure.** The RGB node offers `auto_exposure` (default aperture priority),
+`exposure_time_absolute`, `exposure_dynamic_framerate`, `power_line_frequency`,
+`backlight_compensation` and `white_balance_automatic`; linux_hello sets none of them. The
+"2–3 underexposed frames every ≈ 5 s" of earlier runs are not the camera's: they are the owner's
+`irlux` daemon (`~/.local/share/irlux`, niri's ambient-light sensor, sampling every 60 s). It
+keeps the RGB camera locked in manual exposure between samples (so the camera is found at
+`auto_exposure=1`, e.g. `exposure_time_absolute=1250` → 8 fps in a dim room, and auto white
+balance off), and when its sample falls while linux_hello holds the camera, its `ffmpeg` fails
+with `EBUSY` and it retries every 5 s; each retry writes `auto_exposure=1`,
+`exposure_time_absolute=156`, then `auto_exposure=3` back, which restarts the auto-exposure:
+the frame drops to ≈ 0.15 of its level and climbs back over ≈ 25 frames (0.8 s), 2–3 dark pairs
+and 2–3 dim ones at 7.5 pairs/s. Measured 2026-10-16 by sampling the controls at 5 Hz while
+streaming: the writes recur every 5.17–5.20 s (the 5 s retry plus its work) from the moment
+irlux's 60 s sample comes due — 17, 21 and 30 s into three runs, never in a run under 15 s —
+and the `watch` output of the night before has the same dips 5.1–5.2 s apart. Alone, with the
+controls left alone, auto exposure held the level within ±2 % over 40 s with the IR stream
+running and 30 s without; no control setting of linux_hello can stop another process writing
+the controls, so none is applied, and the dark-frame skip above covers the first half of a
+restart. Dim frames are no risk to the colour net: on the restart frames of that output
+p(spoof) was 0.002–0.26 (§5). The fix belongs in irlux (open the device before touching the
+controls, and back off longer than 5 s when it is busy).
 
 **Start-up (L7).** `OpenCameras::open` opens the IR camera first (its first frame comes after
 ≈ 90 ms alone), drops `WARMUP_FRAMES = 4` frames, then opens the RGB camera (first frame after
@@ -276,10 +314,13 @@ has no colour face and the colour net is skipped with status 7, no vote, as any 
 missing input (F25). linux_hello does the same with a fixed registration
 (`pipeline::ColorRegistration::P16_GEN3`, `corresponding`): the cameras are built in side by side,
 so the IR SCRFD box maps to the RGB SCRFD box by a scale and offset per axis, x' = 0.91·x + 23,
-y' = 0.90·y + 70, the least-squares fit of the box corners over 148 saved pairs of the owner
-(`examples/color_pairs` on `validation_frames/watch_*` and a `watch` output; residual σ 3.3 px in
-x, 4.4 px in y, max 16.5 px; the face's IR box spanned x 277–361, y 98–166, so the fit is only
-checked in that area). The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes of the
+y' = 0.90·y + 10. That is the least-squares fit of the box corners over 148 saved pairs of the
+owner at RGB 640×480 (y' = 0.90·y + 70; `examples/color_pairs` on `validation_frames/watch_*` and
+a `watch` output; residual σ 3.3 px in x, 4.4 px in y, max 16.5 px; the face's IR box spanned
+x 277–361, y 98–166, so the fit is only checked in that area), less the 60 rows the 640×360
+capture crops at the top (§1). On 26 live pairs at 640×360 (owner lying down, IR box x 325–425,
+y 122–254) the mapped box is within 4 px (x) and 9 px (y) of the RGB box and every pair overlaps
+fully. The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes of the
 same face; the mapping is box to box, which is what the overlap needs. With it every saved pair
 overlaps fully (the grown box contains the RGB box); the RGB face has to sit ≈ 50 px (x) or
 ≈ 70 px (y) away from where the IR face says, half a face, before the overlap falls under 0.55.
@@ -310,6 +351,17 @@ turns it off). Good frames are the frames Windows sends to its diffusion net (st
 |---|---|---|
 | diffusion IR (12) | `lit − min(lit, ambient)` (unwarped, F40), 128×128 crop aligned on the Windows IR detector's five points (F23) | p(real) > 0.5037 → +1 |
 | colour (13) | face detected in the RGB frame, aligned crop, BGR | p(spoof) > 0.5 → −1 |
+
+The `watch` line and `log.jsonl` carry the colour net's say as `color=`: its p(spoof) when it
+ran (`color=0.013`), else why not: `no_rgb` (no RGB frame came with the pair: camera dropped or
+only broken frames, §1), `no_face` (no SCRFD face in the RGB frame), `no_match` (no RGB face
+overlaps the registered IR box, Windows' status 7), `skipped` (not a good-lighting frame, or no
+Windows Hello models; the open models' P(real) is `rgb_real=`). Live on the owner (2026-10-16,
+dim room, 10 s `watch` on a scratch template): p(spoof) 0.005–0.103, median 0.025, over 24
+good frames, `skipped` on the 2 clipped-band frames, two `MATCH`es. On the saved frames of the
+night before, which include three exposure restarts (§1): 0.002–0.26 on the dim frames
+(RGB mean 59–95 of 117), one 0.58 on a frame at normal brightness, no RGB face on two dim
+frames.
 | border (14) | whole IR frame as 128×128 | p(spoof) > 0.7 → −1 |
 | HH (15) | whole IR frame as 128×128 | p(spoof) > 0.5 → −1 |
 

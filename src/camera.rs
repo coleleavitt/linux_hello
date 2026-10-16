@@ -41,6 +41,12 @@ const ROI_RECT: u32 = 0x0098_1ae1;
 const ROI_AUTO: u32 = 0x0098_1ae2;
 /// `V4L2_UVC_REGION_OF_INTEREST_AUTO_EXPOSURE`: auto-exposure meters the rectangle.
 const ROI_AUTO_EXPOSURE: i32 = 1;
+/// RGB capture size: the IR frame's. On the P16 Gen 3 (USB 2.0) YUYV 640×480 next to the IR
+/// stream arrives truncated at 155–173 KB of 614 400 in every frame (`V4L2_BUF_FLAG_ERROR`);
+/// 640×360, the same frame cropped by 60 rows top and bottom, arrives whole
+/// (docs/capture-and-liveness.md §1).
+pub(crate) const RGB_WIDTH: u32 = 640;
+pub(crate) const RGB_HEIGHT: u32 = 360;
 
 /// Camera type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +143,7 @@ impl Camera {
             CameraType::Ir => device
                 .set_format(&v4l::Format::new(640, 480, FourCC::new(b"GREY")))
                 .or_else(|_| device.set_format(&v4l::Format::new(640, 480, FourCC::new(b"YUYV"))))?,
-            CameraType::Rgb => device.set_format(&v4l::Format::new(640, 480, FourCC::new(b"YUYV")))?,
+            CameraType::Rgb => device.set_format(&v4l::Format::new(RGB_WIDTH, RGB_HEIGHT, FourCC::new(b"YUYV")))?,
         };
 
         let width = format.width;
@@ -188,12 +194,19 @@ impl Camera {
         Ok(GrayFrame { image: self.rotation.apply(image), sequence: meta.sequence, time })
     }
 
-    /// Capture a single frame as RGB
-    pub fn capture_rgb(&mut self) -> Result<RgbImage> {
-        let (buf, _meta) = self.stream.next()?;
+    /// Capture a single frame as RGB; `None` for a frame the driver flagged as broken or that
+    /// is shorter than the format (the mapped buffer is returned whole, so the missing part
+    /// would show as the previous frame's pixels, or green where it was never written).
+    pub fn capture_rgb(&mut self) -> Result<Option<RgbImage>> {
+        let (buf, meta) = self.stream.next()?;
+        let expected = self.width * self.height * 2;
+        if meta.flags.contains(v4l::buffer::Flags::ERROR) || meta.bytesused < expected {
+            debug!(bytesused = meta.bytesused, expected, flags = ?meta.flags, "broken RGB frame");
+            return Ok(None);
+        }
 
         let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
-        for chunk in buf.chunks(4) {
+        for chunk in buf[..expected as usize].chunks(4) {
             if chunk.len() < 4 {
                 break;
             }
@@ -208,7 +221,7 @@ impl Camera {
         }
 
         let image = RgbImage::from_raw(self.width, self.height, rgb).context("invalid RGB conversion")?;
-        Ok(self.rotation.apply(image))
+        Ok(Some(self.rotation.apply(image)))
     }
 
     pub fn width(&self) -> u32 {

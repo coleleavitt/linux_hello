@@ -23,7 +23,8 @@ const LIVENESS_BUFFERS: u32 = 2;
 /// session goes on without RGB, so the colour net is skipped as Windows skips a classifier whose
 /// input is missing (F25 status 6/7).
 const RGB_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
-const MAX_DARK_SKIPS: usize = 4;
+/// Broken or underexposed RGB frames read past for one pair before it goes without.
+const MAX_RGB_SKIPS: usize = 4;
 const DARK_RATIO: f32 = 0.5;
 /// Prints one enrollment collects (F54: 16 per enrolment in the v5 parameter block).
 pub const ENROLL_PRINTS: usize = 16;
@@ -113,33 +114,36 @@ impl OpenCameras {
         }
     }
 
-    /// The RGB camera underexposes 2-3 frames about every 5 s, and the liveness models reject
-    /// those. Skip frames much darker than the recent average (up to a few in a row).
-    /// A camera that stops delivering frames ([`RGB_FRAME_TIMEOUT`]) is dropped for the session.
+    /// The RGB frame for this pair: the next frame that is whole ([`Camera::capture_rgb`]) and
+    /// not much darker than the recent average (an auto-exposure restart, as another process
+    /// writing the exposure controls causes, darkens ≈ 0.8 s of frames; docs/capture-and-liveness.md
+    /// §1). Up to [`MAX_RGB_SKIPS`] frames are skipped;
+    /// after that the pair has no RGB frame and the colour net is skipped (no veto). A camera
+    /// that stops delivering frames ([`RGB_FRAME_TIMEOUT`]) is dropped for the session.
     fn capture_liveness(&mut self) -> Result<Option<RgbImage>> {
         let Some(cam) = self.liveness.as_mut() else { return Ok(None) };
         let frame = (|| {
-            let mut frame = cam.capture_rgb()?;
-            for _ in 0..MAX_DARK_SKIPS {
+            for _ in 0..=MAX_RGB_SKIPS {
+                let Some(frame) = cam.capture_rgb()? else { continue };
                 let level = brightness(&frame);
                 match self.rgb_level {
-                    Some(avg) if level < DARK_RATIO * avg => {
-                        debug!(level, avg, "skipping underexposed RGB frame");
-                        frame = cam.capture_rgb()?;
-                    }
+                    Some(avg) if level < DARK_RATIO * avg => debug!(level, avg, "skipping underexposed RGB frame"),
                     _ => {
                         self.rgb_level = Some(self.rgb_level.map_or(level, |avg| 0.8 * avg + 0.2 * level));
-                        break;
+                        return Ok(Some(frame));
                     }
                 }
             }
-            Ok(frame)
+            debug!("no usable RGB frame for this pair");
+            Ok(None)
         })();
-        let frame = without_rgb_on_timeout(frame, "RGB frame stalled")?;
-        if frame.is_none() {
-            self.liveness = None;
+        match without_rgb_on_timeout(frame, "RGB frame stalled")? {
+            Some(frame) => Ok(frame),
+            None => {
+                self.liveness = None;
+                Ok(None)
+            }
         }
-        Ok(frame)
     }
 }
 
@@ -476,9 +480,11 @@ impl Attempt {
 }
 
 /// One line per frame pair, one part per face: its track, face brightness lit/ambient, emitter
-/// gain, lighting status or rejection reason, RGB P(real), vote, similarity and its estimated
-/// FAR, Microsoft's distance and FAR when its recogniser gave a second opinion, whether the
-/// track is recognised and its liveness state; `no_face` without a face.
+/// gain, lighting status or rejection reason, RGB P(real) of the open models, the colour net's
+/// p(spoof) or why it did not run (`color=0.031`, `no_rgb`, `no_face`, `no_match`, `skipped`),
+/// Windows' frame total, vote, similarity and its estimated FAR, Microsoft's distance and FAR
+/// when its recogniser gave a second opinion, whether the track is recognised and its liveness
+/// state; `no_face` without a face.
 pub fn describe(check: &FrameCheck, session: &Session) -> String {
     if check.faces.is_empty() {
         return "no_face".to_string();
@@ -493,12 +499,13 @@ pub fn describe(check: &FrameCheck, session: &Session) -> String {
             (None, None) => "-".to_string(),
         };
         format!(
-            "track={track} lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={} \
-             far={} ms={} ms_far={} recognised={} liveness={:?}",
+            "track={track} lit={} ambient={} d={} status={status} rgb_real={} color={} windows={} vote={:?} \
+             similarity={} far={} ms={} ms_far={} recognised={} liveness={:?}",
             num(l.map(|l| l.lit), 1),
             num(l.map(|l| l.ambient), 1),
             num(l.map(|l| l.gain()), 1),
             num(check.liveness, 3),
+            check.color,
             check.windows.as_ref().map_or("-".to_string(), |w| w.total.to_string()),
             check.vote,
             num(check.best.map(|b| b.similarity), 3),
@@ -740,6 +747,7 @@ mod tests {
             },
             liveness: None,
             windows: None,
+            color: crate::pipeline::ColorNet::Skipped,
             vote,
             best: Some(PrintMatch {
                 similarity,
@@ -792,6 +800,7 @@ mod tests {
             },
             liveness: None,
             windows: None,
+            color: crate::pipeline::ColorNet::Skipped,
             vote: Vote::Abstain,
             best: None,
         }
