@@ -8,8 +8,8 @@ use tracing::{debug, info};
 
 use crate::lighting::{subtract_ambient, Lighting, LightingStatus};
 use crate::{
-    gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, PrintMatch,
-    Template, Vote,
+    gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
+    PrintMatch, Template, Vote, WindowsHelloModels,
 };
 
 /// Minimum face box width in pixels (F46, F54).
@@ -44,6 +44,8 @@ pub struct FrameCheck {
     pub analysis: Analysis,
     /// Mean P(real) of the RGB liveness models; only for good-lighting frames
     pub liveness: Option<f32>,
+    /// Windows Hello anti-spoofing frame vote; only for good-lighting frames
+    pub windows: Option<MsFrame>,
     pub vote: Vote,
     /// Closest print of the user's template
     pub best: Option<PrintMatch>,
@@ -53,6 +55,7 @@ pub struct FacePipeline {
     detector: FaceDetector,
     embedder: FaceEmbedder,
     liveness: Vec<AntiSpoof>,
+    windows: Option<WindowsHelloModels>,
     store: FaceStore,
 }
 
@@ -68,7 +71,21 @@ impl FacePipeline {
         let detector = FaceDetector::load(detector_path)?;
         let embedder = FaceEmbedder::load(embedder_path)?;
         let store = FaceStore::load(store_path)?;
-        Ok(Self { detector, embedder, liveness, store })
+        Ok(Self { detector, embedder, liveness, windows: None, store })
+    }
+
+    /// Add the Windows Hello anti-spoofing vote and occlusion gate.
+    pub fn with_windows_hello(mut self, models: WindowsHelloModels) -> Self {
+        self.windows = Some(models);
+        self
+    }
+
+    /// While enrolling, Windows rejects a face that is occluded with probability above 0.5
+    /// instead of 0.9 (F46).
+    pub fn set_enrolling(&mut self, enrolling: bool) {
+        if let Some(w) = &mut self.windows {
+            w.occlusion.set_enrollment_mode(enrolling);
+        }
     }
 
     /// Detect the largest face in the image.
@@ -99,6 +116,13 @@ impl FacePipeline {
             LightingStatus::TooBright => Some(FaceProblem::TooBright),
             LightingStatus::Good | LightingStatus::Weak => None,
         });
+        let problem = match (problem, &mut self.windows) {
+            (None, Some(w)) => {
+                let occlusion = w.occlusion.check(&pair.lit, &face)?;
+                occlusion.is_occluded.then_some(FaceProblem::Occluded)
+            }
+            (problem, _) => problem,
+        };
         if let Some(problem) = problem {
             debug!(?problem, lit = lighting.lit, ambient = lighting.ambient, "frame rejected");
             return Ok(Analysis { face: Some(face), lighting: Some(lighting), problem: Some(problem), print: None });
@@ -112,28 +136,38 @@ impl FacePipeline {
     }
 
     /// Run every stage on one frame pair. The face is compared only with `user`'s template.
-    /// The RGB liveness models run on `rgb`, the frame captured alongside the pair, for
-    /// good-lighting frames only: the others cannot vote live.
+    /// The liveness models run on good-lighting frames only (the others cannot vote live); the
+    /// RGB ones on `rgb`, the frame captured alongside the pair.
     pub fn check(&mut self, user: &str, pair: &IrPair, rgb: Option<&RgbImage>) -> Result<FrameCheck> {
         let analysis = self.analyze(pair)?;
-        let Some(print) = &analysis.print else {
-            return Ok(FrameCheck { analysis, liveness: None, vote: Vote::Abstain, best: None });
+        let (Some(print), Some(face)) = (&analysis.print, &analysis.face) else {
+            return Ok(FrameCheck { analysis, liveness: None, windows: None, vote: Vote::Abstain, best: None });
         };
         let best = self.store.get(user).and_then(|t| t.best_match(print));
-        let good = analysis.status() == Some(LightingStatus::Good);
-        let liveness = if good && !self.liveness.is_empty() { Some(self.rgb_liveness(rgb)?) } else { None };
-        let vote = Vote::from_evidence(good, liveness);
-        Ok(FrameCheck { analysis, liveness, vote, best })
+        if analysis.status() != Some(LightingStatus::Good) {
+            let vote = Vote::from_evidence(false, None, None);
+            return Ok(FrameCheck { analysis, liveness: None, windows: None, vote, best });
+        }
+        let rgb_face = match rgb {
+            Some(image) => self.largest_face(image)?.map(|f| (image, f)),
+            None => None,
+        };
+        let liveness = (!self.liveness.is_empty()).then(|| self.rgb_liveness(rgb_face.as_ref())).transpose()?;
+        let windows = match &mut self.windows {
+            Some(w) => Some(w.liveness.frame(&pair.lit, Some(&pair.ambient), face, rgb_face.as_ref().map(|(i, f)| (*i, f)))?),
+            None => None,
+        };
+        let vote = Vote::from_evidence(true, liveness, windows.as_ref().map(|w| w.total));
+        Ok(FrameCheck { analysis, liveness, windows, vote, best })
     }
 
     /// Mean "real" probability over the RGB liveness models; 0 (a veto) when there is no RGB
     /// frame or no face in it.
-    fn rgb_liveness(&mut self, rgb: Option<&RgbImage>) -> Result<f32> {
-        let Some(image) = rgb else { return Ok(0.0) };
-        let Some(face) = self.largest_face(image)? else { return Ok(0.0) };
+    fn rgb_liveness(&mut self, rgb: Option<&(&RgbImage, Face)>) -> Result<f32> {
+        let Some((image, face)) = rgb else { return Ok(0.0) };
         let mut total = 0.0;
         for model in &mut self.liveness {
-            total += model.check(image, &face)?.score;
+            total += model.check(image, face)?.score;
         }
         Ok(total / self.liveness.len() as f32)
     }
@@ -178,8 +212,8 @@ fn area(f: &Face) -> f32 {
     (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
 }
 
-/// Size and edge gates of Windows' per-frame check (F46). Pose (|yaw| ≤ 20°, |pitch| ≤ 25°) and
-/// occlusion are not checked: they need models linux_hello does not have.
+/// Size and edge gates of Windows' per-frame check (F46). Occlusion is checked in `analyze` when
+/// the Windows Hello models are loaded. Pose (|yaw| ≤ 20°, |pitch| ≤ 25°) is not checked.
 fn geometry_problem(face: &Face, width: u32, height: u32) -> Option<FaceProblem> {
     let [x1, y1, x2, y2] = face.bbox;
     if x2 - x1 < MIN_FACE_PX.max(MIN_FACE_RATIO * width.min(height) as f32) {

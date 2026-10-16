@@ -3,7 +3,7 @@
 //! Protocol, one line each way: the client sends `AUTH <user>`, the daemon answers with a
 //! [`Verdict`] (`MATCH 0.850`, `NOMATCH 0.120`, `NOTLIVE`, `NOFACE <reason>`, `NOTENROLLED`) or
 //! `ERROR <message>`. The first word decides; `<reason>` is one of `no_face`, `too_dark`,
-//! `too_bright`, `too_far`, `edge` (see [`crate::FaceProblem`]).
+//! `too_bright`, `too_far`, `edge`, `occluded` (see [`crate::FaceProblem`]).
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read, Write};

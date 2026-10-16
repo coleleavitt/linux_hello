@@ -36,10 +36,10 @@ pub use pipeline::{FacePipeline, FrameCheck};
 pub use store::FaceStore;
 pub use lid::{get_lid_state, should_suppress_auth, LidState};
 pub use tracker::{FaceTracker, Track, TrackState};
-pub use ms_models::{MsIrLiveness, MsLivenessResult, MsModelScores};
+pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{OcclusionDetector, OcclusionType, OcclusionResult};
 pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
-pub use ms_models::{HeadPose, PoseChecker, PoseConfig};
+pub use ms_models::{HeadPose, PoseChecker, PoseConfig, WindowsHelloModels};
 
 use ort::environment::Environment;
 use serde::{Deserialize, Serialize};
@@ -128,6 +128,8 @@ pub enum FaceProblem {
     TooBright,
     /// Face narrower than 72 px or 0.12 × the shorter frame side (F46)
     TooFar,
+    /// Mask, sunglasses or hand over the face (F46; Windows Hello occlusion model)
+    Occluded,
     /// Face closer to a frame edge than a fifth of the eye distance (F46)
     Edge,
 }
@@ -140,6 +142,7 @@ impl FaceProblem {
             FaceProblem::TooBright => "too_bright",
             FaceProblem::TooFar => "too_far",
             FaceProblem::Edge => "edge",
+            FaceProblem::Occluded => "occluded",
         }
     }
 }

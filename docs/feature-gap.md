@@ -46,7 +46,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Min face width 72 px and ≥ 0.12 × min(frame w,h) (F46, F54) | **Done** (`too_far`) | — |
 | Edge cut: box ≥ inter-ocular/5 from border (F46) | **Done** (`edge`, frame rejected) | — |
 | Frontal pose: |yaw| ≤ 20°, |pitch| ≤ 25° (F46, F59) | Missing | Estimate from 5 points (eye/nose/mouth geometry) or port IrFaceOrientation (LBP+LDA+KNN, resources 104–107, `lbf.md`) |
-| Occlusion detectors (eyes, mouth/nose, face; ONNX); 4 consecutive occluded frames → give up; occlusion mode after 30 frames ≥ 50 % (F46, F61) | Missing | Windows' occlusion ORT is XOR-hidden but recoverable (F61); licence unclear. Alternative: landmark-confidence / mask detector |
+| Occlusion detectors (eyes, mouth/nose, face; ONNX); 4 consecutive occluded frames → give up; occlusion mode after 30 frames ≥ 50 % (F46, F61) | **Partial**: face-level occlusion gate in `FacePipeline::analyze` (converted Windows Hello model, used when `models/windows_hello/converted` exists; 1 − p_none > 0.9, 0.5 while enrolling; face-box input as in `sub_18004B5B8`); occluded frames give no print and the reply `NOFACE occluded`. The 4-frame give-up and occlusion mode are Missing | — |
 | Re-attempt by movement (centre range > 0.01, size ±20 %) or exposure (σ > 12) before rejecting (F49) | Missing (fixed 16 frame pairs) | Keep per-session stats; extend the session once on movement/exposure change |
 | Colour-face correspondence + colour quality (edge cut, too close/far, low-confidence alignment) (`EvaluateColorFaceQuality`) | Partial: largest face on RGB, no geometric correspondence to IR face | Map IR box to RGB with a fixed extrinsic offset; reject if none |
 
@@ -54,9 +54,9 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| IR CNNs (general on lit crop, diffusion on difference crop), 128×128×1, SqueezeNet, cosine 2×512 head (F22, F23, F42, F62) | Missing: no IR liveness; README notes RGB models reject IR | Train/obtain an IR anti-spoof model, or convert Windows' conv_net models (convnet.md has a converter; licence: proprietary, local use only) |
+| IR CNNs (general on lit crop, diffusion on difference crop), 128×128×1, SqueezeNet, cosine 2×512 head (F22, F23, F42, F62) | **Done** (converted Windows Hello model, used when `models/windows_hello/converted` exists): good-lighting frames run the diffusion net (slot 12) on the difference image, flag-on mode-0 thresholds; the frame total (F25) must be > 0 together with the lighting gate for a live vote (`Vote::from_evidence`). The general net (slot 11) runs only in `examples/ms_check` | — |
 | Colour CNN veto (BGR 128×128) (F22, F62) | **Done** differently: FaceNox + MiniFASNetV2 mean < 0.5 vetoes a frame (−2, so a vetoed frame is a spoof vote) | — |
-| Multi-task IR border / HH vetoes, enabled after first live vote (F22, F42) | Missing | Optional |
+| Multi-task IR border / HH vetoes, enabled after first live vote (F22, F42) | **Done** (converted Windows Hello model, used when `models/windows_hello/converted` exists); they run on every good-lighting frame, not only after the first live vote, which can only add vetoes. The colour net (slot 13) runs on the face detected in the RGB frame | — |
 | Thresholds: IR live > 0.5 (strict 0.9), spoof > 0.5 strict only; colour 0.5; border 0.7 (F24) | Partial: 0.5 on RGB mean | Use per-model thresholds once IR model exists |
 | Frame voting: ≥ 2 live → accept, ≥ 3 spoof → reject, 48 frames → reject; counted from the recognition frame (F25, F48) | **Done**: live vote = good lighting status; counted from recognition; give up after 16 pairs | — |
 | Fail closed if liveness enabled but no model loaded (F25) | Done-ish: `--no-liveness` disables explicitly; missing model fails at load | — |
@@ -114,7 +114,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Feedback reasons: too close/far, too bright/dark, too much ambient, backlight, occluded, large pose (F45, F46) | **Done** for too dark/bright/far, edge, no face, not live, not recognized (`NOFACE <reason>` reply, PAM `PAM_TEXT_INFO`); ambient/occlusion/pose Missing | — |
+| Feedback reasons: too close/far, too bright/dark, too much ambient, backlight, occluded, large pose (F45, F46) | **Done** for too dark/bright/far, edge, occluded, no face, not live, not recognized (`NOFACE <reason>` reply, PAM `PAM_TEXT_INFO`); ambient/pose Missing | — |
 | Notifications: improve recognition, liveness suggestion, get help (days intervals) (F56) | N/A | — |
 | Extensive telemetry (per-frame decisions, GFP, counts) | Partial: `watch` command, tracing logs | Log gate reasons and vote counts per session |
 

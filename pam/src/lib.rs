@@ -124,6 +124,7 @@ fn failure_message(reply: &str) -> &'static CStr {
         (Some("NOFACE"), Some("too_bright")) => c"Face too bright: move back from the camera",
         (Some("NOFACE"), Some("too_far")) => c"Face too small: move closer to the camera",
         (Some("NOFACE"), Some("edge")) => c"Face at the edge of the picture: center it in front of the camera",
+        (Some("NOFACE"), Some("occluded")) => c"Face covered: remove the mask, sunglasses or hand",
         (Some("NOFACE"), _) => c"No face seen by the camera",
         (Some("NOTLIVE"), _) => c"Face not accepted as live",
         _ => c"Face not recognized",

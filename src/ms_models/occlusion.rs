@@ -5,18 +5,16 @@
 //! - Input: 1x1x128x128 (aligned face crop, x/127.5 - 1 normalized)
 //! - Output: 1x4 softmax [none, mask, sunglasses, hand]
 
-use anyhow::{Context, Result};
-use image::{GrayImage, RgbImage};
+use anyhow::Result;
+use image::GrayImage;
 use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
 use std::path::Path;
 use tracing::debug;
 
-use crate::{get_ort_env, Face};
+use crate::Face;
 
 const INPUT_SIZE: usize = 128;
-const ALIGN_SIZE: usize = 281;
 
 /// Detected occlusion type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,34 +85,7 @@ impl OcclusionDetector {
         let model_path = model_path.as_ref();
         debug!(?model_path, "loading occlusion model");
 
-        let session = if model_path.ends_with(".onnx") && model_path.join("../weights").exists() {
-            let npz_path = model_path.parent().unwrap().join("../weights").join(
-                model_path.file_name().unwrap().to_string_lossy().replace(".onnx", ".npz"),
-            );
-            if npz_path.exists() {
-                debug!(?npz_path, "loading occlusion from npz");
-                Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(&std::path::PathBuf::from("/tmp/.ms_model_tmp.onnx"))
-                    .with_context(|| format!("failed to load {}", npz_path.display()))?
-            } else {
-                Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(model_path)
-                    .with_context(|| format!("failed to load {}", model_path.display()))?
-            }
-        } else {
-            Session::builder(get_ort_env()?)
-                .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                .commit_from_file(model_path)
-                .with_context(|| format!("failed to load {}", model_path.display()))?
-        };
+        let session = super::load_session(model_path)?;
 
         Ok(Self { session, threshold: 0.9 })
     }
@@ -124,23 +95,9 @@ impl OcclusionDetector {
         self.threshold = if enrollment { 0.5 } else { 0.9 };
     }
 
-    /// Check for occlusion in the given image with detected face.
-    /// The image should be grayscale IR or RGB (will be converted to grayscale).
-    pub fn check(&mut self, image: &RgbImage, face: &Face) -> Result<OcclusionResult> {
-        let gray = image::imageops::grayscale(image);
-        self.check_gray(&gray, face)
-    }
-
     /// Check for occlusion using a grayscale image.
-    pub fn check_gray(&mut self, image: &GrayImage, face: &Face) -> Result<OcclusionResult> {
-        // Align and crop to 128x128 using Windows Hello preprocessing
-        let aligned = align_crop_winhello(image, &face.landmarks);
-
-        // Normalize: x / 127.5 - 1
-        let mut data = vec![0.0f32; INPUT_SIZE * INPUT_SIZE];
-        for (i, &px) in aligned.iter().enumerate() {
-            data[i] = px as f32 / 127.5 - 1.0;
-        }
+    pub fn check(&mut self, lit: &GrayImage, face: &Face) -> Result<OcclusionResult> {
+        let data = box_input(lit, face.bbox);
 
         // Run inference: input shape is 1x1x128x128
         let input = TensorRef::from_array_view((
@@ -199,175 +156,30 @@ fn softmax_4(logits: &[f32]) -> [f32; 4] {
 // Windows Hello alignment (ported from tools/winhello_models/convnet/msprep.py)
 // ============================================================================
 
-/// 5 landmark template in 281x281 space (from FaceRecognitionEngineAdapter.dll).
-#[allow(clippy::excessive_precision)]  // Exact values from Windows DLL memory
-const TEMPLATE_281: [[f32; 2]; 5] = [
-    [97.82990264892578, 127.7791976928711],
-    [181.05320739746094, 126.33809661865234],
-    [139.57400512695312, 179.00059509277344],
-    [102.69640350341797, 216.70140075683594],
-    [179.30679321289062, 215.37330627441406],
-];
-
-/// Align and crop face using Windows Hello preprocessing.
-/// Matches sub_180015F68 -> sub_18001614C -> sub_180016B20 -> sub_180016440.
-fn align_crop_winhello(image: &GrayImage, landmarks: &[[f32; 2]; 5]) -> Vec<u8> {
-    // Step 1: Fit similarity transform from landmarks to template
-    let m = fit_similarity(landmarks);
-
-    // Step 2: Warp to 281x281
-    let warped = warp_281(image, &m);
-
-    // Step 3: Resize central 230x230 to 128x128
-    resize_281_to_128(&warped)
-}
-
-/// Least-squares similarity transform: dst = [[a, b], [-b, a]] * (src - src_mean) + dst_mean.
-/// Returns the 2x3 matrix [[a, b, tx], [-b, a, ty]].
-fn fit_similarity(src: &[[f32; 2]; 5]) -> [[f32; 3]; 2] {
-    let dst = &TEMPLATE_281;
-
-    // Compute means
-    let (mut smx, mut smy) = (0.0f32, 0.0f32);
-    let (mut dmx, mut dmy) = (0.0f32, 0.0f32);
-    for i in 0..5 {
-        smx += src[i][0];
-        smy += src[i][1];
-        dmx += dst[i][0];
-        dmy += dst[i][1];
-    }
-    smx /= 5.0;
-    smy /= 5.0;
-    dmx /= 5.0;
-    dmy /= 5.0;
-
-    // Compute sums for the transform (matching Python msprep.py)
-    let (mut sxx, mut sp, mut sm) = (0.0f32, 0.0f32, 0.0f32);
-    for i in 0..5 {
-        let sx = src[i][0] - smx;
-        let sy = src[i][1] - smy;
-        let dx = dst[i][0] - dmx;
-        let dy = dst[i][1] - dmy;
-        sxx += sx * sx + sy * sy;
-        sp += sx * dx + sy * dy;
-        sm += sx * dy - sy * dx;
-    }
-
-    let var = sxx.max(1e-6);
-    let a = sp / var;
-    let b = sm / var;
-    let tx = dmx - a * smx - b * smy;
-    let ty = dmy + b * smx - a * smy;
-
-    [[a, b, tx], [-b, a, ty]]
-}
-
-/// Warp image to 281x281 using the inverse of the similarity transform.
-fn warp_281(image: &GrayImage, m: &[[f32; 3]; 2]) -> Vec<u8> {
-    // Compute inverse of the 2x3 affine matrix
-    // M = [[a, b, tx], [-b, a, ty]]
-    // det = a^2 + b^2
-    let a = m[0][0];
-    let b = m[0][1];
-    let tx = m[0][2];
-    let ty = m[1][2];
-    let det = a * a + b * b;
-    let inv_det = 1.0 / det.max(1e-12);
-
-    // Inverse: [[a, -b, -(a*tx - b*ty)], [b, a, -(b*tx + a*ty)]] / det
-    let ia = a * inv_det;
-    let ib = -b * inv_det;
-    let itx = -(a * tx - b * ty) * inv_det;
-    let ity = -(b * tx + a * ty) * inv_det;
-
-    let (w, h) = (image.width() as i64, image.height() as i64);
-    let mut out = vec![0u8; ALIGN_SIZE * ALIGN_SIZE];
-
-    for dy in 0..ALIGN_SIZE {
-        for dx in 0..ALIGN_SIZE {
-            let dxf = dx as f32;
-            let dyf = dy as f32;
-            let sx = ia * dxf + ib * dyf + itx;
-            let sy = -ib * dxf + ia * dyf + ity;
-
-            // Bilinear sample with truncation (Windows Hello behavior)
-            out[dy * ALIGN_SIZE + dx] = bilinear_trunc_gray(image, sx, sy, w, h);
+/// The face box of the lit luminance image resampled to 128×128, as `x/127.5 − 1`
+/// (`sub_18004B5B8` / `sub_18004B6FC`; reference `tools/winhello_models/cefa/occlusion.py`).
+fn box_input(image: &GrayImage, bbox: [f32; 4]) -> Vec<f32> {
+    let [x0, y0, x1, y1] = bbox.map(|v| v.round());
+    let (w, h) = (x1 - x0, y1 - y0);
+    let (max_x, max_y) = (image.width() as f32 - 1.0, image.height() as f32 - 1.0);
+    let at = |x: f32, y: f32| image.get_pixel(x as u32, y as u32)[0] as f32;
+    let mut out = Vec::with_capacity(INPUT_SIZE * INPUT_SIZE);
+    for ky in 0..INPUT_SIZE {
+        let y = (y0 + (ky as f32 - 63.5) * (h / 128.0) + (h - 1.0) * 0.5).clamp(0.0, max_y);
+        let (ya, fy) = (y.floor(), y - y.floor());
+        let yb = (ya + 1.0).min(max_y);
+        for kx in 0..INPUT_SIZE {
+            let x = (x0 + (kx as f32 - 63.5) * (w / 128.0) + (w - 1.0) * 0.5).clamp(0.0, max_x);
+            let (xa, fx) = (x.floor(), x - x.floor());
+            let xb = (xa + 1.0).min(max_x);
+            let v = at(xa, ya) * (1.0 - fx) * (1.0 - fy)
+                + at(xb, ya) * fx * (1.0 - fy)
+                + at(xa, yb) * (1.0 - fx) * fy
+                + at(xb, yb) * fx * fy;
+            out.push((v as u8) as f32 / 127.5 - 1.0);
         }
     }
-
     out
-}
-
-/// Bilinear sample with truncation (matches Windows DLL behavior).
-/// Outside [0, w-1] x [0, h-1] returns 0.
-fn bilinear_trunc_gray(image: &GrayImage, sx: f32, sy: f32, w: i64, h: i64) -> u8 {
-    if sx < 0.0 || sy < 0.0 || sx > (w - 1) as f32 || sy > (h - 1) as f32 {
-        return 0;
-    }
-
-    let x0 = sx.floor() as i64;
-    let y0 = sy.floor() as i64;
-    let x1 = (x0 + 1).min(w - 1);
-    let y1 = (y0 + 1).min(h - 1);
-
-    let fx = sx - x0 as f32;
-    let fy = sy - y0 as f32;
-    let gx = 1.0 - fx;
-    let gy = 1.0 - fy;
-
-    let p00 = image.get_pixel(x0 as u32, y0 as u32).0[0] as f32;
-    let p10 = image.get_pixel(x1 as u32, y0 as u32).0[0] as f32;
-    let p01 = image.get_pixel(x0 as u32, y1 as u32).0[0] as f32;
-    let p11 = image.get_pixel(x1 as u32, y1 as u32).0[0] as f32;
-
-    let val = p00 * gy * gx + p10 * gy * fx + p01 * fy * gx + p11 * fy * fx;
-    // Truncate (floor), not round, matching the DLL
-    val.floor().clamp(0.0, 255.0) as u8
-}
-
-/// Resize the central 230x230 of a 281x281 image to 128x128.
-/// Matches sub_180016440: src = (i - out/2) * 230/(out-1) + 140.5.
-fn resize_281_to_128(warped: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; INPUT_SIZE * INPUT_SIZE];
-    let half = (INPUT_SIZE / 2) as f32;
-    let scale = 230.0 / (INPUT_SIZE as f32 - 1.0);
-    let center = 140.5;
-
-    for j in 0..INPUT_SIZE {
-        for i in 0..INPUT_SIZE {
-            let sx = (i as f32 - half) * scale + center;
-            let sy = (j as f32 - half) * scale + center;
-            out[j * INPUT_SIZE + i] = bilinear_trunc_281(warped, sx, sy);
-        }
-    }
-
-    out
-}
-
-/// Bilinear sample from 281x281 buffer with truncation.
-fn bilinear_trunc_281(data: &[u8], sx: f32, sy: f32) -> u8 {
-    let size = ALIGN_SIZE as i64;
-    if sx < 0.0 || sy < 0.0 || sx > (size - 1) as f32 || sy > (size - 1) as f32 {
-        return 0;
-    }
-
-    let x0 = sx.floor() as usize;
-    let y0 = sy.floor() as usize;
-    let x1 = (x0 + 1).min(ALIGN_SIZE - 1);
-    let y1 = (y0 + 1).min(ALIGN_SIZE - 1);
-
-    let fx = sx - x0 as f32;
-    let fy = sy - y0 as f32;
-    let gx = 1.0 - fx;
-    let gy = 1.0 - fy;
-
-    let p00 = data[y0 * ALIGN_SIZE + x0] as f32;
-    let p10 = data[y0 * ALIGN_SIZE + x1] as f32;
-    let p01 = data[y1 * ALIGN_SIZE + x0] as f32;
-    let p11 = data[y1 * ALIGN_SIZE + x1] as f32;
-
-    let val = p00 * gy * gx + p10 * gy * fx + p01 * fy * gx + p11 * fy * fx;
-    val.floor().clamp(0.0, 255.0) as u8
 }
 
 #[cfg(test)]

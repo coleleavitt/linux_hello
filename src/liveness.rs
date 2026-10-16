@@ -1,9 +1,9 @@
 //! Liveness voting, after Windows' `AntiSpoofingDecisionEngine` (F24, F25, F48).
 //!
-//! Windows' live votes come from two IR anti-spoofing CNNs; their models are proprietary, so
-//! here the IR evidence is the lighting gate: a face that reflects the emitter like skin, with
-//! little ambient IR (F14). The RGB models (FaceNox + MiniFASNetV2) can only veto, like
-//! Windows' colour CNN. Votes are counted only from the frame the face is recognised (F48).
+//! The IR evidence of a frame is the lighting gate (a face that reflects the emitter like skin,
+//! with little ambient IR, F14) and, when the converted Windows Hello models are installed, their
+//! frame vote (F25). The open RGB models (FaceNox + MiniFASNetV2) can only veto, like Windows'
+//! colour CNN. Votes are counted only from the frame the face is recognised (F48).
 
 /// RGB liveness: mean P(real) below this vetoes the frame.
 pub const RGB_REAL_THRESHOLD: f32 = 0.5;
@@ -22,19 +22,20 @@ pub enum Vote {
 }
 
 impl Vote {
-    /// Sum the evidence of a frame pair: good lighting (F44 status 1) gives +1; the RGB veto
-    /// (`rgb_real` below [`RGB_REAL_THRESHOLD`]) gives −2. Any other frame casts no vote.
+    /// Sum the evidence of a frame pair. Only good-lighting frames (F44 status 1) vote. Their IR
+    /// evidence is +1, or the Windows Hello frame total (`ms_total`, F25) when those models run,
+    /// so a frame is live only when the emitter lighting and the Windows Hello nets agree. The RGB
+    /// veto (`rgb_real` below [`RGB_REAL_THRESHOLD`]) gives −2.
     ///
-    /// Windows' colour veto counts −1 against two IR CNN votes, so it can cancel a live frame,
-    /// and the spoof votes that reject a session come from the IR CNNs. With a single IR vote
-    /// here, the veto weighs −2 (the weight Windows gives its multi-task IR vetoes in strict
-    /// mode) so that a vetoed frame is a spoof frame and three of them reject the session.
-    pub fn from_evidence(good_lighting: bool, rgb_real: Option<f32>) -> Self {
+    /// Windows' colour veto counts −1 against two IR CNN votes. With one IR vote here, the veto
+    /// weighs −2 (the weight Windows gives its multi-task IR vetoes in strict mode) so that a
+    /// vetoed frame is a spoof frame and three of them reject the session.
+    pub fn from_evidence(good_lighting: bool, rgb_real: Option<f32>, ms_total: Option<i32>) -> Self {
         if !good_lighting {
             return Vote::Abstain;
         }
         let veto = rgb_real.is_some_and(|p| p < RGB_REAL_THRESHOLD);
-        let total = 1 - if veto { 2 } else { 0 };
+        let total = ms_total.unwrap_or(1) - if veto { 2 } else { 0 };
         match total.cmp(&0) {
             std::cmp::Ordering::Greater => Vote::Live,
             std::cmp::Ordering::Less => Vote::Spoof,
@@ -85,11 +86,16 @@ mod tests {
 
     #[test]
     fn frame_votes() {
-        assert_eq!(Vote::from_evidence(true, None), Vote::Live);
-        assert_eq!(Vote::from_evidence(true, Some(0.9)), Vote::Live);
-        assert_eq!(Vote::from_evidence(true, Some(0.2)), Vote::Spoof);
-        assert_eq!(Vote::from_evidence(false, Some(0.9)), Vote::Abstain);
-        assert_eq!(Vote::from_evidence(false, Some(0.1)), Vote::Abstain);
+        assert_eq!(Vote::from_evidence(true, None, None), Vote::Live);
+        assert_eq!(Vote::from_evidence(true, Some(0.9), None), Vote::Live);
+        assert_eq!(Vote::from_evidence(true, Some(0.2), None), Vote::Spoof);
+        assert_eq!(Vote::from_evidence(false, Some(0.9), None), Vote::Abstain);
+        assert_eq!(Vote::from_evidence(false, Some(0.1), None), Vote::Abstain);
+        // The Windows Hello nets must agree with the lighting gate.
+        assert_eq!(Vote::from_evidence(true, Some(0.9), Some(1)), Vote::Live);
+        assert_eq!(Vote::from_evidence(true, Some(0.9), Some(0)), Vote::Abstain);
+        assert_eq!(Vote::from_evidence(true, Some(0.9), Some(-1)), Vote::Spoof);
+        assert_eq!(Vote::from_evidence(false, None, Some(1)), Vote::Abstain);
     }
 
     #[test]

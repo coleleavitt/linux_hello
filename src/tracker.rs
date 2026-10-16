@@ -320,17 +320,17 @@ mod tests {
         let face = make_face([100.0, 100.0, 200.0, 200.0]);
 
         // Frame 1: tentative
-        let tracks = tracker.update(&[face.clone()]);
+        let tracks = tracker.update(std::slice::from_ref(&face));
         assert_eq!(tracks[0].state, TrackState::Tentative);
         let id = tracks[0].id;
 
         // Frame 2: still tentative
-        let tracks = tracker.update(&[face.clone()]);
+        let tracks = tracker.update(std::slice::from_ref(&face));
         assert_eq!(tracks[0].id, id);
         assert_eq!(tracks[0].state, TrackState::Tentative);
 
         // Frame 3: confirmed (3 consecutive hits)
-        let tracks = tracker.update(&[face.clone()]);
+        let tracks = tracker.update(std::slice::from_ref(&face));
         assert_eq!(tracks[0].id, id);
         assert_eq!(tracks[0].state, TrackState::Confirmed);
     }
@@ -342,7 +342,7 @@ mod tests {
 
         // Establish a track
         for _ in 0..3 {
-            tracker.update(&[face.clone()]);
+            tracker.update(std::slice::from_ref(&face));
         }
         let track = &tracker.tracks[0];
         assert_eq!(track.state, TrackState::Confirmed);

@@ -7,15 +7,16 @@
 //! See `docs/winhello-models/ldmf.md` for the full reverse-engineering documentation.
 //! Reference implementation: `tools/winhello_models/ldmf/retina.py`.
 
-use anyhow::{Context, Result};
+#![allow(clippy::needless_range_loop)]
+
+use anyhow::Result;
 use image::GrayImage;
 use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
 use std::path::Path;
 use tracing::debug;
 
-use crate::{get_ort_env, Face};
+use crate::Face;
 
 /// Model configuration by type.
 /// Type 0 (MODEL_FILES_110/112): main IR detector, strides 16/32, smaller anchors.
@@ -92,34 +93,7 @@ impl MsRetinaDetector {
         let model_path = model_path.as_ref();
         debug!(?model_path, ?model_type, "loading MS Retina model");
 
-        let session = if model_path.ends_with(".onnx") && model_path.join("../weights").exists() {
-            let npz_path = model_path.parent().unwrap().join("../weights").join(
-                model_path.file_name().unwrap().to_string_lossy().replace(".onnx", ".npz"),
-            );
-            if npz_path.exists() {
-                debug!(?npz_path, "loading retina from npz");
-                Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(&std::path::PathBuf::from("/tmp/.ms_model_tmp.onnx"))
-                    .with_context(|| format!("failed to load {}", npz_path.display()))?
-            } else {
-                Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(model_path)
-                    .with_context(|| format!("failed to load {}", model_path.display()))?
-            }
-        } else {
-            Session::builder(get_ort_env()?)
-                .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                .commit_from_file(model_path)
-                .with_context(|| format!("failed to load {}", model_path.display()))?
-        };
+        let session = super::load_session(model_path)?;
 
         Ok(Self {
             session,

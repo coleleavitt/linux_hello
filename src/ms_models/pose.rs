@@ -3,16 +3,23 @@
 //! Pipeline: 64×64 similarity-warped crop → DoG filter → uniform LBP → 7139-d histogram → LDA+KNN.
 //!
 //! The ONNX model wraps the LDA projection and nearest-centroid lookup.
+//!
+//! Not a faithful port, and not used by the pipeline: Windows warps the face with the 27 points
+//! of its LBF aligner (`tools/winhello_models/lbf/pose.py`, `similarity_to_template`), while this
+//! uses SCRFD's 5 points. On the saved frames its angles disagree with the reference by up to
+//! 25°. The reference itself reads +24…26° of yaw on frontal faces from this camera
+//! (docs/winhello-models/lbf.md), so a pose gate from this model would reject most real frames.
 
-use anyhow::{Context, Result, bail};
+#![allow(clippy::needless_range_loop)]
+
+use anyhow::{Result, bail};
 use image::GrayImage;
 use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
 use std::path::Path;
 use tracing::debug;
 
-use crate::{get_ort_env, Face};
+use crate::Face;
 
 /// Image size for the similarity-warped face crop.
 const SIZE: usize = 64;
@@ -135,34 +142,7 @@ impl PoseChecker {
         let model_path = model_path.as_ref();
         debug!(?model_path, "loading head pose model");
 
-        let session = if model_path.ends_with(".onnx") && model_path.join("../weights").exists() {
-            let npz_path = model_path.parent().unwrap().join("../weights").join(
-                model_path.file_name().unwrap().to_string_lossy().replace(".onnx", ".npz"),
-            );
-            if npz_path.exists() {
-                debug!(?npz_path, "loading pose from npz");
-                Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(&std::path::PathBuf::from("/tmp/.ms_model_tmp.onnx"))
-                    .with_context(|| format!("failed to load {}", npz_path.display()))?
-            } else {
-                Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(model_path)
-                    .with_context(|| format!("failed to load {}", model_path.display()))?
-            }
-        } else {
-            Session::builder(get_ort_env()?)
-                .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                .commit_from_file(model_path)
-                .with_context(|| format!("failed to load {}", model_path.display()))?
-        };
+        let session = super::load_session(model_path)?;
 
         Ok(Self { session, config })
     }

@@ -22,6 +22,13 @@ install -m755 "$repo/target/release/libpam_linux_hello.so" /lib64/security/pam_l
 install -d -m755 "$share/models/antispoof"
 install -m644 "$repo/models/det_10g.onnx" "$repo/models/w600k_r50.onnx" "$share/models/"
 install -m644 "$repo/models/antispoof/facenox_antispoof.onnx" "$repo/models/antispoof/MiniFASNetV2.onnx" "$share/models/antispoof/"
+# Converted Windows Hello models (git-ignored, docs/winhello-models/): used when present.
+ms="$repo/models/windows_hello/converted"
+if [ -d "$ms" ]; then
+    install -d -m755 "$share/models/windows_hello/converted/convnet" "$share/models/windows_hello/converted/occlusion"
+    install -m644 "$ms"/convnet/MODEL_FILES_12[1-5].onnx "$share/models/windows_hello/converted/convnet/"
+    install -m644 "$ms/occlusion/MODEL_FILES_120.onnx" "$share/models/windows_hello/converted/occlusion/"
+fi
 install -m755 "$repo/contrib/openrc/linux_hello" /etc/init.d/linux_hello
 
 echo "== enroll $user (look at the camera)"

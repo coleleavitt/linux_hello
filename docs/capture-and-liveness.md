@@ -52,9 +52,13 @@ The face (largest SCRFD detection) is found on the lit frame. A pair gives no pr
 | `edge` | box closer to a frame edge than inter-eye distance / 5 | F46 |
 | `too_bright` | lit face brightness > 205 | F44 status 2 |
 | `too_dark` | lit face brightness < 35 | F44 status 3 |
+| `occluded` | Windows Hello occlusion model: 1 − p(none) > 0.9 (> 0.5 while enrolling); only with the converted models | F46 |
 
-Not implemented: the frontal-pose check (|yaw| ≤ 20°, |pitch| ≤ 25°, F59) and the occlusion
-detectors (F46). Both need models linux_hello does not have (Windows' own are proprietary).
+The occlusion model is the converted Windows Hello one (`models/windows_hello/converted/occlusion`,
+docs/winhello-models/cefa.md). Its input is the face box resampled to 128×128, as in Windows. Not
+implemented: the frontal-pose check (|yaw| ≤ 20°, |pitch| ≤ 25°, F59). The converted head-pose
+model reads about +25° of yaw on frontal faces from this camera (docs/winhello-models/lbf.md), so
+a pose gate built on it would reject most real frames.
 
 ### 3. Face brightness and lighting status (F14, F43, F44)
 
@@ -88,16 +92,33 @@ in that time.
 ### 5. Liveness votes (F22–F25)
 
 Windows' live votes come from two IR anti-spoofing CNNs; the colour CNN can only veto (F24).
-Those models are proprietary, and `linux_hello` has no IR anti-spoofing model. Instead, for a
-good frame:
+For a good frame:
 
 | Evidence | Vote |
 |---|---|
-| Good lighting status (reflects the emitter like a nearby face, little ambient IR) | +1 |
+| IR: without the Windows Hello models, the good lighting status (reflects the emitter like a nearby face, little ambient IR) | +1 |
+| IR: with the Windows Hello models, their frame total (F25), see below | −3…+1 |
 | RGB models (FaceNox + MiniFASNetV2) mean P(real) < 0.5, or no face in the RGB frame | −2 |
 
 Frame total > 0 is a live vote, < 0 a spoof vote. Weak and rejected frames do not vote (and the
-RGB models are not run for them).
+liveness models are not run for them), so with the Windows Hello models a frame is live only when
+the lighting status and the Windows nets agree.
+
+**Windows Hello frame total** (when `models/windows_hello/converted` exists; `--no-windows-hello`
+turns it off). Good frames are the frames Windows sends to its diffusion net (status 1, ambient
+≤ 25, F40, F42), so:
+
+| Net (slot) | Input | Rule (flag-on thresholds, mode 0) |
+|---|---|---|
+| diffusion IR (12) | `lit − min(lit, ambient)`, 5-point aligned 128×128 crop | p(real) > 0.5037 → +1 |
+| colour (13) | face detected in the RGB frame, aligned crop, BGR | p(spoof) > 0.5 → −1 |
+| border (14) | whole IR frame as 128×128 | p(spoof) > 0.7 → −1 |
+| HH (15) | whole IR frame as 128×128 | p(spoof) > 0.5 → −1 |
+
+In mode 0 the IR nets never vote spoof (spoof threshold 1.0). Windows runs slots 14 and 15 only
+after the first live vote; linux_hello runs them on every good frame, which can only add vetoes.
+`examples/ms_check` runs the nets on saved frames; their outputs match the Python reference
+implementations (`tools/winhello_models`) to within 1e-3.
 
 The veto weighs −2, not −1 as Windows' colour veto: with a single IR vote, −1 would only cancel the
 live vote, and the "3 spoof frames" rule could never fire. −2 is the weight Windows gives its

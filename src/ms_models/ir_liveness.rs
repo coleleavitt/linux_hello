@@ -11,15 +11,14 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use image::{GrayImage, RgbImage};
 use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
 use tracing::{debug, info};
 
 use super::prep::{align_crop, difference_image, thumbnail};
-use crate::{Face, get_ort_env};
+use crate::Face;
 
 /// Thresholds for the flag-on models (from `docs/winhello-models/convnet.md` section 4).
 /// Using mode 0 thresholds (lower, more permissive).
@@ -57,25 +56,16 @@ pub struct MsModelScores {
     pub hh: Option<[f32; 2]>,
 }
 
-/// Result of the Microsoft IR liveness ensemble.
-#[derive(Debug, Clone)]
-pub struct MsLivenessResult {
-    /// Overall liveness score (0.0 = spoof, 1.0 = live).
-    pub score: f32,
-    /// Whether the face is considered live.
-    pub is_live: bool,
-    /// Net votes: positive = live, negative = spoof.
-    pub net_votes: i32,
-    /// Per-model raw scores for debugging.
-    pub model_scores: MsModelScores,
+/// One frame's anti-spoofing evidence (`RunCascadedClassification`, F25).
+#[derive(Debug, Clone, Default)]
+pub struct MsFrame {
+    /// +1 for a live vote of the IR net, −1 for each spoof vote or veto. Above 0 the frame is a
+    /// live frame, below 0 a spoof frame.
+    pub total: i32,
+    pub scores: MsModelScores,
 }
 
-/// Microsoft IR liveness ensemble.
-///
-/// Uses the Windows Hello anti-spoofing models to determine liveness.
-/// Voting logic:
-/// - General IR and diffusion IR vote: live (+1) or spoof (−1) based on thresholds.
-/// - Color, border, and HH only veto (if spoof detected, vote −1).
+
 /// - Net votes > 0 → live, otherwise spoof.
 pub struct MsIrLiveness {
     /// Slot 11: general IR CNN
@@ -98,39 +88,7 @@ impl MsIrLiveness {
         let model_dir = model_dir.as_ref();
         info!(?model_dir, "loading Microsoft IR liveness ensemble");
 
-        let load_model = |id: u32| -> Result<Session> {
-            // Try npz first (open, fast), fall back to ONNX
-            let npz_path = model_dir.join(format!("weights/MODEL_FILES_{}.npz", id));
-            let onnx_path = model_dir.join(format!("MODEL_FILES_{}.onnx", id));
-            if npz_path.exists() {
-                debug!(?npz_path, "loading model from npz");
-                let bytes = std::fs::read(&npz_path).with_context(|| format!("read {}", npz_path.display()))?;
-                let tmp = std::env::temp_dir().join(format!(".ms_model_{}.onnx", id));
-                std::fs::write(&tmp, &bytes)?;
-                let session = Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(&tmp)
-                    .with_context(|| format!("failed to load {}", npz_path.display()))?;
-                std::fs::remove_file(&tmp)?;
-                Ok(session)
-            } else if onnx_path.exists() {
-                debug!(?onnx_path, "loading model from onnx");
-                Session::builder(get_ort_env()?)
-                    .map_err(|e| anyhow::anyhow!("session builder: {}", e))?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| anyhow::anyhow!("optimization level: {}", e))?
-                    .commit_from_file(&onnx_path)
-                    .with_context(|| format!("failed to load {}", onnx_path.display()))
-            } else {
-                bail!(
-                    "Microsoft model not found: {} or weights/{}.npz (see docs/winhello-models/)",
-                    onnx_path.display(),
-                    id
-                )
-            }
-        };
+        let load_model = |id: u32| super::load_session(&model_dir.join(format!("MODEL_FILES_{id}.onnx")));
 
         Ok(Self {
             general_ir: load_model(121)?,
@@ -146,141 +104,61 @@ impl MsIrLiveness {
         let model_dir = model_dir.as_ref();
         [121, 122, 123, 124, 125]
             .iter()
-            .all(|id| {
-                let npz = model_dir.join(format!("weights/MODEL_FILES_{}.npz", id));
-                let onnx = model_dir.join(format!("MODEL_FILES_{}.onnx", id));
-                npz.exists() || onnx.exists()
-            })
+            .all(|id| model_dir.join(format!("MODEL_FILES_{id}.onnx")).exists())
     }
 
-    /// Run the liveness check.
+    /// Score one frame pair (F24, F25, F42).
     ///
-    /// # Arguments
-    /// - `ir_lit`: The IR frame with illumination (lit frame).
-    /// - `ir_ambient`: Optional ambient IR frame (for difference image). If not provided,
-    ///   the diffusion IR model is skipped.
-    /// - `rgb`: Optional RGB frame (for color model). If not provided, the color model is skipped.
-    /// - `face`: Detected face with 5-point landmarks.
-    pub fn check(
+    /// With `ambient`, the diffusion net (slot 12) runs on the difference image, as Windows does for
+    /// good-lighting frames (F40); without it the general net (slot 11) runs on the lit frame. The
+    /// colour net (slot 13) needs the face found in the RGB frame: the RGB camera sees a different
+    /// view, so IR landmarks do not fit it. The multi-task nets (slots 14, 15) run on every frame;
+    /// Windows enables them after the first live vote, so this can only add vetoes.
+    pub fn frame(
         &mut self,
-        ir_lit: &GrayImage,
-        ir_ambient: Option<&GrayImage>,
-        rgb: Option<&RgbImage>,
+        lit: &GrayImage,
+        ambient: Option<&GrayImage>,
         face: &Face,
-    ) -> Result<MsLivenessResult> {
+        rgb: Option<(&RgbImage, &Face)>,
+    ) -> Result<MsFrame> {
         let mut scores = MsModelScores::default();
-        let mut votes = 0i32;
+        let mut total = 0;
 
-        // Convert Face landmarks to the format expected by preprocessing
-        let landmarks: [[f32; 2]; 5] = face.landmarks;
-
-        // 1. General IR (slot 11): aligned crop of lit frame
-        let aligned_ir = align_crop(ir_lit, &landmarks);
-        let general_probs = run_grayscale(&mut self.general_ir, &aligned_ir)?;
-        scores.general_ir = Some(general_probs);
-        debug!(
-            p_real = general_probs[0],
-            p_spoof = general_probs[1],
-            "general IR"
-        );
-
-        if general_probs[0] > thresholds::GENERAL_IR_REAL {
-            votes += 1;
-            debug!("general IR: vote LIVE");
-        } else if general_probs[1] > thresholds::GENERAL_IR_SPOOF {
-            votes -= 1;
-            debug!("general IR: vote SPOOF");
-        }
-
-        // 2. Diffusion IR (slot 12): difference image crop
-        if let Some(ambient) = ir_ambient {
-            let diff = difference_image(ir_lit, ambient);
-            let aligned_diff = align_crop(&diff, &landmarks);
-            let diffusion_probs = run_grayscale(&mut self.diffusion_ir, &aligned_diff)?;
-            scores.diffusion_ir = Some(diffusion_probs);
-            debug!(
-                p_real = diffusion_probs[0],
-                p_spoof = diffusion_probs[1],
-                "diffusion IR"
-            );
-
-            if diffusion_probs[0] > thresholds::DIFFUSION_IR_REAL {
-                votes += 1;
-                debug!("diffusion IR: vote LIVE");
-            } else if diffusion_probs[1] > thresholds::DIFFUSION_IR_SPOOF {
-                votes -= 1;
-                debug!("diffusion IR: vote SPOOF");
+        let (p, real, spoof) = match ambient {
+            Some(ambient) => {
+                let crop = align_crop(&difference_image(lit, ambient), &face.landmarks);
+                let p = run_grayscale(&mut self.diffusion_ir, &crop)?;
+                scores.diffusion_ir = Some(p);
+                (p, thresholds::DIFFUSION_IR_REAL, thresholds::DIFFUSION_IR_SPOOF)
             }
-        } else {
-            debug!("diffusion IR: skipped (no ambient frame)");
-        }
-
-        // 3. Color BGR (slot 13): veto only
-        if let Some(rgb_frame) = rgb {
-            let color_probs = run_color(&mut self.color, rgb_frame, &landmarks)?;
-            scores.color = Some(color_probs);
-            debug!(
-                p_spoof = color_probs[0],
-                p_real = color_probs[1],
-                "color BGR"
-            );
-
-            if color_probs[0] > thresholds::COLOR_SPOOF {
-                votes -= 1;
-                debug!("color: VETO (spoof)");
+            None => {
+                let p = run_grayscale(&mut self.general_ir, &align_crop(lit, &face.landmarks))?;
+                scores.general_ir = Some(p);
+                (p, thresholds::GENERAL_IR_REAL, thresholds::GENERAL_IR_SPOOF)
             }
-        } else {
-            debug!("color: skipped (no RGB frame)");
+        };
+        if p[0] > real {
+            total += 1;
+        } else if p[1] > spoof {
+            total -= 1;
         }
 
-        // 4. Multi-task border (slot 14): whole frame thumbnail, veto only
-        let thumb = thumbnail(ir_lit);
-        let border_probs = run_grayscale(&mut self.border, &thumb)?;
-        scores.border = Some(border_probs);
-        debug!(
-            p_live = border_probs[0],
-            p_spoof = border_probs[1],
-            "border"
-        );
-
-        if border_probs[1] > thresholds::BORDER_SPOOF {
-            votes -= 1;
-            debug!("border: VETO (spoof)");
+        if let Some((image, rgb_face)) = rgb {
+            let p = run_color(&mut self.color, image, &rgb_face.landmarks)?;
+            scores.color = Some(p);
+            total -= i32::from(p[0] > thresholds::COLOR_SPOOF);
         }
 
-        // 5. Multi-task HH (slot 15): whole frame thumbnail, veto only
-        let hh_probs = run_grayscale(&mut self.hh, &thumb)?;
-        scores.hh = Some(hh_probs);
-        debug!(p_live = hh_probs[0], p_spoof = hh_probs[1], "HH");
+        let thumb = thumbnail(lit);
+        let border = run_grayscale(&mut self.border, &thumb)?;
+        let hh = run_grayscale(&mut self.hh, &thumb)?;
+        scores.border = Some(border);
+        scores.hh = Some(hh);
+        total -= i32::from(border[1] > thresholds::BORDER_SPOOF);
+        total -= i32::from(hh[1] > thresholds::HH_SPOOF);
 
-        if hh_probs[1] > thresholds::HH_SPOOF {
-            votes -= 1;
-            debug!("HH: VETO (spoof)");
-        }
-
-        // Final decision
-        let is_live = votes > 0;
-        // Convert votes to a 0-1 score: map [-5, 5] to [0, 1]
-        let score = ((votes as f32 + 5.0) / 10.0).clamp(0.0, 1.0);
-
-        info!(
-            votes,
-            is_live,
-            score,
-            general_ir = ?scores.general_ir,
-            diffusion_ir = ?scores.diffusion_ir,
-            color = ?scores.color,
-            border = ?scores.border,
-            hh = ?scores.hh,
-            "MS IR liveness result"
-        );
-
-        Ok(MsLivenessResult {
-            score,
-            is_live,
-            net_votes: votes,
-            model_scores: scores,
-        })
+        debug!(total, ?scores, "Windows Hello anti-spoofing frame");
+        Ok(MsFrame { total, scores })
     }
 }
 

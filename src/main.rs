@@ -10,7 +10,10 @@ use tracing_subscriber::EnvFilter;
 
 use linux_hello::authenticator::describe;
 use linux_hello::lighting::subtract_ambient;
-use linux_hello::{daemon, AntiSpoof, Attempt, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras, Verdict};
+use linux_hello::{
+    daemon, AntiSpoof, Attempt, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras, Verdict,
+    WindowsHelloModels,
+};
 
 #[derive(Parser)]
 #[command(name = "linux_hello", about = "Windows Hello-style face authentication for Linux")]
@@ -41,6 +44,11 @@ struct Cli {
     /// Skip the RGB anti-spoofing veto (the IR lighting gate still applies)
     #[arg(long, global = true)]
     no_liveness: bool,
+
+    /// Do not use the converted Windows Hello models (anti-spoofing vote, occlusion gate) even
+    /// when `<models>/windows_hello/converted` exists
+    #[arg(long, global = true)]
+    no_windows_hello: bool,
 
     /// Face store (default: /var/lib/linux_hello/faces.json as root, else ~/.local/share/linux_hello/faces.json)
     #[arg(long, env = "LINUX_HELLO_STORE", global = true)]
@@ -116,12 +124,22 @@ fn main() -> Result<()> {
             AntiSpoof::load(format!("{models}/antispoof/MiniFASNetV2.onnx"), LivenessModel::MiniFasNetV2)?,
         ])
     };
+    // The converted Windows Hello models are git-ignored (docs/winhello-models/) and used when
+    // present. If they are present but do not load, nothing runs.
+    let pipeline = |liveness: Vec<AntiSpoof>| -> Result<FacePipeline> {
+        let pipeline = FacePipeline::new(&detector, &embedder, liveness, &store)?;
+        let dir = PathBuf::from(format!("{models}/windows_hello/converted"));
+        if cli.no_windows_hello || !dir.exists() {
+            return Ok(pipeline);
+        }
+        Ok(pipeline.with_windows_hello(WindowsHelloModels::load(&dir)?))
+    };
     let current_user = || std::env::var("USER").unwrap_or_default();
 
     match cli.command {
         Commands::Auth { user } => {
             let user = user.unwrap_or_else(current_user);
-            let pipeline = FacePipeline::new(&detector, &embedder, liveness()?, &store)?;
+            let pipeline = pipeline(liveness()?)?;
             let start = Instant::now();
             let verdict = Authenticator { pipeline, cameras }.verify(&user)?;
             println!("{user}: {verdict} ({:.2} s)", start.elapsed().as_secs_f32());
@@ -131,7 +149,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Enroll { user, frames } => {
-            let pipeline = FacePipeline::new(&detector, &embedder, Vec::new(), &store)?;
+            let pipeline = pipeline(Vec::new())?;
             Authenticator { pipeline, cameras }.enroll(&user, frames)?;
             println!("Enrolled {user} with {frames} prints into {}", store.display());
         }
@@ -171,13 +189,13 @@ fn main() -> Result<()> {
         }
 
         Commands::Daemon { socket } => {
-            let pipeline = FacePipeline::new(&detector, &embedder, liveness()?, &store)?;
+            let pipeline = pipeline(liveness()?)?;
             daemon::serve(&mut Authenticator { pipeline, cameras }, &socket)?;
         }
 
         Commands::Watch { user, seconds, out } => {
             let user = user.unwrap_or_else(current_user);
-            let mut pipeline = FacePipeline::new(&detector, &embedder, liveness()?, &store)?;
+            let mut pipeline = pipeline(liveness()?)?;
             std::fs::create_dir_all(&out)?;
             let mut log = std::fs::File::create(out.join("log.jsonl"))?;
             let mut cams = OpenCameras::open(&cameras)?;
@@ -200,6 +218,10 @@ fn main() -> Result<()> {
                     "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
                     "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
                     "rgb_real": check.liveness, "vote": format!("{:?}", check.vote),
+                    "windows": check.windows.as_ref().map(|w| serde_json::json!({
+                        "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
+                        "border": w.scores.border, "hh": w.scores.hh,
+                    })),
                     "similarity": check.best.map(|b| b.similarity),
                     "recognised": recognised, "liveness": format!("{liveness:?}"),
                     "verdict": verdict.map(|v| v.to_string()),

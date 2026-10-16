@@ -183,11 +183,12 @@ pub fn describe(check: &FrameCheck) -> String {
         (None, None) => "-".to_string(),
     };
     format!(
-        "lit={} ambient={} d={} status={status} rgb_real={} vote={:?} similarity={}",
+        "lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={}",
         num(l.map(|l| l.lit), 1),
         num(l.map(|l| l.ambient), 1),
         num(l.map(|l| l.gain()), 1),
         num(check.liveness, 3),
+        check.windows.as_ref().map_or("-".to_string(), |w| w.total.to_string()),
         check.vote,
         num(check.best.map(|b| b.similarity), 3),
     )
@@ -227,6 +228,7 @@ impl Authenticator {
     /// Enroll `frames` prints from frame pairs that pass every frame gate with good lighting.
     pub fn enroll(&mut self, user: &str, frames: usize) -> Result<()> {
         let mut ir = IrCamera::open(&self.cameras.device, self.cameras.ir_metadata.as_deref())?;
+        self.pipeline.set_enrolling(true);
         let mut prints = Vec::new();
         for _ in 0..frames * ENROLL_PAIRS_PER_PRINT {
             if prints.len() == frames {
@@ -239,10 +241,11 @@ impl Authenticator {
             }
         }
         drop(ir);
+        self.pipeline.set_enrolling(false);
         if prints.len() < frames {
             bail!(
                 "only {} of {frames} frame pairs showed a usable face with good IR lighting \
-                 (face ≥ 72 px, away from the edges, lit 35–205, lit − ambient ≥ 45, ambient ≤ 25)",
+                 (face ≥ 72 px, away from the edges, not covered, lit 35–205, lit − ambient ≥ 45, ambient ≤ 25)",
                 prints.len()
             );
         }
@@ -272,6 +275,7 @@ mod tests {
                 print: Some(Embedding { features: vec![similarity] }),
             },
             liveness: None,
+            windows: None,
             vote,
             best: Some(PrintMatch { similarity, generation: 1 }),
         }
@@ -281,6 +285,7 @@ mod tests {
         FrameCheck {
             analysis: Analysis { face: face(), lighting: None, problem: Some(problem), print: None },
             liveness: None,
+            windows: None,
             vote: Vote::Abstain,
             best: None,
         }
