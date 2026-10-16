@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- WidgetSpinner is Microsoft's XBF reader from microsoft/microsoft-ui-xaml (MIT); see README.md for the checkout -->
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>disable</Nullable><ImplicitUsings>enable</ImplicitUsings><LangVersion>latest</LangVersion></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../muix/dxaml/xcp/tools/XbfParser/WidgetSpinner/WidgetSpinner.csproj" /></ItemGroup>
+</Project>

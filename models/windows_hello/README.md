@@ -53,6 +53,8 @@ Formats:
 
 Re-extract: `python3 scripts/extract_windows_hello_models.py models/windows_hello <dlls…>`; source DLLs are under `~/SiteResearch/windows_hello/windows_files/`.
 
+`assets/` (same rules: Microsoft proprietary, git-ignored, local only) holds the sign-in UI assets — Segoe fonts, lock-screen images, the Hello face SVG/toast art, the eye animation frames (`hello/eye/`), string tables and the decompiled LogonUI layouts — written by `scripts/extract_windows_hello_assets.py <ISO> models/windows_hello/assets` and inventoried in `assets/manifest.json`; see docs/windows-hello-ui.md §6.
+
 ## Converters
 
 | Tool | Handles | Doc |
