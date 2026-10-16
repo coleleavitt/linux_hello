@@ -152,11 +152,32 @@ Both sit in `BioFeedbackUserControl` (BioFeedbackUserControl.xaml):
 | Spinner | 1990 – 2109 | 2.0 s | looped, state 11 |
 | Sync 2110–2220, SyncComp 2221–2269 | | | |
 
-The vectors are compiled C++ (862 functions, `PathGeometry_00…40`, `PathKeyFrameAnimation_00…11`, scale/offset
-animations, under `HelloSolidAnimations_AnimatedVisual_UAPv15` in re/ui/Windows.UI.Logon/pseudocode.c). They can be
-rebuilt into a Lottie/SVG animation from that pseudocode (D2D path figures with literal coordinates + keyframes) but that
-is a separate job: **not done**. The colour is a single `SolidColor` theme property (white on the dark logon theme,
-`HelloSolidAnimations::SolidColor::set`), so the whole animation is one-colour line art like the glyph version.
+The vectors are compiled C++ under `HelloSolidAnimations_AnimatedVisual_UAPv15` (848 generated functions, plus 84 whose
+bodies the linker folded into the identical `UAPv8`/`UAPv7` variants: `ContainerVisual_00…69`, `ShapeVisual_00…42`,
+`ContainerShape_00…77`, `SpriteShape_000…114`, `PathGeometry_00…61`, `Geometry_005…113`, `PathKeyFrameAnimation_00…11`,
+`CubicBezierEasingFunction_00…43`, the `*ScalarAnimation_*`/`*Vector2Animation_*` factories). **Reconstructed** as data:
+`tools/winhello_ui/lottie_extract.py` replays the constructor with a symbolic x64 interpreter and writes the whole
+Composition object graph to `assets/hello/eye/solid.json` (§6.2: the schema, the ledger, the counts); `hello-greeter`
+plays it with Cairo (`greeter/src/ui/eye_vector.rs`, docs/greeter.md). The colour is a single `SolidColor` theme
+property (`HelloSolidAnimations::SolidColor::set`; default `0xFFFFFFFF` white in the constructor 0x18014d05c, bound
+through `ColorRGB(_theme.SolidColor.W, .X, .Y, .Z)` expressions), so the whole animation is one-colour art like the
+glyph version. Which segment plays, and whether it loops, is `LottieAnimatorModel::UpdateMarker` (0x18015cf40):
+`AnimatedVisualPlayer.Stop()`, then `PlayAsync(start, end, looped)` with the marker pair of the state; **looped** for
+FaceLoop (3, 20), TooFar (5), TooClose (6), Spinner (11) and Sync (17), once (held at the last frame) for everything
+else — OBSERVED (the `bool` is `dil`, set only on those cases). A state change therefore cuts the segment playing and
+starts the next one at its first frame.
+
+What the segments draw (OBSERVED from the geometry; `docs/img/eye-solid-contact-sheet.png`, first/middle/last frame of
+each segment, and `docs/img/eye-solid/`): **Face** 0–59 is the Windows Hello face — two round eyes and a smile, the
+shape of `hello-face.svg` (§6.2) — popping in from frame 10 (scale 0 → 1, ease (0.14, 0.98)–(0.292, 1), i.e. full size by
+frame 26); **FaceLoop** 60–290 blinks (60–64, the eyes become 15×4 rounded bars) and then morphs the face through nine
+path key frames (`Path_00…08`: it looks down, left, right, tilts) with a rotation animation; **FaceSuccess** 291–408
+flashes (opacity 0.2 → 1 and a soft blurred glow behind the face, σ = 105 units, fading out by frame 315), winks (right
+eye → bar, 297), turns the face into a check mark (a stroked path trimmed in, 327–348) and ends with four squares
+flying out into the Windows logo (346–376, held); **FaceFail** 409–477 flattens the smile into a straight mouth;
+**TooFar**/**TooClose** are the face looking around small/large; **Spinner** 1990–2109 is a 20-unit ring: two arcs
+(radius 2.5 × 4.07, stroke 0.8 × 4.07) trimmed 0 → 0.5 / 0.5 → 1 and cross-faded, rotating 0 → 900°. The other markers
+are the other providers' icons (USB key, PIN keypad dots, NFC, fingerprint, Bluetooth, password key, phone, sync).
 
 **Font glyph animation** (`FontGlyphAnimator.dll` + `NUIMDL2.ttf`, fully OBSERVED and extracted): the control shows one
 glyph of the font `NUIMDL2Assets` in a 60 px TextBlock and steps through codepoint ranges at **33 ms per frame**
@@ -525,20 +546,78 @@ it: Microsoft Windows EULA — personal use on the licensed machine, never commi
 | `wallpaper/` | `img0.jpg`, `img19.jpg` (+1920×1200), Spotlight `img14.jpg`, `img50.jpg`, `spotlight.theme` | `Windows/Web/Wallpaper/`, `Windows/Web/4K/`, `Windows/Resources/Themes/` | desktop/Spotlight defaults (Spotlight itself downloads images; proprietary, we use our own) |
 | `user-pictures/` | `user.png` (448×448, grey bust on #F2F2F2), `user-192.png`, `user-48/40/32.png`, `user.bmp`, `guest.*` | `ProgramData/Microsoft/User Account Pictures/` | default avatar (Windows draws it in the 192 px ellipse) |
 | `hello/` | `hello-face.svg` (+ `.png` 256 px white render) = FaceCredentialProvider.dll.mui RT_HTML 1101; `fingerprint.svg` = BioCredProv.dll.mui RT_HTML 1024; `hello-face-tile-72.bmp`, `fingerprint-tile-72.bmp` = RT_BITMAP 1001 (legacy 72×72 tiles); `@WindowsHelloFaceToastIcon.png`, `@WindowsHelloFaceToastIconRejuv.png` (toast app logo), `@facial-recognition-windows-hello.gif`, `…-rejuv.gif` (toast hero animation), `HelloFaceAnimation.gif` (OOBE/Settings) | `Windows/System32/`, `…/en-US/*.mui`, `SystemApps/MicrosoftWindows.Client.CBS/media/` | the "Sign-in options" face button (SVG), toasts |
-| `hello/eye/` | `animation.json` (sequences + transition table), `seq01…seq37/000.png…` (72×72, glyph at 60 px, white on transparent) | `FontGlyphAnimator.dll` + `NUIMDL2.ttf` | the Hello eye (§1.3) |
+| `hello/eye/` | `solid.json` (the Windows 11 eye: the `HelloSolidAnimations` composition as data, §6.2; written by `tools/winhello_ui/lottie_extract.py`, not by the asset script), `animation.json` (sequences + transition table), `seq01…seq37/000.png…` (72×72, glyph at 60 px, white on transparent) | `Windows.UI.Logon.dll`; `FontGlyphAnimator.dll` + `NUIMDL2.ttf` | the Hello eye (§1.3) |
 | `sounds/` | `Windows Logon.wav`, `Windows Unlock.wav`, `Windows Logoff Sound.wav` | `Windows/Media/` | optional sound events |
 | `strings/` | `FaceCredentialProvider.dll.json`, `BioCredProv.dll.json`, `credprovhost.dll.json`, `authui.dll.json`, `winlogon.exe.json`, `LockScreenContent.dll.json`, `LockAppBroker.dll.json` (RT_STRING id → text), `Windows.UI.Logon.json`, `Windows.UI.BioFeedback.json` (PRI name → text) | en-US MUIs and PRIs | §2 |
 | `logonui/` | the 23 `*.xbf` layouts and their `.xaml` decompilation, `Assets_CloudIcon.png`, `Assets_CloudSpinner*.gif`, `Assets_RemoteDesktopIcon*.png` | `Windows.UI.Logon.pri` | §3 |
 | `bin/` | the DLL/EXE/MUI/PRI files the above were pulled from | | reproducibility without the WIM |
 
 The greeter's loader layout (agreed with the `greeter` branch): `fonts/*.ttf` → fontconfig, `screen/img100.jpg` default
-background, `user-pictures/user.png` default avatar, `hello/hello-face.png` static icon, `hello/eye/` frames + json for
-the animation.
+background, `user-pictures/user.png` default avatar, `hello/hello-face.png` static icon, `hello/eye/solid.json` the
+Windows 11 eye, `hello/eye/` frames + json the Windows 10 eye (the fallback).
+
+### 6.2 `hello/eye/solid.json`: the Windows 11 eye as data
+
+```
+python3 tools/winhello_ui/lottie_extract.py dump    <Windows.UI.Logon.dll.i64> <funcs.json>      # idalib (IDA 9.5)
+python3 tools/winhello_ui/lottie_extract.py extract <funcs.json> <winrt/impl dir> <solid.json>
+```
+
+`dump` writes every instruction of the 3172 `HelloSolidAnimations*` functions (operands, the bytes behind constant
+operands, string literals) and the vtable slot each called thunk uses. `extract` runs the UAPv15 constructor in a
+symbolic x64 interpreter: LottieGen output is straight-line code (object factories, property setters, key frames; the
+only branches skip `Release()` on null pointers or raise), so tracking registers, the stack and the xmm lanes recovers
+every float constant bit-exactly, and the Windows.UI.Composition objects, properties and calls fall out as a graph. The
+public PDB's names for the small call thunks are useless (identical bodies were folded by the linker: the slot-13 thunk
+of `ICompositor5` is named `IFrameworkElementStatics::MaxWidthProperty::get`), so virtual calls are resolved by
+(interface of the receiver, slot) with the vtable order from the C++/WinRT `Windows.UI.Composition.0.h` header; the
+interface comes from the `__uuidof_` the generated code casts with. The Direct2D geometry sink calls (`BeginFigure`,
+`AddBezier(s)`, `AddLine(s)`, `EndFigure`, `SetFillMode`) give the path data; `Markers::get` the marker table.
+
+The document (`format: linux_hello/hello-eye-solid/1`): `canvas` 64×64, `duration_ticks` 378333333, `frame_count` 2270,
+`frame_rate` 60; `markers` (name, the `double` progress exactly as compiled — frame + 0.05 over 2270 — and the frame);
+`root` and `root_properties` (`Progress`, `t0…t4` with their animations); `objects`, one entry per Composition object
+reachable from the root, keyed `<Kind>:<generating function>` (`SpriteShape:SpriteShape_002`, `#n` when a factory ran
+more than once). Each object has `kind`, `name`, `props` (the Composition property names as the generated code sets
+them — `Offset`, `Scale`, `CenterPoint`, `RotationAngleInDegrees`, `TransformMatrix` (6 or 16 floats), `Size`, `Clip`,
+`IsVisible`, `Opacity`, `Geometry`, `FillBrush`/`StrokeBrush`, `StrokeThickness`/`StrokeStartCap`/…, `TrimStart`/
+`TrimEnd`/`TrimOffset`, `Radius`/`Center`, `CornerRadius`, `Color` as `#AARRGGBB`, enums as words), `children` /
+`shapes` / `color_stops` in insertion = painting order, `animations` (`StartAnimation` bindings: `{property,
+animation}` or `{property, expression, refs}`), `keyframes` (`{progress, value | expression [+ spatial_bezier], easing}`;
+path key frames reference `CompositionPath` objects), `property_set` (the object's own `PropertySet`: scalars and their
+animations, for the `my.…` expressions), `figures` for D2D paths (`start`, `closed`, `segments` of `["C", x1, y1, x2,
+y2, x, y]` and `["L", x, y]`, `fill_mode` nonzero/even_odd) and `geometries` for groups, `effect` + `sources` for effect
+brushes (`composite` with `destination_in`/`destination_out` = Lottie track mattes, `gaussian_blur` with
+`blur_amount`). Floats are the exact float32 values (every float32 is a short decimal in JSON and reads back bit-exact
+in f32 or f64), so no hex-float notation is needed.
+
+Counts (2026-10-16, build 26100.9444): 1104 objects — 71 ContainerVisual, 43 ShapeVisual, 20 SpriteVisual, 78
+ContainerShape, 115 SpriteShape, 62 PathGeometry over 91 CompositionPath (101 D2D paths, 13 geometry groups), 10
+Ellipse, 6 RoundedRectangle, 2 Rectangle geometries, 84 Scalar + 63 Vector2 + 12 Path + 10 Color + 29 Boolean
+key-frame animations (866 key frames), 160 cubic Bézier + 2 step easing functions, 25 expression bindings (4 theme
+colours, 2 opacity-scaled theme colours, 7 pairs of `Min/Max(my.TStart, my.TEnd)` trims, 4 pairs of rounded-rectangle
+`Offset`/`CornerRadius`, the controller's `Progress`), 20 EffectBrush (19 composite mattes, 1 Gaussian blur), 21
+ColorBrush, 2 LinearGradientBrush, 42 markers. Every generated UAPv15 function runs exactly once (four shared
+`SpriteShape_066/102/103/114` factories 2–3 times), matching the function list; nothing is left undecoded.
+
+Ledger for the player (`eye_vector.rs`):
+
+| Item | Status |
+|---|---|
+| Geometry, transforms, key frames, easing control points, markers, colours, effect graph | OBSERVED (the constants of the binary) |
+| Transform order of a visual/shape: Scale and Rotation about CenterPoint, then Offset, then TransformMatrix | INFERRED from the generated numbers (`ContainerShape_51…60`: `Offset` (448, 452) with `TransformMatrix` scale 0.27 + (79, 78) must land at the 400×400 centre), checked by rendering |
+| Easing semantics: cubic Bézier in progress space, target key frame's easing; `StepThenHold` (`IsInitialStepSingleFrame`) jumps at the start, `HoldThenStep` (`IsFinalStepSingleFrame`) at the end; Boolean animations are discrete | INFERRED (Composition documentation + LottieGen's names) |
+| Spatial Béziers: an expression key frame `Pow(1-_.tN,3)*P0+…` over a helper scalar `tN` animated 0 → 1 | OBSERVED (decoded into `spatial_bezier`) |
+| Trims: fraction of the whole geometry's length, `TrimOffset` added, wrapping past 1; an ellipse starts at 3 o'clock clockwise (Direct2D) | INFERRED; the ellipse start only affects the spinner's phase |
+| Segment start: the marker progress (frame + 0.05) | OBSERVED; it puts the segment just past the key frames that switch the layers at the whole frame |
+| Theme colour white; the glow of FaceSuccess extends beyond the 64×64 canvas on Windows (nothing clips the player) | OBSERVED / INFERRED; the greeter clips it at the widget |
+
 
 ## 7. Open items
 
-- Lottie geometry of `HelloSolidAnimations` (the Windows 11 eye) is not reconstructed; the glyph eye (Windows 10 look,
-  still the fallback) is complete. The 64×64 canvas, 60 fps timing and segment lengths above are exact.
+- `HelloSolidAnimations` (the Windows 11 eye) is reconstructed (§6.2); open there: the transform order, the easing and
+  trim semantics are INFERRED (no Windows machine to compare frames against), and the ellipse start angle for the
+  spinner's trims.
 - LockApp.exe (Spotlight lock screen) layout values are INFERRED from the LogonUI secure-lock twin; the main acrylic
   tint of the sign-in backdrop and the hammering/camera-startup thresholds are UNKNOWN.
 - `BioFeedbackState` 19 and the feature-flagged 20 are not used by the face provider in this build.
