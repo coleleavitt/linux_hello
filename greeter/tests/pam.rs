@@ -106,7 +106,11 @@ fn password_is_handed_to_the_password_module() {
     }
     assert_eq!(
         seen,
-        vec![AuthEvent::Info("Looking for your face...".into()), AuthEvent::Info("No face seen by the camera".into()), prompt]
+        vec![
+            AuthEvent::Info("Looking for your face...".into()),
+            AuthEvent::Info("No face seen by the camera".into()),
+            prompt
+        ]
     );
     attempt.answer(Some("hunter2".into()));
     assert_eq!(events(&rx), vec![AuthEvent::Success]);

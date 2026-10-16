@@ -42,8 +42,7 @@ struct PamResponse {
     resp_retcode: c_int,
 }
 
-type ConvFn =
-    unsafe extern "C" fn(c_int, *const *const PamMessage, *mut *mut PamResponse, *mut c_void) -> c_int;
+type ConvFn = unsafe extern "C" fn(c_int, *const *const PamMessage, *mut *mut PamResponse, *mut c_void) -> c_int;
 
 #[repr(C)]
 struct PamConv {
@@ -53,7 +52,8 @@ struct PamConv {
 
 #[link(name = "pam")]
 extern "C" {
-    fn pam_start(service: *const c_char, user: *const c_char, conv: *const PamConv, pamh: *mut *mut PamHandle) -> c_int;
+    fn pam_start(service: *const c_char, user: *const c_char, conv: *const PamConv, pamh: *mut *mut PamHandle)
+        -> c_int;
     fn pam_start_confdir(
         service: *const c_char,
         user: *const c_char,
@@ -149,7 +149,11 @@ unsafe extern "C" fn converse(
     }
     for i in 0..count {
         let message = &**msg.add(i);
-        let text = if message.msg.is_null() { String::new() } else { CStr::from_ptr(message.msg).to_string_lossy().into_owned() };
+        let text = if message.msg.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(message.msg).to_string_lossy().into_owned()
+        };
         let event = match message.msg_style {
             PAM_PROMPT_ECHO_OFF => AuthEvent::Prompt { text, secret: true },
             PAM_PROMPT_ECHO_ON => AuthEvent::Prompt { text, secret: false },

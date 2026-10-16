@@ -79,10 +79,8 @@ fn session(mut stream: UnixStream, scenario: &Scenario) -> Result<()> {
         Request::CreateSession { username } => eprintln!("fake_greetd: create_session {username}"),
         _ => return fail(&mut stream, "no session under configuration"),
     }
-    let mut steps = scenario.steps.iter();
     let mut delayed = false;
-    loop {
-        let Some(text) = steps.next() else { break };
+    for text in &scenario.steps {
         auth_message(AuthMessageType::Info, text).write_to(&mut stream)?;
         match Request::read_from(&mut stream)? {
             Request::PostAuthMessageResponse { .. } => {}

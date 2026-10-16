@@ -163,7 +163,8 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
 fn ask_password(pamh: *mut PamHandle, result: c_int) -> c_int {
     let mut response: *mut c_char = ptr::null_mut();
     // SAFETY: "%s" with one NUL-terminated string argument; libpam mallocs the response.
-    let status = unsafe { pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &mut response, c"%s".as_ptr(), PASSWORD_PROMPT.as_ptr()) };
+    let status =
+        unsafe { pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &mut response, c"%s".as_ptr(), PASSWORD_PROMPT.as_ptr()) };
     if status != PAM_SUCCESS || response.is_null() {
         return PAM_CONV_ERR;
     }

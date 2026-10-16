@@ -50,7 +50,9 @@ fn run(socket: &Path, user: &str, events: &Events, replies: &mpsc::Receiver<Repl
                         let secret = matches!(kind, AuthMessageType::Secret);
                         events.send_blocking(AuthEvent::Prompt { text: auth_message, secret })?;
                         match replies.recv() {
-                            Ok(Reply::Answer(Some(answer))) => Request::PostAuthMessageResponse { response: Some(answer) },
+                            Ok(Reply::Answer(Some(answer))) => {
+                                Request::PostAuthMessageResponse { response: Some(answer) }
+                            }
                             // Cancelled by the UI (or the UI is gone): greetd drops the session.
                             _ => {
                                 Request::CancelSession.write_to(&mut stream).context("write cancel")?;
