@@ -352,8 +352,11 @@ print from a failed face attempt after the user signs in another way. Here:
      targets for unlocking (F27);
    - no other enrolled user matches it (estimated FAR < 1e-5, as a recognition).
 
-   It replies `ADDED 0.432` or `REFUSED no_pending | not_enrolled | too_far <s> | other_user <user> <s>`;
-   the PAM module only logs the reply.
+   It replies `ADDED 0.432` or `REFUSED no_pending | not_enrolled | too_far <s> | other_user <user> <s>`
+   and logs the result at info (`enroll-on-failure user=cole result=ADDED 0.432`); the PAM module logs
+   the reply and, after `ADDED`, tells the user from the same `pam_sm_setcred`
+   (`PAM_TEXT_INFO` "Face print added after password login"), so a print never appears in the
+   template without the user hearing of it. A refusal is only logged.
 
 New prints get `source: "on_failure"` and generation 3, so a later match against them never adds
 an augmented print. At most 5 per user, the oldest dropped first. They are matched like any other
