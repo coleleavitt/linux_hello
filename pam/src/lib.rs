@@ -238,7 +238,12 @@ fn check_face(pamh: *mut PamHandle, args: &Args) -> c_int {
             message(pamh, c"Face login not available: another program is using the camera");
             PAM_IGNORE
         }
-        _ => PAM_IGNORE,
+        // `ERROR ...` (a daemon that does not understand this module, a camera failure) or an
+        // empty reply (daemon gone): face login is not available; the password stack follows.
+        _ => {
+            log(pamh, "pam_linux_hello: face login not available (daemon reply above)");
+            PAM_IGNORE
+        }
     };
     // `NOTICE <text>` lines after the verdict: things the daemon wants the user to know.
     for notice in lines.iter().filter_map(|l| l.strip_prefix("NOTICE ")) {

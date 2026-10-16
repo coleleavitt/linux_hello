@@ -218,8 +218,15 @@ aligner's real eye contour (`examples/ms_check`, `brightness`).
 | too dark (3) | lit < 35 | rejected |
 | clipped (6) | > 1 % of the face ellipse clipped | rejected (`NOFACE clipped`) |
 | clipped around (7) | > 1 % of the band around the face clipped | print from the lit frame, used for matching; no vote; not used for augmentation |
-| weak (4) | d < 45, or ambient > 25 (strong ambient IR, e.g. sunlight) | print from the lit frame, used for matching; no vote; not used for augmentation |
+| weak (4) | d < 45, or ambient > 25 (strong ambient IR: sunlight, incandescent and halogen lamps) | print from the lit frame, used for matching; no vote; not used for augmentation |
 | good (1) | otherwise | print from `lit − min(lit, ambient)`; votes |
+
+The ambient limit is Windows' constant 25 (`sub_1800380CC`, F44); it has no higher tier. Measured
+2026-10-16 in a room with an incandescent lamp: the owner's face read ambient 30–40 with emitter
+gain 52–63 and the liveness nets voting live on the difference image, so Windows and linux_hello both
+fall back to the password there. `daemon --max-ambient <n>` raises the limit (logged at warn):
+above 25 the subtraction is a weaker liveness signal, because a photo lit by the same ambient IR
+also passes the emitter-gain rule, and only the anti-spoofing nets then tell them apart.
 
 Windows also turns `d > 205` into status 2; with lit ≤ 205 that cannot happen. It smooths the
 ambient brightness over frames; linux_hello does not.

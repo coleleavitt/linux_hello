@@ -49,6 +49,12 @@ struct Cli {
     #[arg(long, global = true)]
     no_windows_hello: bool,
 
+    /// Ambient-only face brightness (0-255) above which a frame cannot vote live. Windows uses
+    /// 25; raising it lets face login work next to windows and incandescent lamps at the cost
+    /// of a weaker lighting check (docs/capture-and-liveness.md §3)
+    #[arg(long, default_value_t = linux_hello::lighting::MAX_AMBIENT, global = true)]
+    max_ambient: f32,
+
     /// Face store (default: /var/lib/linux_hello/faces.json as root, else ~/.local/share/linux_hello/faces.json)
     #[arg(long, env = "LINUX_HELLO_STORE", global = true)]
     store: Option<PathBuf>,
@@ -111,6 +117,11 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(format!("{},ort=warn,tss_esapi=warn", cli.verbose)))
         .init();
+
+    if cli.max_ambient != linux_hello::lighting::MAX_AMBIENT {
+        tracing::warn!(max_ambient = cli.max_ambient, "ambient limit raised above Windows' 25: weaker lighting check");
+        linux_hello::lighting::set_max_ambient(cli.max_ambient);
+    }
 
     let models = std::env::var("LINUX_HELLO_MODELS")
         .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/models").to_string());

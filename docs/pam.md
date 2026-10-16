@@ -243,6 +243,8 @@ Enable it in the daemon only:
 
 ```sh
 echo 'LINUX_HELLO_ARGS="--enroll-on-failure"' > /etc/conf.d/linux_hello
+
+To keep face login working next to windows and incandescent lamps, `LINUX_HELLO_ARGS="--max-ambient 50"` raises the ambient-IR limit above Windows' 25 (docs/capture-and-liveness.md §3, weaker lighting check).
 rc-service linux_hello restart
 ```
 

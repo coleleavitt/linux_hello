@@ -32,8 +32,14 @@ backup() { [ -f "$1" ] && [ ! -f "$1.linux_hello.bak" ] && ! head -n1 "$1" | gre
 
 echo "== files"
 install -m755 "$repo/target/release/hello-greeter" /usr/local/bin/hello-greeter
-# The module with password_prompt; the same file contrib/install.sh installs.
+# The PAM module and the daemon speak one protocol: install both from the same build, and
+# restart the daemon, exactly as contrib/install.sh does (a module ahead of its daemon makes
+# every face request fail with ERROR).
 install -m755 "$repo/target/release/libpam_linux_hello.so" /lib64/security/pam_linux_hello.so
+install -m755 "$repo/target/release/linux_hello" /usr/local/bin/linux_hello
+if rc-service linux_hello status >/dev/null 2>&1; then
+    rc-service linux_hello restart
+fi
 # The Windows sign-in assets (git-ignored, docs/windows-hello-ui.md): used when present.
 if [ -d "$repo/models/windows_hello/assets" ]; then
     rm -rf "$share/assets"

@@ -8,8 +8,23 @@ pub const MAX_LIT: f32 = 205.0;
 pub const MIN_LIT: f32 = 35.0;
 /// Minimum face brightness the emitter must add (lit − ambient), out of 255 (F14).
 pub const MIN_EMITTER_GAIN: f32 = 45.0;
-/// Maximum ambient-only face brightness: more means strong ambient IR such as sunlight (F14).
+/// Windows' maximum ambient-only face brightness: more means strong ambient IR such as sunlight
+/// (F14, status 4: the print is matched, the frame cannot vote live).
 pub const MAX_AMBIENT: f32 = 25.0;
+
+static MAX_AMBIENT_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(MAX_AMBIENT.to_bits());
+
+/// The ambient limit in use ([`MAX_AMBIENT`] unless raised with [`set_max_ambient`]).
+pub fn max_ambient() -> f32 {
+    f32::from_bits(MAX_AMBIENT_LIMIT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Raise the ambient limit above Windows' 25 (`daemon --max-ambient`). Above 25 the subtraction
+/// is a weaker liveness signal: a photo lit by the same ambient IR looks more like a face to the
+/// emitter-gain rule, and only the anti-spoofing nets then tell them apart (docs/capture-and-liveness.md §3).
+pub fn set_max_ambient(limit: f32) {
+    MAX_AMBIENT_LIMIT.store(limit.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
 /// Clipped pixels (value 255) a region may hold, as a fraction of its pixels, before it counts as
 /// saturated (`CheckIfTooMuchSaturatedPixelOnFace`, F44: area · 1 / 100).
 pub const MAX_CLIPPED: f32 = 0.01;
@@ -174,7 +189,7 @@ impl Lighting {
             LightingStatus::Clipped
         } else if self.clipped_around > MAX_CLIPPED {
             LightingStatus::ClippedAround
-        } else if self.gain() < MIN_EMITTER_GAIN || self.ambient > MAX_AMBIENT {
+        } else if self.gain() < MIN_EMITTER_GAIN || self.ambient > max_ambient() {
             LightingStatus::Weak
         } else {
             LightingStatus::Good
@@ -250,6 +265,9 @@ mod tests {
         assert_eq!(status(30.0, 0.0), LightingStatus::TooDark);
         assert_eq!(status(50.0, 10.0), LightingStatus::Weak); // emitter adds too little
         assert_eq!(status(120.0, 30.0), LightingStatus::Weak); // strong ambient IR
+        set_max_ambient(50.0);
+        assert_eq!(status(120.0, 30.0), LightingStatus::Good);
+        set_max_ambient(MAX_AMBIENT);
         let clipped =
             |clipped_face, clipped_around| Lighting { lit: 80.0, ambient: 10.0, clipped_face, clipped_around }.status();
         assert_eq!(clipped(0.02, 0.0), LightingStatus::Clipped);

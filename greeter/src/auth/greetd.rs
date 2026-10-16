@@ -84,12 +84,18 @@ fn run(socket: &Path, user: &str, events: &Events, replies: &mpsc::Receiver<Repl
                     }
                 };
             }
-            // greetd cancels the session itself on any error.
+            // greetd 0.10 keeps the failed session configured on the connection until the client
+            // cancels it; a later create_session would get "a session is already being configured".
             Response::Error { error_type: ErrorType::AuthError, description } => {
+                let _ = Request::CancelSession.write_to(&mut stream);
+                let _ = Response::read_from(&mut stream);
                 events.send_blocking(AuthEvent::Failure(description))?;
                 return Ok(());
             }
-            Response::Error { error_type: ErrorType::Error, description } => return Err(anyhow!("{description}")),
+            Response::Error { error_type: ErrorType::Error, description } => {
+                let _ = Request::CancelSession.write_to(&mut stream);
+                return Err(anyhow!("{description}"));
+            }
         }
     }
 }

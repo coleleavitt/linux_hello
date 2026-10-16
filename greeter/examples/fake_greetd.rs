@@ -114,7 +114,15 @@ fn session(mut stream: UnixStream, scenario: &Scenario) -> Result<()> {
                 };
                 Response::Error { error_type: ErrorType::AuthError, description: description.into() }
                     .write_to(&mut stream)?;
-                return Ok(());
+                // Like greetd 0.10: the failed session stays configured on this connection until
+                // the client cancels it; anything else is refused.
+                return match Request::read_from(&mut stream)? {
+                    Request::CancelSession => {
+                        Response::Success.write_to(&mut stream)?;
+                        Ok(())
+                    }
+                    _ => fail(&mut stream, "a session is already being configured"),
+                };
             }
             Request::CancelSession => return Ok(()),
             _ => return fail(&mut stream, "unexpected request"),

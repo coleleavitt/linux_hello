@@ -62,6 +62,13 @@ fn wrong_password_ends_the_attempt() {
     assert!(matches!(next(&rx), AuthEvent::Prompt { secret: true, .. }));
     attempt.answer(Some("wrong".into()));
     assert_eq!(next(&rx), AuthEvent::Failure("Authentication failure".into()));
+    // A second attempt after the failure: the greeter cancelled the first session, so greetd
+    // (and the fake, which refuses otherwise) accepts a new create_session.
+    let (tx, rx) = async_channel::unbounded();
+    let attempt = greetd::start(&socket, "cole", tx);
+    while !matches!(next(&rx), AuthEvent::Prompt { .. }) {}
+    attempt.answer(Some("hunter2".into()));
+    assert_eq!(next(&rx), AuthEvent::Success);
 }
 
 #[test]
