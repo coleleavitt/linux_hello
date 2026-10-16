@@ -5,6 +5,7 @@
 | [pam.md](pam.md) | Face login through PAM: sudo, swaylock (presence wait), polkit, su, console login; who may ask the daemon (threat model), notices, install, enroll-on-failure, caveats. [sudo.md](sudo.md) points here |
 | [capture-and-liveness.md](capture-and-liveness.md) | IR lit/ambient pairs, ambient subtraction, lighting gate, liveness votes, multi-print matching with Microsoft's recogniser as second opinion, template augmentation |
 | [windows-hello-re.md](windows-hello-re.md) | Windows Hello Face reverse engineering (IDA/idalib, public PDBs) + runtime checks on this camera |
+| [camera.md](camera.md) | The camera itself (`30c9:00f3`): functions, nodes, extension units and every XU control, metadata items, what the Windows INF/DMFT do, emitter experiments; why the emitter-off frame is black here and what is still to measure |
 | [feature-gap.md](feature-gap.md) | Every Windows Hello face-path behaviour vs linux_hello: done / in progress / missing / won't do |
 | [calibration.md](calibration.md) | LFW threshold calibration (0.50 cosine for per-attempt FAR ≤ 1e-5 with 15 prints), the per-camera calibration table (`models/calibration.json`, similarity → FAR × prints × 16 pairs, as Windows' F51) Microsoft's own table for the second opinion, and the IR impostor check (`examples/impostor_capture`, `examples/calibrate_ir`) |
 | [winhello-models/](winhello-models/) | Converters for Windows Hello model formats: convnet, cefa + cipher, lbf + head pose, ldmf |
