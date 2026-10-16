@@ -92,6 +92,28 @@ dark frames per pair, then the pair has no RGB frame and the colour net is skipp
 no vote; without the Windows Hello models the open RGB models veto, as for a dropped camera).
 The IR-to-RGB registration (§5) is the 640×480 fit moved up by the 60 cropped rows.
 
+**RGB exposure.** The RGB node offers `auto_exposure` (default aperture priority),
+`exposure_time_absolute`, `exposure_dynamic_framerate`, `power_line_frequency`,
+`backlight_compensation` and `white_balance_automatic`; linux_hello sets none of them. The
+"2–3 underexposed frames every ≈ 5 s" of earlier runs are not the camera's: they are the owner's
+`irlux` daemon (`~/.local/share/irlux`, niri's ambient-light sensor, sampling every 60 s). It
+keeps the RGB camera locked in manual exposure between samples (so the camera is found at
+`auto_exposure=1`, e.g. `exposure_time_absolute=1250` → 8 fps in a dim room, and auto white
+balance off), and when its sample falls while linux_hello holds the camera, its `ffmpeg` fails
+with `EBUSY` and it retries every 5 s; each retry writes `auto_exposure=1`,
+`exposure_time_absolute=156`, then `auto_exposure=3` back, which restarts the auto-exposure:
+the frame drops to ≈ 0.15 of its level and climbs back over ≈ 25 frames (0.8 s), 2–3 dark pairs
+and 2–3 dim ones at 7.5 pairs/s. Measured 2026-10-16 by sampling the controls at 5 Hz while
+streaming: the writes recur every 5.17–5.20 s (the 5 s retry plus its work) from the moment
+irlux's 60 s sample comes due — 17, 21 and 30 s into three runs, never in a run under 15 s —
+and the `watch` output of the night before has the same dips 5.1–5.2 s apart. Alone, with the
+controls left alone, auto exposure held the level within ±2 % over 40 s with the IR stream
+running and 30 s without; no control setting of linux_hello can stop another process writing
+the controls, so none is applied, and the dark-frame skip above covers the first half of a
+restart. Dim frames are no risk to the colour net: on the restart frames of that output
+p(spoof) was 0.002–0.26 (§5). The fix belongs in irlux (open the device before touching the
+controls, and back off longer than 5 s when it is busy).
+
 **Start-up (L7).** `OpenCameras::open` opens the IR camera first (its first frame comes after
 ≈ 90 ms alone), drops `WARMUP_FRAMES = 4` frames, then opens the RGB camera (first frame after
 ≈ 50 ms; started first it takes ≈ 245 ms, and the earlier note that it stalls when started after

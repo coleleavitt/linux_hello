@@ -154,7 +154,11 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   pair, then the pair has no RGB frame and the colour net is skipped); a frame with no face in
   the RGB image counts as a veto only without the Windows Hello models. An RGB camera that
   delivers no frame for 1 s is dropped for the session (the colour net is skipped; without the
-  Windows Hello models the open RGB models then veto every frame).
+  Windows Hello models the open RGB models then veto every frame). The dark frames seen every
+  ≈ 5 s on this machine come from the owner's `irlux` ambient-light daemon rewriting the RGB
+  exposure controls while linux_hello holds the camera
+  ([docs/capture-and-liveness.md](docs/capture-and-liveness.md#1-litambient-pairs-f10-f12-f13-f15-l1l3)),
+  not from the camera.
 - Templates are stored unencrypted (root-only file) unless the store is sealed with the TPM
   (optional, see below).
 

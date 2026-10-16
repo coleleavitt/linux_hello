@@ -115,8 +115,9 @@ impl OpenCameras {
     }
 
     /// The RGB frame for this pair: the next frame that is whole ([`Camera::capture_rgb`]) and
-    /// not much darker than the recent average (the camera underexposes 2-3 frames about every
-    /// 5 s, and the liveness models reject those). Up to [`MAX_RGB_SKIPS`] frames are skipped;
+    /// not much darker than the recent average (an auto-exposure restart, as another process
+    /// writing the exposure controls causes, darkens ≈ 0.8 s of frames; docs/capture-and-liveness.md
+    /// §1). Up to [`MAX_RGB_SKIPS`] frames are skipped;
     /// after that the pair has no RGB frame and the colour net is skipped (no veto). A camera
     /// that stops delivering frames ([`RGB_FRAME_TIMEOUT`]) is dropped for the session.
     fn capture_liveness(&mut self) -> Result<Option<RgbImage>> {
