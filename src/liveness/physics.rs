@@ -8,12 +8,13 @@
 use anyhow::Result;
 use image::{GrayImage, RgbImage};
 
+use crate::lighting::block_mean;
 use crate::liveness::check::{Check, Frame, Observed};
 use crate::{FaceCheck, Vote};
 
 /// The checks, in the order they are logged.
 pub fn all() -> Vec<Box<dyn Check>> {
-    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker)]
+    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker), Box::new(Material)]
 }
 
 /// Score every check on every face of `check` that has a print, record the scores in
@@ -313,6 +314,44 @@ impl Check for Flicker {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         })
+    }
+}
+
+/// IR/RGB material: skin reflects 850 nm at ≈ 0.5–0.6 and visible light at ≈ 0.3–0.4; paper
+/// reflects both at ≈ 0.8–0.9 and most inks are transparent at 850 nm, so a printed face is as
+/// dark as skin in the colour frame (that is what the print is for) but paper-white to the
+/// emitter; a screen emits visible light and no infrared. Score = the face's emitter gain
+/// (F14 `d`, on the F43 block), corrected for the emitter's 1/r² by (IOD / [`IOD_REF`])²,
+/// over the luminance of the colour face's F43 block (Rec. 601, on the colour face's own five
+/// points). Both cameras auto-expose, so the ratio is not an absolute albedo ratio; on the
+/// genuine café recordings it reads 0.44–0.51 with the RGB face at 190–220 of 255. `None`
+/// without a colour face or when the colour face is dark ([`MIN_RGB_FACE`]: a dark room says
+/// nothing about the material).
+pub struct Material;
+
+/// Inter-ocular distance (px) at which the emitter gain is taken as is (≈ 60 cm on this camera).
+pub const IOD_REF: f32 = 50.0;
+/// Colour face luminance below which the ratio is not meaningful.
+pub const MIN_RGB_FACE: f32 = 40.0;
+
+impl Check for Material {
+    fn name(&self) -> &str {
+        "material"
+    }
+
+    fn score(&mut self, frame: &Frame, face: usize) -> Result<Option<f32>> {
+        let f = frame.face(face);
+        let (Some(lighting), Some(rgb), Some(rgb_face)) =
+            (f.analysis.lighting, &frame.current.capture.rgb, &f.rgb_face)
+        else {
+            return Ok(None);
+        };
+        let luminance = block_mean(rgb.width(), rgb.height(), &rgb_face.landmarks, |x, y| luma(rgb, x, y));
+        if luminance < MIN_RGB_FACE {
+            return Ok(None);
+        }
+        let scale = iod(&points(f)) / IOD_REF;
+        Ok(Some(lighting.gain() * scale * scale / luminance))
     }
 }
 

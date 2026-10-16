@@ -141,3 +141,37 @@ room's lamps should read as a face does.
 **Attack set.** Not recorded yet.
 
 **Role.** Logged; no threshold (genuine 99th percentile ≈ 0.025 on three recordings).
+
+## 4. IR/RGB material (`material`)
+
+**Physics.** Skin reflects 850 nm at ≈ 0.5–0.6 and visible light at ≈ 0.3–0.4 (light skin).
+Paper reflects both at ≈ 0.8–0.9, and most printer inks are transparent at 850 nm, so a printed
+face is as dark as skin in the colour frame (that is what the print is for) but paper-white to
+the emitter. A screen emits visible light and no infrared at all.
+
+**Measure.** Per frame, the face's emitter gain (F14 `d`, the F43 block of the emitter image),
+corrected for the emitter's 1/r² with (IOD / `IOD_REF` 50 px)², over the luminance of the colour
+face's F43 block (Rec. 601, on the colour face's own five points; the colour face is the one
+paired by F66, `FaceCheck::rgb_face`). `None` without a colour face or with the colour face
+darker than `MIN_RGB_FACE` = 40: a dark room says nothing about the material. Both cameras
+auto-expose (the IR one on the face), so this is a ratio of exposed values, not of albedos; it
+holds as long as both exposures track the same scene.
+
+**Genuine.**
+
+| Set | frames | RGB face | min | p10 | p50 | p90 | max |
+|---|---|---|---|---|---|---|---|
+| lh_lock | 59 | ≈ 190 | 0.41 | 0.43 | 0.45 | 0.46 | 0.47 |
+| lh_now | 54 | ≈ 220 | 0.41 | 0.42 | 0.45 | 0.47 | 0.52 |
+| lh_view | 28 | ≈ 190 | 0.43 | 0.46 | 0.53 | 0.55 | 0.55 |
+| validation_frames (dark room, face lit by the screen) | 3 | 40–60 | 0.81 | — | 0.85 | — | 0.90 |
+
+Within one lighting the spread is ±5 %; between the café (lamps) and the dark room (screen
+light) the ratio doubles, because the colour face's exposure follows the room. The genuine
+range is therefore wide (0.4–0.9); the expectation for a print under the same lamps is a value
+1.5–2× the face's at the same spot, and for a screen one near 0 (no emitter return from a
+screen, and the IR face is not even found).
+
+**Attack set.** Not recorded yet.
+
+**Role.** Logged; no threshold.
