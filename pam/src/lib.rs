@@ -2,7 +2,7 @@
 //! person at the camera is the user being authenticated.
 //!
 //! Module arguments: `socket=PATH` (default `/run/linux_hello.sock`), `timeout=SECONDS` (default
-//! 10), `wait_services=NAME,NAME,...` (default `swaylock,login`).
+//! 10), `wait_services=NAME,NAME,...` (default `swaylock,login`), `password_prompt` (below).
 //!
 //! Face login is skipped (PAM_IGNORE) for remote sessions: SSH_CONNECTION/SSH_TTY set or PAM_RHOST set.
 //!
@@ -34,6 +34,17 @@
 //! user so (PAM_TEXT_INFO "Face print added after password login"). A face match or a later face
 //! check in the same transaction forgets the token. sudo calls `pam_setcred` by default
 //! (`Defaults pam_setcred`).
+//!
+//! `password_prompt` is for a greeter or lock screen that runs face recognition over and over
+//! (hello-greeter, docs/greeter.md), on a line `[success=done conv_err=die default=ignore]`:
+//! after anything but a match the module asks for the password itself (`PAM_PROMPT_ECHO_OFF`
+//! "Password") and hands the answer to the password modules through `PAM_AUTHTOK`
+//! (`pam_unix try_first_pass`), so that they never prompt. An empty answer, or a conversation
+//! that fails (the greeter cancelled), returns PAM_CONV_ERR and the line's `conv_err=die` ends
+//! the stack there: the greeter can start the next face check without `pam_unix` and
+//! `pam_faillock` ever seeing a failed attempt (every cancelled `pam_unix` prompt would count
+//! towards faillock's lockout). "Looking for your face..." failing to reach the greeter ends
+//! the stack the same way, before the camera is used.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{BufRead, BufReader, Write};
@@ -54,6 +65,7 @@ pub struct PamHandle {
 extern "C" {
     fn pam_get_user(pamh: *mut PamHandle, user: *mut *const c_char, prompt: *const c_char) -> c_int;
     fn pam_get_item(pamh: *const PamHandle, item_type: c_int, item: *mut *const c_void) -> c_int;
+    fn pam_set_item(pamh: *mut PamHandle, item_type: c_int, item: *const c_void) -> c_int;
     // pam_info() is a macro over pam_prompt() in pam_ext.h, so call pam_prompt directly.
     fn pam_prompt(pamh: *mut PamHandle, style: c_int, response: *mut *mut c_char, fmt: *const c_char, ...) -> c_int;
     fn pam_syslog(pamh: *const PamHandle, priority: c_int, fmt: *const c_char, ...);
@@ -67,9 +79,14 @@ extern "C" {
 }
 
 const LOG_NOTICE: c_int = 5;
+const PAM_CONV_ERR: c_int = 19;
+const PAM_PROMPT_ECHO_OFF: c_int = 1;
 const PAM_TEXT_INFO: c_int = 4;
 const PAM_SERVICE: c_int = 1;
 const PAM_RHOST: c_int = 4;
+const PAM_AUTHTOK: c_int = 6;
+/// The prompt of `password_prompt`; a greeter tells it from `pam_unix`'s "Password: " by it.
+pub const PASSWORD_PROMPT: &CStr = c"Password";
 /// How much longer than the presence wait the module waits for the reply: the session running
 /// at the deadline finishes first (up to 16 pairs, ≈ 2–4.5 s), and a single session (no wait)
 /// takes as long.
@@ -105,6 +122,8 @@ struct Args {
     /// The presence wait of the services in `wait_services`
     timeout: u64,
     wait_services: Vec<String>,
+    /// Ask for the password after a failed face check (greeter lines, module docs).
+    password_prompt: bool,
 }
 
 fn args(argc: c_int, argv: *const *const c_char) -> Args {
@@ -112,6 +131,7 @@ fn args(argc: c_int, argv: *const *const c_char) -> Args {
         socket: "/run/linux_hello.sock".into(),
         timeout: 10,
         wait_services: vec!["swaylock".into(), "login".into()],
+        password_prompt: false,
     };
     for i in 0..argc.max(0) as usize {
         // SAFETY: PAM passes `argc` valid NUL-terminated strings.
@@ -122,12 +142,49 @@ fn args(argc: c_int, argv: *const *const c_char) -> Args {
             args.timeout = secs;
         } else if let Some(names) = arg.strip_prefix("wait_services=") {
             args.wait_services = names.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
+        } else if arg == "password_prompt" {
+            args.password_prompt = true;
         }
     }
     args
 }
 
 fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
+    let result = check_face(pamh, &args);
+    if args.password_prompt && result != PAM_SUCCESS && result != PAM_CONV_ERR {
+        return ask_password(pamh, result);
+    }
+    result
+}
+
+/// `password_prompt`: ask for the password and leave it in `PAM_AUTHTOK` for the password
+/// modules; `result` (the face check's) is returned so that the line's control ignores it.
+/// No answer: PAM_CONV_ERR, which ends the stack through `conv_err=die`.
+fn ask_password(pamh: *mut PamHandle, result: c_int) -> c_int {
+    let mut response: *mut c_char = ptr::null_mut();
+    // SAFETY: "%s" with one NUL-terminated string argument; libpam mallocs the response.
+    let status =
+        unsafe { pam_prompt(pamh, PAM_PROMPT_ECHO_OFF, &mut response, c"%s".as_ptr(), PASSWORD_PROMPT.as_ptr()) };
+    if status != PAM_SUCCESS || response.is_null() {
+        return PAM_CONV_ERR;
+    }
+    // SAFETY: `response` is a malloced NUL-terminated string that is ours to free.
+    unsafe {
+        let len = libc::strlen(response);
+        let outcome = if len == 0 {
+            PAM_CONV_ERR
+        } else {
+            // pam_set_item copies the token.
+            pam_set_item(pamh, PAM_AUTHTOK, response.cast());
+            result
+        };
+        ptr::write_bytes(response, 0, len);
+        libc::free(response.cast());
+        outcome
+    }
+}
+
+fn check_face(pamh: *mut PamHandle, args: &Args) -> c_int {
     // Only the last face check of the transaction may lead to enroll-on-failure.
     remember_failure(pamh, None);
 
@@ -148,7 +205,9 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
     let Ok(stream) = UnixStream::connect(&args.socket) else {
         return PAM_IGNORE;
     };
-    message(pamh, c"Looking for your face...");
+    if message(pamh, c"Looking for your face...") != PAM_SUCCESS && args.password_prompt {
+        return PAM_CONV_ERR;
+    }
 
     let service = item(pamh, PAM_SERVICE).unwrap_or_default();
     let wait = args.wait_services.contains(&service);
@@ -266,9 +325,10 @@ fn item(pamh: *mut PamHandle, item_type: c_int) -> Option<String> {
     (ok && !value.is_null()).then(|| unsafe { CStr::from_ptr(value.cast()) }.to_string_lossy().into_owned())
 }
 
-fn message(pamh: *mut PamHandle, text: &CStr) {
+/// Show `text`; the status says whether the application's conversation took it.
+fn message(pamh: *mut PamHandle, text: &CStr) -> c_int {
     // SAFETY: "%s" with one NUL-terminated string argument.
-    unsafe { pam_prompt(pamh, PAM_TEXT_INFO, ptr::null_mut(), c"%s".as_ptr(), text.as_ptr()) };
+    unsafe { pam_prompt(pamh, PAM_TEXT_INFO, ptr::null_mut(), c"%s".as_ptr(), text.as_ptr()) }
 }
 
 fn log(pamh: *mut PamHandle, text: &str) {

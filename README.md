@@ -54,6 +54,7 @@ Details and the Windows Hello findings behind each step: [docs/capture-and-liven
 |------|------|
 | `src/` | `linux_hello` library and CLI: `enroll`, `auth`, `daemon`, `watch`, `camera`, `list`, `remove` |
 | `pam/` | `pam_linux_hello.so`, a tiny PAM module (no ML code) that asks the daemon over a Unix socket |
+| `greeter/` | `hello-greeter`, a greetd greeter and session locker with the Windows Hello sign-in screen ([docs/greeter.md](docs/greeter.md)) |
 | `contrib/openrc/linux_hello` | OpenRC service for the daemon |
 | `scripts/download_models.sh` | Fetches the models and checks their SHA-256 |
 
@@ -101,6 +102,16 @@ daemon's socket is open to local users, who may only ask about themselves and ca
 credential; the PAM stack grants. Details, flow, what each application shows and caveats:
 [docs/pam.md](docs/pam.md). Face login is skipped for SSH sessions
 (`SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST`), because the camera sees whoever sits at the laptop.
+
+## Login screen and lock screen (optional)
+
+`hello-greeter` replaces the tty login and swaylock with Windows' sign-in flow: the lock screen
+looks for your face on its own and signs you in, a key press shows the sign-in screen with the
+Hello icon, the reason when the face failed, and the password box. It runs under greetd
+(`emerge gui-libs/greetd`, then `sudo contrib/install-greeter.sh`, greetd on VT 7, reversible
+with `contrib/uninstall-greeter.sh`) and as `hello-greeter --lock` inside the session. The real
+Windows fonts, background, user picture and Hello icon are used when
+`models/windows_hello/assets/` exists. [docs/greeter.md](docs/greeter.md).
 
 ## TPM sealing (optional)
 

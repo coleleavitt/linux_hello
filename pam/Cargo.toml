@@ -7,3 +7,7 @@ license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+# free() of the password the conversation mallocs for `password_prompt`
+libc = "0.2"

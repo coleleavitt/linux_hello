@@ -1,0 +1,31 @@
+[package]
+name = "hello-greeter"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cole Leavitt"]
+description = "greetd greeter and session locker with a Windows Hello-style sign-in screen"
+license = "MIT"
+
+[lib]
+name = "hello_greeter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hello-greeter"
+path = "src/main.rs"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
+pangocairo = "0.22"
+gtk4-layer-shell = "0.8"
+gtk4-session-lock = { version = "0.4", features = ["v1_1"] }
+greetd_ipc = { version = "0.10", features = ["sync-codec"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+libc = "0.2"
+async-channel = "2"
