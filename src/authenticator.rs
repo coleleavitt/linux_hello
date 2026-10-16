@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::{
-    Camera, CameraType, Embedding, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
+    Camera, CameraType, Embedding, Face, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
     LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote,
 };
 
@@ -52,19 +52,15 @@ pub struct OpenCameras {
 
 impl OpenCameras {
     pub fn open(setup: &CameraSetup) -> Result<Self> {
-        // Open RGB first: starting it after the IR stream stalls it. Reading one frame starts
-        // the stream (v4l starts streaming on the first read); its auto-exposure then keeps
-        // adjusting while the IR camera warms up, so afterwards we only drop the frames it
-        // buffered meanwhile.
-        let mut liveness = setup
+        // IR first: alone, its stream delivers the first frame in ≈ 90 ms. The RGB stream's
+        // first frame takes ≈ 245 ms when it starts first and ≈ 50 ms after the IR stream
+        // (docs/capture-and-liveness.md §1).
+        let ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
+        let liveness = setup
             .liveness_device
             .as_ref()
             .map(|d| Camera::open_with(d, CameraType::Rgb, 1, LIVENESS_BUFFERS))
             .transpose()?;
-        let ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
-        if let Some(cam) = liveness.as_mut() {
-            cam.skip(LIVENESS_BUFFERS as usize)?;
-        }
         Ok(Self { ir, liveness, rgb_level: None })
     }
 
@@ -72,6 +68,13 @@ impl OpenCameras {
         let pair = self.ir.capture_pair()?;
         let rgb = self.capture_liveness()?;
         Ok(Capture { pair, rgb })
+    }
+
+    /// Meter the IR exposure on the face found in the last pair ([`IrCamera::expose_on`]).
+    pub fn expose_on(&mut self, face: Option<&Face>) {
+        if let Some(face) = face {
+            self.ir.expose_on(face.bbox);
+        }
     }
 
     /// The RGB camera underexposes 2-3 frames about every 5 s, and the liveness models reject
@@ -293,6 +296,7 @@ impl Authenticator {
         let verdict = loop {
             let capture = cams.capture()?;
             let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+            cams.expose_on(check.analysis.face.as_ref());
             let verdict = session.add(&check);
             let attempt = session.attempt();
             info!(
@@ -337,6 +341,9 @@ impl Authenticator {
                 break;
             }
             let analysis = self.pipeline.analyze(&ir.capture_pair()?)?;
+            if let Some(face) = &analysis.face {
+                ir.expose_on(face.bbox);
+            }
             match (analysis.status(), analysis.print) {
                 (Some(LightingStatus::Good), Some(print)) => prints.push(print),
                 _ => info!(problem = ?analysis.problem, lighting = ?analysis.lighting, "enrollment frame skipped"),

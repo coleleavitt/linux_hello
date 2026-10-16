@@ -44,6 +44,37 @@ frame (L2, L3); this is the same signal Windows reads as `InfraredMediaFrame.IsI
   as the lit one (sum of every 5th pixel of every 5th row, as in Windows' `FrameStrobe`, F15).
   Windows uses its brightness guess only for file replay.
 
+**Exposure on the face (L6).** The IR node exposes the UVC 1.5 region-of-interest control
+(`region_of_interest_rectangle`, `region_of_interest_auto_ctrls` bit 0 = auto-exposure). After
+every pair with a face, `IrCamera::expose_on` sets the rectangle to the SCRFD box of the lit
+frame (clamped to the frame, ≥ 2×2), as Windows' `SensorController` meters on the face (Q1).
+Auto-exposure then targets the face rather than the whole frame: with the owner at ≈ 60 cm in a
+dark room the face brightness (F43) went from 139 with whole-frame metering to 110 with the face
+rectangle; a change shows after ≈ 10 frames and settles after ≈ 20–28 frames (0.67 s / 1.5 s),
+so it mostly helps the second half of a session and the next one (the camera keeps its exposure
+between streams, L7). Both controls are written in one `VIDIOC_S_EXT_CTRLS` (they are one UVC
+control; the v4l crate cannot read rect or bitmask controls, so `camera.rs` uses its raw
+bindings). Re-setting the rectangle every pair as the box jitters costs 0.5 ms and does not
+disturb the exposure (measured over 40 re-sets). The driver default (`(0,0)/640x360`, auto on) is
+written when the camera opens, in case an earlier run died, and when it closes. A camera without
+the controls logs once (debug) and meters the whole frame; a camera that rejects a rectangle
+logs once (warn) and keeps whatever it has.
+
+**Start-up (L7).** `OpenCameras::open` opens the IR camera first (its first frame comes after
+≈ 90 ms alone), drops `WARMUP_FRAMES = 4` frames, then opens the RGB camera (first frame after
+≈ 50 ms; started first it takes ≈ 245 ms, and the earlier note that it stalls when started after
+the IR stream did not reproduce in 20 runs). The metadata node is read along with the warm-up
+frames so that it is in step with the video by the first pair. The first pair with its RGB frame
+is ready ≈ 0.54 s after opening (before: ≈ 1.6 s with RGB first and 16 warm-up frames; measured
+on 2026-10-16 with a scratch example, 8 runs each). 4 warm-up frames because the camera resumes
+near its last exposure and converges by 1–2 % per lit frame: the first lit frame was 17–45 %
+off after 30–300 s idle, frame 4–5 is within ≈ 30 %, and after that it only drifts; a ±35 %
+brightness change moves a print's cosine similarity by < 0.015 and the cross-sitting match
+score by < 0.02 (`examples/embed_dir` on brightness-scaled validation frames). Frames still
+saturated after an abnormal start (L7) are rejected by the F44 gates until exposure comes down.
+`examples/ir_exposure [--frames N] [x1,y1,x2,y2 | full ...]` prints the per-frame brightness
+from stream start and after each region change.
+
 ### 2. Frame gates (F45, F46)
 
 The face (largest SCRFD detection) is found on the lit frame. With the Windows Hello models, the

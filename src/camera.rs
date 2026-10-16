@@ -7,15 +7,22 @@
 use anyhow::{bail, Context, Result};
 use image::{GrayImage, RgbImage};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use v4l::buffer::Type;
+use v4l::device::Handle;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
+use v4l::v4l_sys::v4l2_rect;
 use v4l::video::Capture;
 use v4l::FourCC;
 
-const WARMUP_FRAMES: usize = 16;
+/// IR frames dropped after the stream starts. The camera resumes near the exposure it had when
+/// it last streamed and converges by 1–2 % per frame, so the first lit frames are 15–40 % too
+/// bright or too dark; after 4 frames they are within ≈ 30 % of the settled value, which
+/// changes a print's cosine similarity by < 0.02 (docs/capture-and-liveness.md §1).
+const WARMUP_FRAMES: usize = 4;
 /// A lit frame is only paired with an ambient frame closer in time than this (F13).
 pub(crate) const MAX_PAIR_GAP: Duration = Duration::from_millis(300);
 /// Frames read while looking for one lit/ambient pair before giving up.
@@ -28,6 +35,12 @@ const META_BUFFERS: u32 = 4;
 const META_TIMEOUT: Duration = Duration::from_secs(1);
 /// `MetadataId_FrameIllumination` in Microsoft's UVC metadata; payload `u32 Flags` (bit 0 = on).
 const METADATA_FRAME_ILLUMINATION: u32 = 6;
+/// `V4L2_CID_REGION_OF_INTEREST_RECT` and `_AUTO`: the UVC 1.5 `CT_REGION_OF_INTEREST_CONTROL`
+/// as two V4L2 controls (Linux 6.14+), the rectangle and the bitmask of what it steers.
+const ROI_RECT: u32 = 0x0098_1ae1;
+const ROI_AUTO: u32 = 0x0098_1ae2;
+/// `V4L2_UVC_REGION_OF_INTEREST_AUTO_EXPOSURE`: auto-exposure meters the rectangle.
+const ROI_AUTO_EXPOSURE: i32 = 1;
 
 /// Camera type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,13 +66,9 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// Open a camera by device path
-    pub fn open(path: impl AsRef<Path>, camera_type: CameraType) -> Result<Self> {
-        Self::open_with(path, camera_type, WARMUP_FRAMES, 4)
-    }
-
-    /// Open with explicit warm-up frame count and buffer count. Fewer buffers keep the
-    /// returned frames closer to "now" when the stream is read slower than it runs.
+    /// Open a camera by device path, dropping `warmup` frames after the stream starts, with
+    /// `buffers` V4L2 buffers. Fewer buffers keep the returned frames closer to "now" when the
+    /// stream is read slower than it runs.
     pub fn open_with(path: impl AsRef<Path>, camera_type: CameraType, warmup: usize, buffers: u32) -> Result<Self> {
         let path = path.as_ref();
         info!(?path, ?camera_type, "opening camera");
@@ -84,7 +93,6 @@ impl Camera {
 
         let stream = MmapStream::with_buffers(&device, Type::VideoCapture, buffers)?;
         let mut camera = Self { stream, width, height, fourcc, camera_type };
-        // Let auto-exposure settle; the first frames are dark.
         camera.skip(warmup)?;
         Ok(camera)
     }
@@ -164,31 +172,55 @@ impl IrPair {
     }
 }
 
+/// One IR frame with its illumination flag.
+pub struct IrFrame {
+    pub image: GrayImage,
+    /// V4L2 buffer timestamp
+    pub time: Duration,
+    /// Whether the emitter lit the frame; `None` without metadata, or when the frame's metadata
+    /// was dropped
+    pub lit: Option<bool>,
+}
+
 /// The IR camera, read as lit/ambient pairs.
 pub struct IrCamera {
     video: Camera,
     meta: Option<MetaStream>,
+    /// `None` on cameras without region-of-interest controls
+    exposure: Option<ExposureRegion>,
 }
 
 impl IrCamera {
     /// Open the IR camera and, if given, its metadata node (e.g. `/dev/video3`).
     pub fn open(device: &str, metadata: Option<&str>) -> Result<Self> {
+        Self::open_with(device, metadata, WARMUP_FRAMES)
+    }
+
+    /// Open with an explicit warm-up frame count.
+    pub fn open_with(device: &str, metadata: Option<&str>, warmup: usize) -> Result<Self> {
         // The metadata format can only be set while the metadata queue is idle, so set it before
-        // the video stream starts. Its stream starts on the first read, after the warm-up.
+        // the video stream starts.
         let meta = metadata.map(MetaStream::open).transpose()?;
-        let video = Camera::open(device, CameraType::Ir)?;
-        Ok(Self { video, meta })
+        let video = Camera::open_with(device, CameraType::Ir, 0, 4)?;
+        let exposure = ExposureRegion::open(video.stream.handle());
+        let mut camera = Self { video, meta, exposure };
+        // Read the metadata along with the warm-up frames so that it is in step with the video
+        // by the first pair.
+        for _ in 0..warmup {
+            camera.capture_frame()?;
+        }
+        Ok(camera)
     }
 
     /// Two consecutive frames, one lit and one ambient, less than [`MAX_PAIR_GAP`] apart.
     pub fn capture_pair(&mut self) -> Result<IrPair> {
-        let mut prev = self.next_frame()?;
+        let mut prev = self.capture_frame()?;
         for _ in 0..MAX_PAIR_FRAMES {
-            let next = self.next_frame()?;
-            let gap = next.0.time.saturating_sub(prev.0.time);
+            let next = self.capture_frame()?;
+            let gap = next.time.saturating_sub(prev.time);
             if gap < MAX_PAIR_GAP {
                 if let Some(prev_lit) = self.is_first_lit(&prev, &next) {
-                    let (lit, ambient) = if prev_lit { (prev.0, next.0) } else { (next.0, prev.0) };
+                    let (lit, ambient) = if prev_lit { (prev, next) } else { (next, prev) };
                     return Ok(IrPair {
                         lit: lit.image,
                         ambient: ambient.image,
@@ -197,33 +229,147 @@ impl IrCamera {
                     });
                 }
             }
-            debug!(?gap, prev = ?prev.1, next = ?next.1, "frames do not form a lit/ambient pair");
+            debug!(?gap, prev = ?prev.lit, next = ?next.lit, "frames do not form a lit/ambient pair");
             prev = next;
         }
         bail!("no lit/ambient IR frame pair in {MAX_PAIR_FRAMES} frames (does the emitter alternate?)")
     }
 
     /// Whether the first of two frames is the lit one, or `None` if they are not a lit/ambient pair.
-    fn is_first_lit(&self, a: &(GrayFrame, Option<bool>), b: &(GrayFrame, Option<bool>)) -> Option<bool> {
+    fn is_first_lit(&self, a: &IrFrame, b: &IrFrame) -> Option<bool> {
         if self.meta.is_none() {
-            return Some(brightness_sum(&a.0.image) >= brightness_sum(&b.0.image));
+            return Some(brightness_sum(&a.image) >= brightness_sum(&b.image));
         }
-        match (a.1, b.1) {
+        match (a.lit, b.lit) {
             (Some(x), Some(y)) if x != y => Some(x),
             _ => None,
         }
     }
 
-    /// The next frame and its illumination flag (`None` without metadata, or when the frame's
-    /// metadata was dropped).
-    fn next_frame(&mut self) -> Result<(GrayFrame, Option<bool>)> {
+    /// The next frame.
+    pub fn capture_frame(&mut self) -> Result<IrFrame> {
         let frame = self.video.capture_gray()?;
         let lit = match self.meta.as_mut() {
             Some(meta) => meta.illumination(frame.sequence)?,
             None => None,
         };
-        Ok((frame, lit))
+        Ok(IrFrame { image: frame.image, time: frame.time, lit })
     }
+
+    /// Meter auto-exposure on the face box `[x1, y1, x2, y2]` (lit-frame pixels) instead of the
+    /// whole frame, as Windows' `SensorController` does (Q1). No-op on cameras without the
+    /// controls; a camera that rejects the rectangle is left as it is.
+    pub fn expose_on(&mut self, bbox: [f32; 4]) {
+        let Some(exposure) = self.exposure.as_mut() else { return };
+        let (w, h) = (self.video.width as f32, self.video.height as f32);
+        let [x1, y1, x2, y2] = bbox;
+        let (left, top) = (x1.clamp(0.0, w - 2.0).round(), y1.clamp(0.0, h - 2.0).round());
+        let rect = v4l2_rect {
+            left: left as i32,
+            top: top as i32,
+            width: (x2.round().clamp(left + 2.0, w) - left) as u32,
+            height: (y2.round().clamp(top + 2.0, h) - top) as u32,
+        };
+        if let Err(e) = exposure.set(rect) {
+            warn!(%e, ?rect, "cannot set the exposure region; metering the whole frame");
+            self.exposure = None;
+        }
+    }
+}
+
+/// The IR camera's UVC region of interest: the rectangle auto-exposure meters instead of the
+/// whole frame, so that a close face in front of a dark room does not overexpose.
+struct ExposureRegion {
+    handle: Arc<Handle>,
+    /// The rectangle set last
+    rect: v4l2_rect,
+    /// The driver's default (the whole frame), restored when the camera closes
+    default: v4l2_rect,
+}
+
+impl ExposureRegion {
+    /// `None` when the camera has no region-of-interest controls. Starts from the default
+    /// rectangle, in case an earlier run died with a face rectangle set.
+    fn open(handle: Arc<Handle>) -> Option<Self> {
+        let mut default = v4l2_rect { left: 0, top: 0, width: 0, height: 0 };
+        let mut auto = 0;
+        if let Err(e) = roi_controls(&handle, true, v4l::v4l_sys::V4L2_CTRL_WHICH_DEF_VAL, &mut default, &mut auto) {
+            debug!(%e, "no region-of-interest controls; exposure meters the whole frame");
+            return None;
+        }
+        let mut region = Self { handle, rect: default, default };
+        if let Err(e) = region.write(default) {
+            warn!(%e, "cannot set the exposure region; metering the whole frame");
+            return None;
+        }
+        Some(region)
+    }
+
+    /// Meter exposure on `rect`, unless it is the current rectangle.
+    fn set(&mut self, rect: v4l2_rect) -> std::io::Result<()> {
+        if (rect.left, rect.top, rect.width, rect.height)
+            == (self.rect.left, self.rect.top, self.rect.width, self.rect.height)
+        {
+            return Ok(());
+        }
+        debug!(?rect, "exposure region");
+        self.write(rect)
+    }
+
+    fn write(&mut self, mut rect: v4l2_rect) -> std::io::Result<()> {
+        let mut auto = ROI_AUTO_EXPOSURE;
+        roi_controls(&self.handle, false, 0, &mut rect, &mut auto)?;
+        self.rect = rect;
+        Ok(())
+    }
+}
+
+impl Drop for ExposureRegion {
+    fn drop(&mut self) {
+        if let Err(e) = self.write(self.default) {
+            warn!(%e, "cannot restore the camera's exposure region");
+        }
+    }
+}
+
+/// `VIDIOC_G_EXT_CTRLS` (`get`, of the `which` value class) or `VIDIOC_S_EXT_CTRLS` on both
+/// region-of-interest controls at once: they are one UVC control, and the device rejects a
+/// bitmask set on its own. The v4l crate cannot read rect or bitmask controls, so this uses its
+/// raw bindings.
+fn roi_controls(handle: &Handle, get: bool, which: u32, rect: &mut v4l2_rect, auto: &mut i32) -> std::io::Result<()> {
+    use v4l::v4l_sys::{
+        v4l2_ext_control, v4l2_ext_control__bindgen_ty_1, v4l2_ext_controls, v4l2_ext_controls__bindgen_ty_1,
+    };
+    let mut controls = [
+        v4l2_ext_control {
+            id: ROI_RECT,
+            size: std::mem::size_of::<v4l2_rect>() as u32,
+            reserved2: [0],
+            __bindgen_anon_1: v4l2_ext_control__bindgen_ty_1 { p_rect: rect },
+        },
+        v4l2_ext_control {
+            id: ROI_AUTO,
+            size: 0,
+            reserved2: [0],
+            __bindgen_anon_1: v4l2_ext_control__bindgen_ty_1 { value: *auto },
+        },
+    ];
+    let mut ext = v4l2_ext_controls {
+        __bindgen_anon_1: v4l2_ext_controls__bindgen_ty_1 { which },
+        count: controls.len() as u32,
+        error_idx: 0,
+        request_fd: 0,
+        reserved: [0],
+        controls: controls.as_mut_ptr(),
+    };
+    let request = if get { v4l::v4l2::vidioc::VIDIOC_G_EXT_CTRLS } else { v4l::v4l2::vidioc::VIDIOC_S_EXT_CTRLS };
+    // SAFETY: `ext`, `controls` and `rect` outlive the call; the ioctl writes 16 bytes to `rect`.
+    unsafe {
+        v4l::v4l2::ioctl(handle.fd(), request, &mut ext as *mut v4l2_ext_controls as *mut std::os::raw::c_void)?;
+        // SAFETY: the driver filled `value` for the bitmask control.
+        *auto = controls[1].__bindgen_anon_1.value;
+    }
+    Ok(())
 }
 
 /// Sum of every 5th pixel of every 5th row, like Windows' `FrameStrobe` (F15).

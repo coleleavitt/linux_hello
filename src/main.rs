@@ -217,6 +217,7 @@ fn main() -> Result<()> {
             while start.elapsed().as_secs() < seconds {
                 let capture = cams.capture()?;
                 let check = pipeline.check(&user, &capture.pair, capture.rgb.as_ref())?;
+                cams.expose_on(check.analysis.face.as_ref());
                 let verdict = session.add(&check);
                 let t = start.elapsed().as_secs_f32();
                 let (track, recognised, liveness) =
