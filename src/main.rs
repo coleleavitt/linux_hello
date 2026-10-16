@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 
-use linux_hello::authenticator::{describe, describe_skipped, ENROLL_PRINTS};
+use linux_hello::authenticator::{describe, describe_skipped, observe, ENROLL_PRINTS};
 use linux_hello::lighting::subtract_ambient;
 use linux_hello::{
     calibration, daemon, sysfs, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras,
@@ -248,16 +248,18 @@ fn main() -> Result<()> {
             let mut log = std::fs::File::create(out.join("log.jsonl"))?;
             let mut cams = OpenCameras::open(&cameras.nodes()?, cameras.rotation)?;
             let mut session = Session::default();
+            let mut history = Vec::new();
+            let mut checks = linux_hello::liveness::physics::all();
             let start = Instant::now();
             let mut n = 0;
             while start.elapsed().as_secs() < seconds {
                 let capture = cams.capture()?;
-                let check = pipeline.check(&user, &capture.pair, capture.rgb.as_ref())?;
+                save_capture(&capture, &out, &format!("{n:04}"))?;
+                let gap_ms = capture.pair.gap().as_secs_f32() * 1000.0;
+                let (check, verdict) = observe(&mut pipeline, &mut checks, &user, capture, &mut session, &mut history)?;
                 cams.expose_on(check.largest().map(|f| &f.analysis.face));
-                let verdict = session.add(&check);
                 let t = start.elapsed().as_secs_f32();
                 println!("{n:4} t={t:5.2}s {}", describe(&check, &session));
-                save_capture(&capture, &out, &format!("{n:04}"))?;
                 let faces: Vec<_> = check
                     .faces
                     .iter()
@@ -277,6 +279,7 @@ fn main() -> Result<()> {
                             })),
                             "similarity": f.best.map(|b| b.similarity), "far": f.best.map(|b| b.far),
                             "recognised": attempt.recognised(), "liveness": format!("{:?}", attempt.liveness()),
+                            "physics": f.physics.iter().map(|(n, s)| (n.clone(), serde_json::json!(s))).collect::<serde_json::Map<_, _>>(),
                         })
                     })
                     .collect();
@@ -284,7 +287,7 @@ fn main() -> Result<()> {
                     log,
                     "{}",
                     serde_json::json!({
-                        "n": n, "t": t, "gap_ms": capture.pair.gap().as_secs_f32() * 1000.0,
+                        "n": n, "t": t, "gap_ms": gap_ms,
                         "faces": faces,
                         "verdict": verdict.map(|v| v.to_string()),
                     })
@@ -292,6 +295,7 @@ fn main() -> Result<()> {
                 if let Some(verdict) = verdict {
                     println!("     => {verdict}; new session");
                     session = Session::default();
+                    history.clear();
                 }
                 n += 1;
             }

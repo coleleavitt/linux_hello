@@ -70,6 +70,11 @@ pub struct FaceCheck {
     /// Closest print of the user's template, with its estimated FAR and, with the Windows Hello
     /// models, Microsoft's second opinion
     pub best: Option<PrintMatch>,
+    /// The colour face of this face (F66), when the RGB frame has one
+    pub rgb_face: Option<Face>,
+    /// Scores of the physics checks by name ([`crate::liveness::physics`]); `None` where a check
+    /// could not run on this frame. Filled by [`crate::authenticator::observe`]
+    pub physics: Vec<(String, Option<f32>)>,
 }
 
 /// The colour net's (slot 13, F24) say on one face: its p(spoof), or why it did not run. The
@@ -325,6 +330,8 @@ impl FacePipeline {
                     color,
                     vote: Vote::Abstain,
                     best: None,
+                    rgb_face: None,
+                    physics: Vec::new(),
                 });
                 continue;
             };
@@ -335,7 +342,16 @@ impl FacePipeline {
             if analysis.status() != Some(LightingStatus::Good) {
                 let vote = Vote::from_evidence(false, None, None);
                 let color = ColorNet::Skipped;
-                faces.push(FaceCheck { analysis, liveness: None, windows: None, color, vote, best });
+                faces.push(FaceCheck {
+                    analysis,
+                    liveness: None,
+                    windows: None,
+                    color,
+                    vote,
+                    best,
+                    rgb_face: None,
+                    physics: Vec::new(),
+                });
                 continue;
             }
             let (rgb_face, mut color) = match rgb {
@@ -361,7 +377,8 @@ impl FacePipeline {
                 color = ColorNet::Spoof(p[0]);
             }
             let vote = Vote::from_evidence(true, liveness, windows.as_ref().map(|w| w.total));
-            faces.push(FaceCheck { analysis, liveness, windows, color, vote, best });
+            let rgb_face = rgb_face.map(|(_, f)| f.clone());
+            faces.push(FaceCheck { analysis, liveness, windows, color, vote, best, rgb_face, physics: Vec::new() });
         }
         Ok(FrameCheck { frame, faces })
     }

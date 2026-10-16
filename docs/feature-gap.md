@@ -62,6 +62,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Fail closed if liveness enabled but no model loaded (F25) | Done-ish: `--no-liveness` disables explicitly; missing model fails at load | — |
 | Lit/ambient physics (screens emit no IR; lighting gate) as implicit liveness (F14) | **Done**: the lighting status is the only live vote | — |
 | Enhanced anti-spoofing policy (`FacialFeaturesUseEnhancedAntiSpoofing`) (F22, F55) | N/A (no policy layer) | A config flag selecting the strict thresholds |
+| — (beyond Windows) Physics liveness checks for IR-rich rooms, where `--max-ambient` weakens the lighting gate ([liveness-physics.md](liveness-physics.md)) | **Partial**: eye glints (`glint`) scored on every face with a print and logged (`auth` log line, `watch` `log.jsonl`); log-only, no veto: the glint hides under the lid when the user looks down, so no per-frame threshold spares 99 % of genuine frames | A veto threshold once the attack recordings show the margin |
 
 ## Recognition & thresholds
 
