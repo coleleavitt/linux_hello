@@ -41,7 +41,7 @@ base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
 
 [workspace]
-members = [".", "pam"]
+members = [".", "pam", "greeter"]
 
 [features]
 default = []
