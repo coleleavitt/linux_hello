@@ -40,7 +40,7 @@ pub use ms_models::{FaceOrientation, IrFaceOrientation, LbfAligner, WindowsHello
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
 pub use ms_models::{OcclusionDetector, OcclusionResult, OcclusionType};
-pub use pipeline::{FacePipeline, FrameCheck};
+pub use pipeline::{ColorNet, FacePipeline, FrameCheck};
 pub use store::{FaceStore, OnFailure};
 pub use tracker::FaceTracker;
 

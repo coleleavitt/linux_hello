@@ -60,10 +60,40 @@ pub struct FaceCheck {
     pub liveness: Option<f32>,
     /// Windows Hello anti-spoofing frame vote; only for good-lighting frames
     pub windows: Option<MsFrame>,
+    /// What the colour net said, or why it did not run
+    pub color: ColorNet,
     pub vote: Vote,
     /// Closest print of the user's template, with its estimated FAR and, with the Windows Hello
     /// models, Microsoft's second opinion
     pub best: Option<PrintMatch>,
+}
+
+/// The colour net's (slot 13, F24) say on one face: its p(spoof), or why it did not run. The
+/// reasons also apply to the open RGB models, which take the same colour face (F66).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColorNet {
+    /// Not a good-lighting frame (no liveness net runs), or no Windows Hello models
+    Skipped,
+    /// No RGB frame came with the pair (camera dropped, or only broken frames)
+    NoRgb,
+    /// No face in the RGB frame
+    NoFace,
+    /// No RGB face overlaps the registered IR box (F66, Windows' status 7)
+    NoMatch,
+    /// p(spoof); above 0.5 the net vetoes
+    Spoof(f32),
+}
+
+impl std::fmt::Display for ColorNet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Skipped => f.write_str("skipped"),
+            Self::NoRgb => f.write_str("no_rgb"),
+            Self::NoFace => f.write_str("no_face"),
+            Self::NoMatch => f.write_str("no_match"),
+            Self::Spoof(p) => write!(f, "{p:.3}"),
+        }
+    }
 }
 
 /// One frame pair through every stage.
@@ -274,7 +304,15 @@ impl FacePipeline {
         let mut faces = Vec::with_capacity(analyses.len());
         for analysis in analyses {
             let Some(print) = &analysis.print else {
-                faces.push(FaceCheck { analysis, liveness: None, windows: None, vote: Vote::Abstain, best: None });
+                let color = ColorNet::Skipped;
+                faces.push(FaceCheck {
+                    analysis,
+                    liveness: None,
+                    windows: None,
+                    color,
+                    vote: Vote::Abstain,
+                    best: None,
+                });
                 continue;
             };
             let windows_table = self.windows.as_ref().map(|w| &w.recognizer.calibration);
@@ -283,12 +321,18 @@ impl FacePipeline {
                 self.store.get(user).and_then(|t| t.best_match(print, condition, &self.calibration, windows_table));
             if analysis.status() != Some(LightingStatus::Good) {
                 let vote = Vote::from_evidence(false, None, None);
-                faces.push(FaceCheck { analysis, liveness: None, windows: None, vote, best });
+                let color = ColorNet::Skipped;
+                faces.push(FaceCheck { analysis, liveness: None, windows: None, color, vote, best });
                 continue;
             }
-            let rgb_face = rgb.and_then(|image| {
-                corresponding(&self.registration, &rgb_faces, &analysis.face, count).map(|f| (image, f))
-            });
+            let (rgb_face, mut color) = match rgb {
+                None => (None, ColorNet::NoRgb),
+                Some(_) if rgb_faces.is_empty() => (None, ColorNet::NoFace),
+                Some(image) => match corresponding(&self.registration, &rgb_faces, &analysis.face, count) {
+                    Some(face) => (Some((image, face)), ColorNet::Skipped),
+                    None => (None, ColorNet::NoMatch),
+                },
+            };
             // The open RGB models stand in for Windows' colour net (slot 13). With the Windows Hello
             // models that net vetoes instead, so the RGB evidence is not counted twice (F24, F25).
             let open_rgb = self.windows.is_none() && !self.liveness.is_empty();
@@ -300,8 +344,11 @@ impl FacePipeline {
                 Some(w) => Some(w.liveness.frame(&pair.lit, pair.ambient_image(), face, rgb_face)?),
                 None => None,
             };
+            if let Some(p) = windows.as_ref().and_then(|w| w.scores.color) {
+                color = ColorNet::Spoof(p[0]);
+            }
             let vote = Vote::from_evidence(true, liveness, windows.as_ref().map(|w| w.total));
-            faces.push(FaceCheck { analysis, liveness, windows, vote, best });
+            faces.push(FaceCheck { analysis, liveness, windows, color, vote, best });
         }
         Ok(FrameCheck { frame, faces })
     }

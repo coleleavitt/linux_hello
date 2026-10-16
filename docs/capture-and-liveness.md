@@ -310,6 +310,17 @@ turns it off). Good frames are the frames Windows sends to its diffusion net (st
 |---|---|---|
 | diffusion IR (12) | `lit − min(lit, ambient)` (unwarped, F40), 128×128 crop aligned on the Windows IR detector's five points (F23) | p(real) > 0.5037 → +1 |
 | colour (13) | face detected in the RGB frame, aligned crop, BGR | p(spoof) > 0.5 → −1 |
+
+The `watch` line and `log.jsonl` carry the colour net's say as `color=`: its p(spoof) when it
+ran (`color=0.013`), else why not: `no_rgb` (no RGB frame came with the pair: camera dropped or
+only broken frames, §1), `no_face` (no SCRFD face in the RGB frame), `no_match` (no RGB face
+overlaps the registered IR box, Windows' status 7), `skipped` (not a good-lighting frame, or no
+Windows Hello models; the open models' P(real) is `rgb_real=`). Live on the owner (2026-10-16,
+dim room, 10 s `watch` on a scratch template): p(spoof) 0.005–0.103, median 0.025, over 24
+good frames, `skipped` on the 2 clipped-band frames, two `MATCH`es. On the saved frames of the
+night before, which include three exposure restarts (§1): 0.002–0.26 on the dim frames
+(RGB mean 59–95 of 117), one 0.58 on a frame at normal brightness, no RGB face on two dim
+frames.
 | border (14) | whole IR frame as 128×128 | p(spoof) > 0.7 → −1 |
 | HH (15) | whole IR frame as 128×128 | p(spoof) > 0.5 → −1 |
 

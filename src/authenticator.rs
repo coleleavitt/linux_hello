@@ -476,9 +476,11 @@ impl Attempt {
 }
 
 /// One line per frame pair, one part per face: its track, face brightness lit/ambient, emitter
-/// gain, lighting status or rejection reason, RGB P(real), vote, similarity and its estimated
-/// FAR, Microsoft's distance and FAR when its recogniser gave a second opinion, whether the
-/// track is recognised and its liveness state; `no_face` without a face.
+/// gain, lighting status or rejection reason, RGB P(real) of the open models, the colour net's
+/// p(spoof) or why it did not run (`color=0.031`, `no_rgb`, `no_face`, `no_match`, `skipped`),
+/// Windows' frame total, vote, similarity and its estimated FAR, Microsoft's distance and FAR
+/// when its recogniser gave a second opinion, whether the track is recognised and its liveness
+/// state; `no_face` without a face.
 pub fn describe(check: &FrameCheck, session: &Session) -> String {
     if check.faces.is_empty() {
         return "no_face".to_string();
@@ -493,12 +495,13 @@ pub fn describe(check: &FrameCheck, session: &Session) -> String {
             (None, None) => "-".to_string(),
         };
         format!(
-            "track={track} lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={} \
-             far={} ms={} ms_far={} recognised={} liveness={:?}",
+            "track={track} lit={} ambient={} d={} status={status} rgb_real={} color={} windows={} vote={:?} \
+             similarity={} far={} ms={} ms_far={} recognised={} liveness={:?}",
             num(l.map(|l| l.lit), 1),
             num(l.map(|l| l.ambient), 1),
             num(l.map(|l| l.gain()), 1),
             num(check.liveness, 3),
+            check.color,
             check.windows.as_ref().map_or("-".to_string(), |w| w.total.to_string()),
             check.vote,
             num(check.best.map(|b| b.similarity), 3),
@@ -740,6 +743,7 @@ mod tests {
             },
             liveness: None,
             windows: None,
+            color: crate::pipeline::ColorNet::Skipped,
             vote,
             best: Some(PrintMatch {
                 similarity,
@@ -792,6 +796,7 @@ mod tests {
             },
             liveness: None,
             windows: None,
+            color: crate::pipeline::ColorNet::Skipped,
             vote: Vote::Abstain,
             best: None,
         }
