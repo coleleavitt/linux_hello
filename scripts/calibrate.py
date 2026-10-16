@@ -21,6 +21,14 @@ BLOCK = 2048
 FARS = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7]
 PRINTS, FRAMES, ATTEMPT_FAR = 15, 16, 1e-5
 GRID = [round(0.30 + 0.025 * k, 3) for k in range(13)]
+# Calibration table rows (models/calibration.json): one per similarity, FPR measured where at
+# least TABLE_MIN_PAIRS impostor pairs score above it, from the tail fit otherwise. The row at
+# THRESHOLD (the recommended operating point, docs/calibration.md) carries the per-attempt
+# bound ATTEMPT_FAR / (PRINTS * FRAMES) when that is above the fit, so FAR 1e-5 per attempt
+# stays at 0.50 exactly.
+TABLE = [round(0.20 + 0.025 * k, 3) for k in range(17)]
+TABLE_MIN_PAIRS = 50
+THRESHOLD = 0.50
 
 
 def load(prefixes, variant):
@@ -188,6 +196,14 @@ def analyse(prefixes, pairs_file, same_person, variant):
         "frr_15_prints": float((gprobe <= t).mean()),
     } for t in GRID]
     res["genuine_quantiles"] = {str(q): float(np.quantile(gen, q)) for q in [0.001, 0.01, 0.05, 0.5]}
+    rows = []
+    for t in TABLE:
+        n, measured = far(t)
+        fpr, source = (measured, "measured") if n >= TABLE_MIN_PAIRS else (float(10 ** (icept + slope * t)), "fit")
+        if t == THRESHOLD and pair_far > fpr:
+            fpr, source = pair_far, "bound"
+        rows.append({"fpr": fpr, "tar": float((gen > t).mean()), "similarity": t, "source": source, "pairs": n})
+    res["table"] = rows
     return res
 
 
@@ -215,6 +231,9 @@ def main():
             print(f"  {g['threshold']:.3f} {g['pair_far']:.2e}({g['pair_above']:5d}) {g['pair_far_fit']:.1e} "
                   f"{g['probe_far']:.2e}({g['probe_above']:4d}) {g['attempt_far']:.2e}({g['attempt_above']:3d}) "
                   f"{g['frr_pair']:.4f} {g['frr_lfw_pairs']:.4f} {g['frr_15_prints']:.4f}")
+        print("  calibration table (FPR, TAR, similarity):")
+        for row in r["table"]:
+            print(f"  {row['fpr']:.4e} {row['tar']:.5f} {row['similarity']:.3f}  {row['source']} ({row['pairs']} pairs)")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@
 
 pub mod antispoof;
 pub mod authenticator;
+pub mod calibration;
 pub mod camera;
 pub mod daemon;
 pub mod detector;
@@ -20,18 +21,20 @@ pub mod matcher;
 pub mod ms_models;
 pub mod pipeline;
 pub mod store;
+pub mod sysfs;
 #[cfg(feature = "tpm")]
 pub mod tpm;
 pub mod tracker;
 
 pub use antispoof::{AntiSpoof, LivenessModel};
 pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCameras, Outcome, Session};
+pub use calibration::{CalibrationTable, TARGET_FAR};
 pub use camera::{Camera, CameraType, IrCamera, IrPair};
 pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
 pub use lighting::{Lighting, LightingStatus};
 pub use liveness::{LivenessSession, LivenessState, Vote};
-pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
+pub use matcher::{Print, PrintMatch, PrintSource, Template};
 pub use ms_models::{FaceOrientation, IrFaceOrientation, LbfAligner, WindowsHelloModels};
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
