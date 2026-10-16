@@ -92,7 +92,7 @@ enum Commands {
         #[arg(long, default_value = "/run/linux_hello.sock")]
         socket: PathBuf,
         /// After a failed face check that the user then passes with the password, add the face
-        /// to the template (opt-in; see docs/sudo.md)
+        /// to the template (opt-in; see docs/pam.md)
         #[arg(long)]
         enroll_on_failure: bool,
     },

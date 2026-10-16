@@ -107,6 +107,16 @@ orientation (F63); linux_hello has no automatic source either: this ThinkPad has
 accelerometer (`/sys/bus/iio` is absent) and no iio-sensor-proxy, so the angle is the option only.
 Default 0; the built-in camera of this laptop needs none.
 
+**Presence wait (F55, F57).** Windows runs face as a WinBio presence monitor with no service
+timeout; the UI ends the session. `Authenticator::verify` is one session (up to 16 pairs, plus a
+re-attempt). `Authenticator::verify_within(user, deadline)`, used by the daemon for
+`AUTH <user> <seconds>` (lock screen, console login; [pam.md](pam.md)), keeps the cameras open
+and runs sessions back to back while they end in `NOFACE` (any reason, `not_frontal` included)
+and the deadline has not passed; the session running at the deadline finishes. `NOMATCH` and
+`NOTLIVE` end the wait at once, so a wrong face gets exactly the single session plus its one
+re-attempt (F49). Between sessions the tracker starts over; the camera keeps its exposure, so the
+second session needs no warm-up (L7). The daemon caps the wait at 120 s.
+
 ### 2. Frame gates (F45, F46)
 
 The faces are found on the lit frame (SCRFD); the `MAX_FACES` = 3 largest go through the gates, each

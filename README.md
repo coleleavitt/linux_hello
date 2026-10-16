@@ -90,11 +90,16 @@ or `sudo contrib/install.sh` for the system store). There is no conversion.
 ## Install (as root)
 
 ```sh
-sudo contrib/install.sh      # installs, enrolls $SUDO_USER, enables face login for sudo and sudo -i
+sudo contrib/install.sh      # installs, enrolls $SUDO_USER, enables face login for sudo, swaylock, polkit, su and console login
+sudo contrib/install.sh --no-lock --no-polkit --no-login --no-su   # any subset; sudo always
 sudo contrib/uninstall.sh    # undo (add --purge to delete the face store)
 ```
 
-Details, flow and caveats: [docs/sudo.md](docs/sudo.md). Face login is skipped for SSH sessions
+sudo, polkit and su get one face session; the lock screen (swaylock) and console login get a
+presence wait of up to 10 s after Enter (`timeout=`, `wait_services=` module arguments). The
+daemon's socket is open to local users, who may only ask about themselves and cannot obtain a
+credential; the PAM stack grants. Details, flow, what each application shows and caveats:
+[docs/pam.md](docs/pam.md). Face login is skipped for SSH sessions
 (`SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST`), because the camera sees whoever sits at the laptop.
 
 ## TPM sealing (optional)
