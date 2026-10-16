@@ -7,7 +7,10 @@
 //! `UNAVAILABLE lid_closed`), `BUSY` (another request is using the cameras) or
 //! `ERROR <message>`. The first word decides; `<reason>` is one of `no_face`, `too_dark`,
 //! `too_bright`, `clipped`, `too_far`, `edge`, `occluded`, `not_frontal` (see
-//! [`crate::FaceProblem`]).
+//! [`crate::FaceProblem`]). The reply to `AUTH` may go on with `NOTICE <text>` lines for the
+//! PAM module to show the user (Windows' "improve recognition" notification, F56): after
+//! [`FAILURES_PER_NOTICE`] `NOMATCH` in a row for the user, and once after enroll-on-failure
+//! added a print; both are also logged at warn.
 //!
 //! Access control: the socket is world-connectable (a screen locker runs PAM as the user), and
 //! every request is checked against the peer's uid (`SO_PEERCRED`): root may ask about any user;
@@ -26,6 +29,7 @@
 //! outlives the next face check (a match included).
 
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
@@ -36,10 +40,14 @@ use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-use crate::{Authenticator, Embedding, Verdict};
+use crate::{Authenticator, Embedding, OnFailure, Verdict};
 
 /// How long after the failed face check the password success may add its print.
 pub const PENDING_MAX_AGE: Duration = Duration::from_secs(60);
+/// `NOMATCH` replies in a row for one user after which the reply tells the user to improve the
+/// template (`linux_hello enroll --add`): the face was seen but not recognised that often, so
+/// the password was typed instead each time.
+pub const FAILURES_PER_NOTICE: u32 = 5;
 /// The longest presence wait one `AUTH <user> <seconds>` may ask for, so that a user process
 /// cannot hold the cameras for longer per request: the lock screen's own limit on Windows, which
 /// asks for a confirmation after 120 s (F56).
@@ -68,6 +76,10 @@ impl Pending {
 struct State<'a> {
     auth: &'a mut Authenticator,
     pending: Option<Option<Pending>>,
+    /// Consecutive `NOMATCH` replies per user
+    failures: HashMap<String, u32>,
+    /// Notices queued for the next `AUTH` reply per user
+    notices: HashMap<String, Vec<String>>,
 }
 
 pub fn serve(auth: &mut Authenticator, socket: &Path, enroll_on_failure: bool) -> Result<()> {
@@ -79,7 +91,12 @@ pub fn serve(auth: &mut Authenticator, socket: &Path, enroll_on_failure: bool) -
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o666))?;
     info!(socket = %socket.display(), enroll_on_failure, "listening");
 
-    let state = Mutex::new(State { auth, pending: enroll_on_failure.then_some(None) });
+    let state = Mutex::new(State {
+        auth,
+        pending: enroll_on_failure.then_some(None),
+        failures: HashMap::new(),
+        notices: HashMap::new(),
+    });
     std::thread::scope(|scope| {
         for stream in listener.incoming() {
             match stream {
@@ -164,30 +181,30 @@ fn request(stream: &mut UnixStream) -> Result<Request> {
 }
 
 fn handle(state: &mut State, request: &Request) -> Result<String> {
-    let State { auth, pending } = state;
+    let State { auth, pending, failures, notices } = state;
     match request {
         Request::Auth { user, wait } => {
             // Re-read the store for enrollments made meanwhile; `verify` saves it again after a
             // successful unlock adds a print (a sealed store stays sealed).
             auth.pipeline.reload_store()?;
-            let verify = |auth: &mut Authenticator| match wait {
+            let outcome = match wait {
                 Some(wait) => auth.verify_within(user, Instant::now() + *wait),
                 None => auth.verify(user),
-            };
-            let Some(pending) = pending else {
-                let verdict = verify(auth)?.verdict;
-                info!(user, ?wait, %verdict, "request");
-                return Ok(verdict.to_string());
-            };
-            *pending = None;
-            let outcome = verify(auth)?;
+            }?;
             info!(user, ?wait, verdict = %outcome.verdict, on_failure_candidate = outcome.failed_print.is_some(), "request");
-            let (Verdict::NoMatch { .. }, Some(print)) = (outcome.verdict, outcome.failed_print) else {
-                return Ok(outcome.verdict.to_string());
-            };
-            let token = random_token()?;
-            let reply = format!("{} {token}", outcome.verdict);
-            *pending = Some(Pending { user: user.clone(), token, print, at: Instant::now() });
+            let mut reply = outcome.verdict.to_string();
+            if let Some(pending) = pending {
+                *pending = None;
+                if let (Verdict::NoMatch { .. }, Some(print)) = (outcome.verdict, outcome.failed_print) {
+                    let token = random_token()?;
+                    reply = format!("{reply} {token}");
+                    *pending = Some(Pending { user: user.clone(), token, print, at: Instant::now() });
+                }
+            }
+            let lines = notice_lines(outcome.verdict, user, failures, notices);
+            for line in lines {
+                reply = format!("{reply}\nNOTICE {line}");
+            }
             Ok(reply)
         }
         Request::EnrollOnFailure { user, token } => {
@@ -197,10 +214,44 @@ fn handle(state: &mut State, request: &Request) -> Result<String> {
             };
             auth.pipeline.reload_store()?;
             let result = auth.pipeline.add_on_failure(user, &print)?;
-            info!(user, %result, "enroll-on-failure");
+            if let OnFailure::Added { .. } = result {
+                warn!(user, %result, "enroll-on-failure added a print after a password login");
+                notices.entry(user.clone()).or_default().push("A face print was added after a password login (enroll-on-failure); run `linux_hello enroll <user>` if that was not you".to_string());
+            } else {
+                info!(user, %result, "enroll-on-failure");
+            }
             Ok(result.to_string())
         }
     }
+}
+
+/// What the reply to `user`'s `AUTH` tells the user after the verdict: the notices queued for
+/// the user, and at every [`FAILURES_PER_NOTICE`]-th `NOMATCH` in a row the hint to improve
+/// the template.
+fn notice_lines(
+    verdict: Verdict,
+    user: &str,
+    failures: &mut HashMap<String, u32>,
+    queued: &mut HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut lines = queued.remove(user).unwrap_or_default();
+    if let Verdict::NoMatch { .. } = verdict {
+        let failed = failures.entry(user.to_string()).or_default();
+        *failed += 1;
+        if failed.is_multiple_of(FAILURES_PER_NOTICE) {
+            warn!(
+                user,
+                failures = *failed,
+                "face seen but not recognised again and again; the template may need prints"
+            );
+            lines.push(format!(
+                "Face login has fallen back to the password {failed} times in a row: run `linux_hello enroll --add`"
+            ));
+        }
+    } else {
+        failures.remove(user);
+    }
+    lines
 }
 
 fn valid_username(user: &str) -> bool {
@@ -317,5 +368,31 @@ mod tests {
         assert!(parse("AUTH cole soon").is_err());
         assert!(parse("AUTH cole 5 more").is_err());
         assert!(matches!(parse("ENROLL_ON_FAILURE cole tok"), Ok(Request::EnrollOnFailure { .. })));
+    }
+
+    #[test]
+    fn notices_come_with_the_fifth_nomatch_in_a_row_and_once_when_queued() {
+        let (mut failures, mut queued) = (HashMap::new(), HashMap::new());
+        let nomatch = Verdict::NoMatch { similarity: 0.3 };
+        let mut lines = |verdict| notice_lines(verdict, "alice", &mut failures, &mut queued);
+        for _ in 0..4 {
+            assert!(lines(nomatch).is_empty());
+        }
+        assert_eq!(lines(nomatch).len(), 1);
+        for _ in 0..4 {
+            assert!(lines(nomatch).is_empty());
+        }
+        assert_eq!(lines(nomatch).len(), 1, "and again at the 10th");
+        // Any other verdict starts the count over; NOFACE does not count.
+        assert!(lines(Verdict::NoFace { problem: crate::FaceProblem::NoFace }).is_empty());
+        for _ in 0..4 {
+            assert!(lines(nomatch).is_empty());
+        }
+        assert!(lines(Verdict::Match { similarity: 0.9 }).is_empty());
+        assert!(lines(nomatch).is_empty());
+        // A queued notice goes out with the next reply, whatever the verdict, once.
+        queued.entry("alice".to_string()).or_default().push("added".to_string());
+        assert_eq!(notice_lines(Verdict::Match { similarity: 0.9 }, "alice", &mut failures, &mut queued), ["added"]);
+        assert!(notice_lines(Verdict::Match { similarity: 0.9 }, "alice", &mut failures, &mut queued).is_empty());
     }
 }

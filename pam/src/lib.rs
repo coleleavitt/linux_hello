@@ -15,6 +15,10 @@
 //! stops it (F55, F57); the 120 s after which its lock screen asks for a confirmation (F56) has
 //! no counterpart here because the lock screen only runs PAM once the user submits.
 //!
+//! The daemon's reply may go on with `NOTICE <text>` lines (an enroll-on-failure addition since
+//! the last check, five `NOMATCH` in a row); each is shown as PAM_TEXT_INFO after the verdict's
+//! message.
+//!
 //! Return codes are chosen for `auth sufficient pam_linux_hello.so` placed before the password
 //! modules: a match returns PAM_SUCCESS; a face that is wrong, spoofed or missing returns
 //! PAM_AUTH_ERR and prints a short reason (`NOFACE too_dark` → "Face too dark: ..."); anything
@@ -149,11 +153,12 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
     let service = item(pamh, PAM_SERVICE).unwrap_or_default();
     let wait = args.wait_services.contains(&service);
     let request = if wait { format!("AUTH {user} {}", args.timeout) } else { format!("AUTH {user}") };
-    let reply = ask(stream, &request, Duration::from_secs(if wait { args.timeout } else { 0 }) + REPLY_MARGIN);
+    let mut lines = ask(stream, &request, Duration::from_secs(if wait { args.timeout } else { 0 }) + REPLY_MARGIN);
+    let reply = if lines.is_empty() { String::new() } else { lines.remove(0) };
 
     log(pamh, &format!("pam_linux_hello: service={service} user={user} request={request:?} reply={reply:?}"));
     let mut words = reply.split_whitespace();
-    match words.next() {
+    let result = match words.next() {
         Some("MATCH") => PAM_SUCCESS,
         Some(word @ ("NOMATCH" | "NOTLIVE" | "NOFACE")) => {
             // `NOMATCH <similarity> <token>`: the daemon keeps this face for enroll-on-failure.
@@ -173,7 +178,14 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
             PAM_IGNORE
         }
         _ => PAM_IGNORE,
+    };
+    // `NOTICE <text>` lines after the verdict: things the daemon wants the user to know.
+    for notice in lines.iter().filter_map(|l| l.strip_prefix("NOTICE ")) {
+        if let Ok(text) = CString::new(notice) {
+            message(pamh, &text);
+        }
     }
+    result
 }
 
 /// A short hint for a failed face check. The daemon's reply is the verdict word, then for
@@ -194,15 +206,14 @@ fn failure_message(reply: &str) -> &'static CStr {
     }
 }
 
-/// Send one request line and read the one-line reply; empty on any error.
-fn ask(mut stream: UnixStream, request: &str, timeout: Duration) -> String {
-    (|| -> std::io::Result<String> {
+/// Send one request line and read the reply lines until the daemon closes the connection;
+/// empty on any error.
+fn ask(mut stream: UnixStream, request: &str, timeout: Duration) -> Vec<String> {
+    (|| -> std::io::Result<Vec<String>> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         writeln!(stream, "{request}")?;
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line)?;
-        Ok(line.trim_end().to_string())
+        BufReader::new(stream).lines().collect()
     })()
     .unwrap_or_default()
 }
@@ -220,7 +231,7 @@ fn report_password_success(pamh: *mut PamHandle, args: Args) {
     remember_failure(pamh, None);
     let Some((user, token)) = saved.split_once(' ') else { return };
     let Ok(stream) = UnixStream::connect(&args.socket) else { return };
-    let reply = ask(stream, &format!("ENROLL_ON_FAILURE {user} {token}"), Duration::from_secs(5));
+    let reply = ask(stream, &format!("ENROLL_ON_FAILURE {user} {token}"), Duration::from_secs(5)).concat();
     log(pamh, &format!("pam_linux_hello: enroll-on-failure user={user} reply={reply:?}"));
     if reply.starts_with("ADDED ") {
         message(pamh, c"Face print added after password login");
