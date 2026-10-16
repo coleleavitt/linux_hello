@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 
-use linux_hello::authenticator::{describe, describe_skipped, ENROLL_PRINTS};
+use linux_hello::authenticator::{describe, describe_skipped, observe, ENROLL_PRINTS};
 use linux_hello::lighting::subtract_ambient;
+use linux_hello::liveness::physics::{self, TrainedGate};
 use linux_hello::liveness::{Label, Meta};
 use linux_hello::{
     calibration, daemon, sysfs, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras,
@@ -55,6 +56,17 @@ struct Cli {
     /// of a weaker lighting check (docs/capture-and-liveness.md §3)
     #[arg(long, default_value_t = linux_hello::lighting::MAX_AMBIENT, global = true)]
     max_ambient: f32,
+
+    /// Confirm a match that leaned on --max-ambient (ambient above 25) without a sure eye glint
+    /// by asking the user to blink ("Blink once"; docs/liveness-physics.md §7). Opt-in: the
+    /// genuine blink rate is measured on few recordings yet
+    #[arg(long, global = true)]
+    blink_challenge: bool,
+
+    /// Veto frames with the trained lighting gate, <models>/trained_gate.json from
+    /// tools/train_gate.py (docs/liveness-physics.md §8; trained on few recordings of one person)
+    #[arg(long, global = true)]
+    trained_gate: bool,
 
     /// Face store (default: /var/lib/linux_hello/faces.json as root, else ~/.local/share/linux_hello/faces.json)
     #[arg(long, env = "LINUX_HELLO_STORE", global = true)]
@@ -174,6 +186,11 @@ fn main() -> Result<()> {
         }
         Ok(pipeline.with_windows_hello(WindowsHelloModels::load(&dir)?))
     };
+    // The physics checks (docs/liveness-physics.md), with the trained gate when asked for.
+    let checks = || -> Result<Vec<Box<dyn linux_hello::Check + Send>>> {
+        let gate = cli.trained_gate.then(|| TrainedGate::load(format!("{models}/trained_gate.json"))).transpose()?;
+        Ok(physics::with_gate(gate))
+    };
     let current_user = || std::env::var("USER").unwrap_or_default();
 
     match cli.command {
@@ -181,7 +198,9 @@ fn main() -> Result<()> {
             let user = user.unwrap_or_else(current_user);
             let pipeline = pipeline(liveness()?)?;
             let start = Instant::now();
-            let verdict = Authenticator { pipeline, cameras }.verify(&user)?.verdict;
+            let verdict = Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge, checks: checks()? }
+                .verify(&user)?
+                .verdict;
             println!("{user}: {verdict} ({:.2} s)", start.elapsed().as_secs_f32());
             if !matches!(verdict, Verdict::Match { .. }) {
                 std::process::exit(1);
@@ -190,7 +209,7 @@ fn main() -> Result<()> {
 
         Commands::Enroll { user, frames, force, add } => {
             let pipeline = pipeline(Vec::new())?;
-            let mut auth = Authenticator { pipeline, cameras };
+            let mut auth = Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge, checks: checks()? };
             println!(
                 "Look at the camera and move your head a little, as when talking to someone: \
                  {frames} prints are taken over a few seconds."
@@ -255,13 +274,17 @@ fn main() -> Result<()> {
 
         Commands::Daemon { socket, enroll_on_failure } => {
             let pipeline = pipeline(liveness()?)?;
-            daemon::serve(&mut Authenticator { pipeline, cameras }, &socket, enroll_on_failure)?;
+            daemon::serve(
+                &mut Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge, checks: checks()? },
+                &socket,
+                enroll_on_failure,
+            )?;
         }
 
         Commands::Watch { user, seconds, out } => {
             let user = user.unwrap_or_else(current_user);
             let mut pipeline = pipeline(liveness()?)?;
-            record(&mut pipeline, &cameras, &user, seconds, &out)?;
+            record(&mut pipeline, &mut checks()?, &cameras, &user, seconds, &out)?;
         }
 
         Commands::Capture { dir, label, note, seconds, user } => {
@@ -283,7 +306,7 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&dir)?;
             meta.save(&dir)?;
             println!("Recording {} for {seconds} s into {}", label.as_str(), dir.display());
-            meta.pairs = record(&mut pipeline, &cameras, &user, seconds, &dir)?;
+            meta.pairs = record(&mut pipeline, &mut checks()?, &cameras, &user, seconds, &dir)?;
             meta.save(&dir)?;
             println!("{} pairs; {}", meta.pairs, dir.join(Meta::FILE).display());
         }
@@ -295,21 +318,30 @@ fn main() -> Result<()> {
 /// print one line per pair ([`describe`]), save the frames as `NNNN_{lit,ambient,diff,rgb}.png` and
 /// the scores to `log.jsonl` in `out`, and run [`Session`]s back to back as the daemon does.
 /// Returns the pairs recorded.
-fn record(pipeline: &mut FacePipeline, cameras: &CameraSetup, user: &str, seconds: u64, out: &Path) -> Result<u32> {
+fn record(
+    pipeline: &mut FacePipeline,
+    checks: &mut [Box<dyn linux_hello::Check + Send>],
+    cameras: &CameraSetup,
+    user: &str,
+    seconds: u64,
+    out: &Path,
+) -> Result<u32> {
     std::fs::create_dir_all(out)?;
     let mut log = std::fs::File::create(out.join("log.jsonl"))?;
     let mut cams = OpenCameras::open(&cameras.nodes()?, cameras.rotation)?;
     let mut session = Session::default();
+    let mut history = Vec::new();
     let start = Instant::now();
     let mut n = 0;
     while start.elapsed().as_secs() < seconds {
         let capture = cams.capture()?;
-        let check = pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+        save_capture(&capture, out, &format!("{n:04}"))?;
+        let (gap_ms, lit_at, ambient_at) =
+            (capture.pair.gap().as_secs_f32() * 1000.0, capture.pair.lit_at, capture.pair.ambient_at);
+        let (check, verdict) = observe(pipeline, checks, user, capture, &mut session, &mut history)?;
         cams.expose_on(check.largest().map(|f| &f.analysis.face));
-        let verdict = session.add(&check);
         let t = start.elapsed().as_secs_f32();
         println!("{n:4} t={t:5.2}s {}", describe(&check, &session));
-        save_capture(&capture, out, &format!("{n:04}"))?;
         let faces: Vec<_> = check
             .faces
             .iter()
@@ -331,6 +363,7 @@ fn record(pipeline: &mut FacePipeline, cameras: &CameraSetup, user: &str, second
                     "similarity": f.best.map(|b| b.similarity), "far": f.best.map(|b| b.far),
                     "ms": f.best.and_then(|b| b.windows).map(|w| w.distance),
                     "recognised": attempt.recognised(), "liveness": format!("{:?}", attempt.liveness()),
+                    "physics": f.physics.iter().map(|(n, s)| (n.clone(), serde_json::json!(s))).collect::<serde_json::Map<_, _>>(),
                 })
             })
             .collect();
@@ -338,8 +371,8 @@ fn record(pipeline: &mut FacePipeline, cameras: &CameraSetup, user: &str, second
             log,
             "{}",
             serde_json::json!({
-                "n": n, "t": t, "gap_ms": capture.pair.gap().as_secs_f32() * 1000.0,
-                "lit_at": capture.pair.lit_at.as_secs_f64(), "ambient_at": capture.pair.ambient_at.as_secs_f64(),
+                "n": n, "t": t, "gap_ms": gap_ms,
+                "lit_at": lit_at.as_secs_f64(), "ambient_at": ambient_at.as_secs_f64(),
                 "faces": faces,
                 "verdict": verdict.map(|v| v.to_string()),
             })
@@ -347,6 +380,7 @@ fn record(pipeline: &mut FacePipeline, cameras: &CameraSetup, user: &str, second
         if let Some(verdict) = verdict {
             println!("     => {verdict}; new session");
             session = Session::default();
+            history.clear();
         }
         n += 1;
     }

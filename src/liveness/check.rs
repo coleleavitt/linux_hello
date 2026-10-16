@@ -207,7 +207,8 @@ impl Check for Builtin {
 /// Every check the bench scores: the built-in ones, then the checks added since. A check that
 /// needs models takes them in its constructor and is added here with the models directory.
 pub fn all() -> Vec<Box<dyn Check>> {
-    Builtin::ALL.iter().map(|b| Box::new(*b) as Box<dyn Check>).collect()
+    let physics = super::physics::all().into_iter().map(|c| c as Box<dyn Check>);
+    Builtin::ALL.iter().map(|b| Box::new(*b) as Box<dyn Check>).chain(physics).collect()
 }
 
 #[cfg(test)]
@@ -225,6 +226,6 @@ mod tests {
         assert!(Builtin::WindowsTotal.passes(1.0, 1.0));
         assert!(!Builtin::WindowsTotal.passes(0.0, 1.0));
         let names: std::collections::HashSet<String> = all().iter().map(|c| c.name().to_string()).collect();
-        assert_eq!(names.len(), Builtin::ALL.len());
+        assert_eq!(names.len(), all().len(), "check names are unique");
     }
 }

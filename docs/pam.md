@@ -84,7 +84,9 @@ stack before the password modules. The greeter answers only that prompt (its tex
    The request carries the word `progress`, so the daemon also streams `NOTICE recognized` the
    moment the face is recognised and the liveness votes begin; the module shows it at once as
    "Making sure it's you..." (Windows' id 123; [windows-hello-ui.md](windows-hello-ui.md) state
-   3). Without `progress` (older modules) the first line of the reply is the verdict, as before.
+   3), and `NOTICE blink` ("Blink once") when the daemon runs with `--blink-challenge` and asks
+   the matched face to blink before it accepts ([liveness-physics.md](liveness-physics.md) §7).
+   Without `progress` (older modules) the first line of the reply is the verdict, as before.
    `BUSY` (another request has the cameras), `UNAVAILABLE lid_closed`, `NOTENROLLED`, `ERROR`
    → `PAM_IGNORE`.
    In every case but `MATCH` the line is ignored and the normal password prompt runs

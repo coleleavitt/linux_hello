@@ -7,6 +7,7 @@
 //! recognised (F48).
 
 pub mod check;
+pub mod physics;
 pub mod recording;
 
 pub use check::{Builtin, Check, Frame, Observed};

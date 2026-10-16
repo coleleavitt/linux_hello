@@ -9,10 +9,12 @@ use tracing::{debug, info, warn};
 
 use crate::camera::{self, CameraNodes, Rotation};
 use crate::lid;
+use crate::liveness::check::{Frame, Observed};
+use crate::liveness::physics;
 use crate::matcher::MIN_PRINTS;
 use crate::pipeline::{Analysis, FaceCheck};
 use crate::{
-    Camera, CameraType, Embedding, Face, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
+    Camera, CameraType, Check, Embedding, Face, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
     Lighting, LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote,
 };
 
@@ -212,12 +214,20 @@ struct Track {
 impl Session {
     /// Count one frame pair; returns the verdict once there is one.
     pub fn add(&mut self, check: &FrameCheck) -> Option<Verdict> {
+        self.add_with(&mut check.clone(), |_, _| {})
+    }
+
+    /// [`Self::add`] with `score` run between the tracking and the counting: it gets the track
+    /// id of each face and may change the faces' votes (the physics checks' vetoes,
+    /// [`crate::liveness::physics::apply`]), which need the tracks to find a face's history.
+    pub fn add_with(&mut self, check: &mut FrameCheck, score: impl FnOnce(&[u32], &mut FrameCheck)) -> Option<Verdict> {
         self.pairs += 1;
         if let Some(problem) = check.largest().map_or(Some(FaceProblem::NoFace), |f| f.analysis.problem) {
             *self.problems.entry(problem).or_default() += 1;
         }
         let faces: Vec<_> = check.faces.iter().map(|f| (&f.analysis.face, f.analysis.print.as_ref())).collect();
         self.current = self.tracker.update(&faces);
+        score(&self.current, check);
         for (id, face) in self.current.iter().zip(&check.faces) {
             let track = self.tracks.entry(*id).or_insert_with(|| {
                 debug!(id, "new face track");
@@ -296,6 +306,11 @@ impl Session {
     /// in the last pair.
     pub fn decided(&self) -> Option<&Attempt> {
         self.decided.and_then(|id| self.tracks.get(&id)).map(|t| &t.attempt)
+    }
+
+    /// The id of the track that gave the verdict.
+    pub fn decided_track(&self) -> Option<u32> {
+        self.decided
     }
 
     /// Whether a tracked face has been recognised (its liveness votes are being counted).
@@ -498,7 +513,8 @@ impl Attempt {
 /// p(spoof) or why it did not run (`color=0.031`, `no_rgb`, `no_face`, `no_match`, `skipped`),
 /// Windows' frame total, vote, similarity and its estimated FAR, Microsoft's distance and FAR
 /// when its recogniser gave a second opinion, whether the track is recognised and its liveness
-/// state; `no_face` without a face.
+/// state, then the physics checks' scores by name (docs/liveness-physics.md); `no_face` without
+/// a face.
 pub fn describe(check: &FrameCheck, session: &Session) -> String {
     if check.faces.is_empty() {
         return "no_face".to_string();
@@ -528,9 +544,71 @@ pub fn describe(check: &FrameCheck, session: &Session) -> String {
             check.best.and_then(|b| b.windows).map_or("-".to_string(), |w| format!("{:.1e}", w.far)),
             attempt.recognised(),
             attempt.liveness(),
-        )
+        ) + &check.physics.iter().map(|(name, s)| format!(" {name}={}", num(*s, 3))).collect::<String>()
     };
     check.faces.iter().zip(session.attempts()).map(|(c, a)| face(c, a)).collect::<Vec<_>>().join(" | ")
+}
+
+/// One frame pair through the pipeline and the session: the faces are checked, tracked, scored
+/// by the physics `checks` against the session's earlier pairs (`history`, newest last, at most
+/// [`MAX_PAIRS`]) and counted; the pair then joins the history. Returns the scored check and the
+/// session's verdict, if any.
+pub fn observe(
+    pipeline: &mut FacePipeline,
+    checks: &mut [Box<dyn Check + Send>],
+    user: &str,
+    capture: Capture,
+    session: &mut Session,
+    history: &mut Vec<Observed>,
+) -> Result<(FrameCheck, Option<Verdict>)> {
+    let mut check = pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+    let mut observed = None;
+    let mut scored = Ok(());
+    let verdict = session.add_with(&mut check, |tracks, check| {
+        let current = Observed { capture, check: check.clone(), tracks: tracks.to_vec() };
+        scored = physics::apply(checks, &Frame { current: &current, previous: history }, check);
+        observed = Some(current);
+    });
+    scored?;
+    let mut current = observed.expect("scored");
+    current.check = check.clone();
+    if history.len() == MAX_PAIRS as usize {
+        history.remove(0);
+    }
+    history.push(current);
+    Ok((check, verdict))
+}
+
+/// The blink challenge (docs/liveness-physics.md §7): the match of `track` stands only if
+/// the face blinks within [`BLINK_PAIRS`] more pairs ([`physics::Blink`] scores
+/// [`physics::BLINK_RISE`] or more); otherwise the session ends `NOTLIVE`.
+#[allow(clippy::too_many_arguments)]
+fn await_blink(
+    pipeline: &mut FacePipeline,
+    cams: &mut OpenCameras,
+    checks: &mut [Box<dyn Check + Send>],
+    user: &str,
+    session: &mut Session,
+    history: &mut Vec<Observed>,
+    track: u32,
+    matched: Verdict,
+) -> Result<Verdict> {
+    info!(user, track, "blink challenge: the match leaned on the ambient limit without a sure glint");
+    for _ in 0..BLINK_PAIRS {
+        let capture = cams.capture()?;
+        let (check, _) = observe(pipeline, checks, user, capture, session, history)?;
+        cams.expose_on(check.largest().map(|f| &f.analysis.face));
+        info!(user, "{}", describe(&check, session));
+        let blinked = check.faces.iter().zip(session.attempts()).any(|(f, (id, _))| {
+            id == track && f.physics.iter().any(|(n, s)| n == "blink" && s.is_some_and(|s| s >= physics::BLINK_RISE))
+        });
+        if blinked {
+            info!(user, "blink seen");
+            return Ok(matched);
+        }
+    }
+    info!(user, "no blink within {BLINK_PAIRS} pairs");
+    Ok(Verdict::NotLive)
 }
 
 /// What [`Authenticator::verify`] found.
@@ -550,7 +628,16 @@ impl From<Verdict> for Outcome {
 pub struct Authenticator {
     pub pipeline: FacePipeline,
     pub cameras: CameraSetup,
+    /// Confirm a match that leaned on `--max-ambient` without a sure glint by asking for a
+    /// blink (`--blink-challenge`, docs/liveness-physics.md §7)
+    pub blink_challenge: bool,
+    /// The physics checks scored on every pair ([`physics::with_gate`])
+    pub checks: Vec<Box<dyn Check + Send>>,
 }
+
+/// Pairs the blink challenge waits for a closure: ≈ 3 s at 7.5 pairs/s, two or three natural
+/// blinks' worth, and well within the PAM module's timeout after a 16-pair session.
+pub const BLINK_PAIRS: u32 = 24;
 
 impl Authenticator {
     /// Refuse when the lid is closed over a built-in camera. Otherwise read frame pairs until the
@@ -558,7 +645,7 @@ impl Authenticator {
     /// template if it was a borderline match (F53) and save the store. After `NOMATCH`, return
     /// the session's enroll-on-failure candidate.
     pub fn verify(&mut self, user: &str) -> Result<Outcome> {
-        self.run(user, None, &mut || {})
+        self.run(user, None, &mut |_| {})
     }
 
     /// [`Self::verify`] as a presence wait for a lock screen or console login (F55, F57: Windows
@@ -567,22 +654,23 @@ impl Authenticator {
     /// not passed; the session running at the deadline finishes. A wrong or spoofed face ends the
     /// wait as it ends a single check, so a stranger gets no more tries than with `sudo`.
     pub fn verify_within(&mut self, user: &str, deadline: Instant) -> Result<Outcome> {
-        self.run(user, Some(deadline), &mut || {})
+        self.run(user, Some(deadline), &mut |_| {})
     }
 
-    /// [`Self::verify`] (`deadline` `None`) or [`Self::verify_within`], calling `on_recognised`
-    /// once, the moment a face is recognised and the liveness votes begin: Windows' "Making
-    /// sure it's you..." (docs/windows-hello-ui.md state 3).
+    /// [`Self::verify`] (`deadline` `None`) or [`Self::verify_within`], calling `on_event` with
+    /// `recognized` once, the moment a face is recognised and the liveness votes begin
+    /// (Windows' "Making sure it's you...", docs/windows-hello-ui.md state 3), and with `blink`
+    /// when the blink challenge asks the user for one.
     pub fn verify_reporting(
         &mut self,
         user: &str,
         deadline: Option<Instant>,
-        on_recognised: &mut dyn FnMut(),
+        on_event: &mut dyn FnMut(&str),
     ) -> Result<Outcome> {
-        self.run(user, deadline, on_recognised)
+        self.run(user, deadline, on_event)
     }
 
-    fn run(&mut self, user: &str, deadline: Option<Instant>, on_recognised: &mut dyn FnMut()) -> Result<Outcome> {
+    fn run(&mut self, user: &str, deadline: Option<Instant>, on_event: &mut dyn FnMut(&str)) -> Result<Outcome> {
         let nodes = self.cameras.nodes()?;
         if lid::lid_closed() && lid::built_in(&nodes.ir) {
             return Ok(Verdict::LidClosed.into());
@@ -592,17 +680,18 @@ impl Authenticator {
         }
         let mut cams = OpenCameras::open(&nodes, self.cameras.rotation)?;
         let mut reported = false;
-        let (verdict, session) = loop {
+        let checks = &mut self.checks;
+        let (mut verdict, mut session, mut history) = loop {
             let mut session = Session::default();
+            let mut history = Vec::new();
             let verdict = loop {
                 let capture = cams.capture()?;
-                let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+                let (check, verdict) = observe(&mut self.pipeline, checks, user, capture, &mut session, &mut history)?;
                 cams.expose_on(check.largest().map(|f| &f.analysis.face));
-                let verdict = session.add(&check);
                 info!(user, "{}", describe(&check, &session));
                 if !reported && session.recognised() {
                     reported = true;
-                    on_recognised();
+                    on_event("recognized");
                 }
                 if let Some(verdict) = verdict {
                     break verdict;
@@ -610,10 +699,25 @@ impl Authenticator {
             };
             let waiting = deadline.is_some_and(|d| Instant::now() < d);
             if !(waiting && matches!(verdict, Verdict::NoFace { .. })) {
-                break (verdict, session);
+                break (verdict, session, history);
             }
             info!(user, %verdict, "no usable face yet; next session");
         };
+        if let (true, Verdict::Match { .. }, Some(track)) = (self.blink_challenge, verdict, session.decided_track()) {
+            if physics::needs_blink(&history, track) {
+                on_event("blink");
+                verdict = await_blink(
+                    &mut self.pipeline,
+                    &mut cams,
+                    checks,
+                    user,
+                    &mut session,
+                    &mut history,
+                    track,
+                    verdict,
+                )?;
+            }
+        }
         drop(cams);
         let augmentation = session.decided().and_then(Attempt::augmentation);
         if let (Verdict::Match { .. }, Some((print, matched))) = (verdict, augmentation) {
@@ -789,6 +893,8 @@ mod tests {
                 generation: 1,
                 windows: None,
             }),
+            rgb_face: None,
+            physics: Vec::new(),
         }
     }
 
@@ -838,6 +944,8 @@ mod tests {
             color: crate::pipeline::ColorNet::Skipped,
             vote: Vote::Abstain,
             best: None,
+            rgb_face: None,
+            physics: Vec::new(),
         }
     }
 

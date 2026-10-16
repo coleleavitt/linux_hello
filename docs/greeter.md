@@ -65,6 +65,7 @@ The state machine (`greeter/src/state.rs`, unit-tested) and what the screens sho
 | attempt started, module silent yet | `Starting` | Face 0–59 once, held / 2 entrance, hold | "Getting ready..." (105) |
 | `Looking for your face...` | `Looking` | same | "Looking for you..." (104) |
 | `Making sure it's you...` (the daemon's `NOTICE recognized`, pam.md) | `Verifying` | FaceLoop 60–290 looped / 3 blink, then the look-around loop 8…18 with the 320–410 ms holds | "Making sure it's you..." (123) |
+| `Blink once` (the daemon's `NOTICE blink` under `--blink-challenge`, liveness-physics.md §7) | `Blink` | as `Verifying` | "Blink once" (no Windows state) |
 | `Success` | `Welcome` | FaceSuccess 291–408 once (wink, check mark, Windows logo) / 4 eye→smile, 7 wiggle | "Hello <name>" (101); greetd starts the session at once |
 | a reason, then the prompt | `Failed(reason)` | FaceFail 409–477 once (the smile flattens) / 1 pupil hollows, 1↔19 ring blink | the module's line: "Couldn't recognize you. Please sign in with your password." (125) for `NOMATCH`, its hints otherwise |
 | "Face login not available: …" | `Failed(reason)` | hidden (state 7) | "Camera is in use…" (157) / "Camera not available…" (124) |

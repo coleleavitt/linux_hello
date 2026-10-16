@@ -16,6 +16,8 @@ use crate::auth::AuthEvent;
 /// The face module's lines that mean a state rather than a reason (docs/pam.md).
 pub const LOOKING: &str = "Looking for your face...";
 pub const VERIFYING: &str = "Making sure it's you...";
+/// The blink challenge of `linux_hello daemon --blink-challenge` (docs/liveness-physics.md §7).
+pub const BLINK: &str = "Blink once";
 /// Windows' text after a wrong password (INFERRED from public screenshots; not in the
 /// extracted string tables, docs/windows-hello-ui.md §2).
 pub const WRONG_PASSWORD: &str = "The password is incorrect. Try again.";
@@ -38,6 +40,8 @@ pub enum Face {
     Looking,
     /// Recognised, liveness being checked (state 3, "Making sure it's you...", id 123).
     Verifying,
+    /// Recognised; the daemon asks for a blink to confirm (no Windows state; shown like 3).
+    Blink,
     /// Recognised and live (state 4, "Hello <name>", id 101).
     Welcome,
     /// The face check failed (state 1, or 7 for camera errors); the reason, or `None` when
@@ -206,9 +210,13 @@ impl State {
                 self.face = Face::Verifying;
                 vec![]
             }
+            AuthEvent::Info(text) if text == BLINK => {
+                self.face = Face::Blink;
+                vec![]
+            }
             AuthEvent::Info(text) | AuthEvent::Error(text) => {
                 // The first line after "Looking" is the verdict's reason; the rest are notices.
-                if matches!(self.face, Face::Starting | Face::Looking | Face::Verifying) {
+                if matches!(self.face, Face::Starting | Face::Looking | Face::Verifying | Face::Blink) {
                     self.face = Face::Failed(Some(text));
                 } else {
                     self.notices.push(text);
@@ -218,7 +226,7 @@ impl State {
             AuthEvent::Prompt { text, .. } => {
                 let prompt = if text == PASSWORD_PROMPT { Prompt::Module } else { Prompt::Other };
                 self.prompt = Some(prompt);
-                if matches!(self.face, Face::Starting | Face::Looking | Face::Verifying | Face::Idle) {
+                if matches!(self.face, Face::Starting | Face::Looking | Face::Verifying | Face::Blink | Face::Idle) {
                     self.face = Face::Failed(None);
                 }
                 if let Some(password) = self.typed.take() {
@@ -358,6 +366,18 @@ mod tests {
         assert_eq!(s.handle(Input::Wake, later), vec![Effect::FocusPassword]);
         assert_eq!(s.screen, Screen::SignIn);
         assert_eq!(s.handle(Input::RetryFace, later), vec![Effect::Answer(String::new())]);
+    }
+
+    #[test]
+    fn blink_challenge_is_a_state_not_a_failure() {
+        let (mut s, now) = greeter();
+        s.start();
+        s.handle(info(LOOKING), now);
+        s.handle(info(VERIFYING), now);
+        assert_eq!(s.handle(info(BLINK), now), vec![]);
+        assert_eq!(s.face, Face::Blink);
+        s.handle(info("Face not accepted as live"), now);
+        assert_eq!(s.face, Face::Failed(Some("Face not accepted as live".into())));
     }
 
     #[test]

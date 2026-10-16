@@ -14,9 +14,10 @@
 //!
 //! `AUTH <user> [<seconds>] progress`: the client also wants to hear what happens before the
 //! verdict, as `NOTICE <event>` lines sent as they happen (`NOTICE recognized` the moment the
-//! face is recognised and the liveness votes begin: Windows' "Making sure it's you..."). A
-//! client that asks for it must read lines until the verdict word; without the flag the first
-//! line is the verdict, as before.
+//! face is recognised and the liveness votes begin: Windows' "Making sure it's you...";
+//! `NOTICE blink` when the blink challenge of `--blink-challenge` asks the user to blink,
+//! docs/liveness-physics.md §7). A client that asks for it must read lines until the verdict
+//! word; without the flag the first line is the verdict, as before.
 //!
 //! Access control: the socket is world-connectable (a screen locker runs PAM as the user), and
 //! every request is checked against the peer's uid (`SO_PEERCRED`): root may ask about any user;
@@ -214,7 +215,7 @@ fn handle(state: &mut State, request: &Request, progress: &mut dyn FnMut(&str)) 
             // successful unlock adds a print (a sealed store stays sealed).
             auth.pipeline.reload_store()?;
             let deadline = wait.map(|wait| Instant::now() + wait);
-            let outcome = auth.verify_reporting(user, deadline, &mut || progress("recognized"))?;
+            let outcome = auth.verify_reporting(user, deadline, &mut |event| progress(event))?;
             info!(user, ?wait, verdict = %outcome.verdict, on_failure_candidate = outcome.failed_print.is_some(), "request");
             let mut reply = outcome.verdict.to_string();
             if let Some(pending) = pending {

@@ -83,7 +83,7 @@ impl HelloIcon {
                 drop(s);
                 self.widget.set_opacity(if matches!(face, Face::Failed(_)) { 0.55 } else { 1.0 });
                 self.widget.queue_draw();
-                if matches!(face, Face::Looking | Face::Verifying) {
+                if matches!(face, Face::Looking | Face::Verifying | Face::Blink) {
                     let state = Rc::clone(state);
                     let face = face.clone();
                     self.widget.add_tick_callback(move |widget, clock| {
@@ -123,7 +123,8 @@ fn draw_vector(cr: &gtk::cairo::Context, width: f64, height: f64, face: &Face, e
     cr.set_line_width(0.17);
     cr.set_line_cap(gtk::cairo::LineCap::Round);
 
-    let glance = if matches!(face, Face::Looking | Face::Verifying) { 0.1 * (elapsed * 1.6).sin() } else { 0.0 };
+    let glance =
+        if matches!(face, Face::Looking | Face::Verifying | Face::Blink) { 0.1 * (elapsed * 1.6).sin() } else { 0.0 };
     for x in [-0.42, 0.42] {
         if *face == Face::Welcome {
             cr.arc(x, -0.3, 0.16, 1.15 * std::f64::consts::PI, 1.85 * std::f64::consts::PI);

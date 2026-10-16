@@ -228,21 +228,26 @@ pub fn clipped(image: &GrayImage, bbox: &[f32; 4]) -> (f32, f32) {
 /// points p9 and p15 are the eye centres (`RetinaEngine::ComputeAlignment` 0x18003d270), so the block
 /// follows from the five detector points. 0 if the block is empty (strong head turn).
 pub fn face_brightness(image: &GrayImage, points: &[[f32; 2]; 5]) -> f32 {
+    block_mean(image.width(), image.height(), points, |x, y| image.get_pixel(x, y).0[0] as f32)
+}
+
+/// [`face_brightness`] over any image of `width` × `height` read through `at`.
+pub fn block_mean(width: u32, height: u32, points: &[[f32; 2]; 5], at: impl Fn(u32, u32) -> f32) -> f32 {
     let [le, re, _nose, lm, rm] = *points;
     let clamp = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
-    let (x1, x2) = (clamp(le[0].max(lm[0]), image.width()), clamp(re[0].min(rm[0]), image.width()));
-    let (y1, y2) = (clamp(le[1].max(re[1]), image.height()), clamp(lm[1].min(rm[1]), image.height()));
-    let (mut sum, mut n) = (0u64, 0u64);
+    let (x1, x2) = (clamp(le[0].max(lm[0]), width), clamp(re[0].min(rm[0]), width));
+    let (y1, y2) = (clamp(le[1].max(re[1]), height), clamp(lm[1].min(rm[1]), height));
+    let (mut sum, mut n) = (0.0, 0u32);
     for y in (y1..y2).step_by(2) {
         for x in (x1..x2).step_by(2) {
-            sum += image.get_pixel(x, y).0[0] as u64;
+            sum += at(x, y);
             n += 1;
         }
     }
     if n == 0 {
         0.0
     } else {
-        sum as f32 / n as f32
+        sum / n as f32
     }
 }
 
