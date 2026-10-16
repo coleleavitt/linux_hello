@@ -125,6 +125,8 @@ pub enum FaceProblem {
     TooDark,
     /// Lit face brighter than 205 (F44 status 2)
     TooBright,
+    /// More than 1 % of the face ellipse clipped: too close, or a lamp on the face (F44 status 6)
+    Clipped,
     /// Face narrower than 72 px or 0.12 × the shorter frame side (F46)
     TooFar,
     /// Mask, sunglasses or hand over the face (F46; Windows Hello occlusion model)
@@ -142,6 +144,7 @@ impl FaceProblem {
             FaceProblem::NoFace => "no_face",
             FaceProblem::TooDark => "too_dark",
             FaceProblem::TooBright => "too_bright",
+            FaceProblem::Clipped => "clipped",
             FaceProblem::TooFar => "too_far",
             FaceProblem::Edge => "edge",
             FaceProblem::Occluded => "occluded",

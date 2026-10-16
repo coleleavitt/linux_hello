@@ -184,13 +184,15 @@ impl FacePipeline {
             return rejected(face, None, None, problem);
         }
         let windows_face = retina.map(|f| f.face.clone());
-        let points = windows_face.as_ref().unwrap_or(&face).landmarks;
+        let tracked = windows_face.as_ref().unwrap_or(&face);
+        let (points, bbox) = (tracked.landmarks, tracked.bbox);
         let ambient = self.compensated_ambient(pair, &face.bbox, &points, previous);
-        let lighting = Lighting::measure(&pair.lit, &ambient, &points);
+        let lighting = Lighting::measure(&pair.lit, &ambient, &points, &bbox);
         let problem = match lighting.status() {
             LightingStatus::TooDark => Some(FaceProblem::TooDark),
             LightingStatus::TooBright => Some(FaceProblem::TooBright),
-            LightingStatus::Good | LightingStatus::Weak => None,
+            LightingStatus::Clipped => Some(FaceProblem::Clipped),
+            LightingStatus::Good | LightingStatus::Weak | LightingStatus::ClippedAround => None,
         };
         let problem = match (problem, &mut self.windows) {
             (None, Some(w)) => windows_problem(w, &pair.lit, retina)?,

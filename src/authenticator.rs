@@ -12,7 +12,7 @@ use crate::matcher::MIN_PRINTS;
 use crate::pipeline::{Analysis, FaceCheck};
 use crate::{
     Camera, CameraType, Embedding, Face, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
-    LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote,
+    Lighting, LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote,
 };
 
 const LIVENESS_BUFFERS: u32 = 2;
@@ -161,7 +161,7 @@ impl Session {
                 debug!(id, "new face track");
                 Track::default()
             });
-            track.motion.add(&face.analysis.face, check.frame, face.analysis.lighting.map(|l| l.lit));
+            track.motion.add(&face.analysis.face, check.frame, face.analysis.lighting.as_ref());
             track.occluded = if face.analysis.problem == Some(FaceProblem::Occluded) { track.occluded + 1 } else { 0 };
             track.attempt.add(face);
         }
@@ -252,12 +252,15 @@ const REATTEMPT_CENTRE_RANGE: f32 = 0.01;
 const REATTEMPT_SIZE_CHANGE: f32 = 0.2;
 const REATTEMPT_BRIGHTNESS_SIGMA: f32 = 12.0;
 const BRIGHTNESS_WINDOW: usize = 10;
+/// Clipped-face frames (F44 status 6) a track may have and still get its re-attempt (F49: "not
+/// if the too-many-saturated counter > 1").
+const MAX_CLIPPED_FRAMES: u32 = 1;
 
 /// Movement and exposure of the tracked face over an attempt, for the one re-attempt a track
-/// gets before it ends the session in `NOMATCH` or `NOTLIVE` (F49): the face may have been recognised had
-/// it held still, or the camera may have been adjusting its exposure. Windows also skips the
-/// re-attempt after too many saturated frames; linux_hello has no saturated-pixel count (F44
-/// status 6/7 are not implemented), so that condition is left out.
+/// gets before it ends the session in `NOMATCH` or `NOTLIVE` (F49): the face may have been
+/// recognised had it held still, or the camera may have been adjusting its exposure. Not after
+/// more than [`MAX_CLIPPED_FRAMES`] frames with a clipped face (F44 status 6): the face is too
+/// close or lit by a lamp, and that will not change by itself.
 #[derive(Default)]
 struct FaceMotion {
     /// Range of the box centre, normalised by the frame width and height
@@ -265,6 +268,8 @@ struct FaceMotion {
     width: Option<Range<f32>>,
     /// The last [`BRIGHTNESS_WINDOW`] lit face brightness values
     brightness: Vec<f32>,
+    /// Frames whose face ellipse was clipped (F44 status 6)
+    clipped: u32,
 }
 
 struct Range<T> {
@@ -273,7 +278,7 @@ struct Range<T> {
 }
 
 impl FaceMotion {
-    fn add(&mut self, face: &Face, frame: [u32; 2], lit: Option<f32>) {
+    fn add(&mut self, face: &Face, frame: [u32; 2], lighting: Option<&Lighting>) {
         let [x1, y1, x2, y2] = face.bbox;
         let centre = [(x1 + x2) / 2.0 / frame[0] as f32, (y1 + y2) / 2.0 / frame[1] as f32];
         match &mut self.centre {
@@ -291,16 +296,17 @@ impl FaceMotion {
             }
             None => self.width = Some(Range { min: width, max: width }),
         }
-        if let Some(lit) = lit {
+        if let Some(lighting) = lighting {
             if self.brightness.len() == BRIGHTNESS_WINDOW {
                 self.brightness.remove(0);
             }
-            self.brightness.push(lit);
+            self.brightness.push(lighting.lit);
+            self.clipped += u32::from(lighting.status() == LightingStatus::Clipped);
         }
     }
 
     fn changed(&self) -> bool {
-        self.moved() || self.exposure_changed()
+        self.clipped <= MAX_CLIPPED_FRAMES && (self.moved() || self.exposure_changed())
     }
 
     /// `ReAttemptRecognitionByMovement`
@@ -625,7 +631,6 @@ pub fn describe_skipped(skipped: &BTreeMap<&'static str, u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lighting::Lighting;
     use crate::Face;
 
     const FRAME: [u32; 2] = [640, 360];
@@ -653,7 +658,7 @@ mod tests {
             analysis: Analysis {
                 face: face(bbox),
                 windows_face: None,
-                lighting: Some(Lighting { lit: 80.0, ambient }),
+                lighting: Some(Lighting { lit: 80.0, ambient, clipped_face: 0.0, clipped_around: 0.0 }),
                 problem: None,
                 print: Some(Embedding { features: vec![identity, similarity] }),
             },
@@ -811,8 +816,12 @@ mod tests {
         // Still face, but the lit brightness swings between 60 and 100 (σ = 20 > 12).
         let swinging = |i: u32| {
             let mut check = usable(Vote::Live, 0.3);
-            check.faces[0].analysis.lighting =
-                Some(Lighting { lit: if i % 2 == 0 { 60.0 } else { 100.0 }, ambient: 5.0 });
+            check.faces[0].analysis.lighting = Some(Lighting {
+                lit: if i % 2 == 0 { 60.0 } else { 100.0 },
+                ambient: 5.0,
+                clipped_face: 0.0,
+                clipped_around: 0.0,
+            });
             check
         };
         let mut s = Session::default();
@@ -829,6 +838,33 @@ mod tests {
             settled.add(&usable(Vote::Live, 0.3));
         }
         assert_eq!(settled.add(&usable(Vote::Live, 0.3)), Some(Verdict::NoMatch { similarity: 0.3 }));
+    }
+
+    #[test]
+    fn clipped_faces_are_rejected_and_block_the_reattempt() {
+        // The lamp on the face: no print, and the session names the reason.
+        let clipped = |bbox| {
+            let mut check = rejected_at(bbox, FaceProblem::Clipped);
+            check.faces[0].analysis.lighting =
+                Some(Lighting { lit: 120.0, ambient: 5.0, clipped_face: 0.05, clipped_around: 0.0 });
+            check
+        };
+        let mut s = Session::default();
+        for _ in 1..MAX_PAIRS {
+            assert_eq!(s.add(&clipped(OWNER)), None);
+        }
+        assert_eq!(s.add(&clipped(OWNER)), Some(Verdict::NoFace { problem: FaceProblem::Clipped }));
+        // A moving stranger with two clipped frames gets no re-attempt (F49).
+        let mut moving = Session::default();
+        for i in 0..2 {
+            assert_eq!(moving.add(&clipped(shifted(10.0 * i as f32))), None);
+        }
+        for i in 2..MAX_PAIRS - 1 {
+            assert_eq!(moving.add(&usable_at(shifted(10.0 * i as f32), Vote::Live, 0.3)), None);
+        }
+        let last = moving.add(&usable_at(shifted(160.0), Vote::Live, 0.3));
+        assert_eq!(last, Some(Verdict::NoMatch { similarity: 0.3 }));
+        assert!(!moving.reattempted());
     }
 
     #[test]

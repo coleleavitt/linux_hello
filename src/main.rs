@@ -255,6 +255,7 @@ fn main() -> Result<()> {
                         serde_json::json!({
                             "track": track, "face": a.face.bbox,
                             "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
+                            "clipped_face": l.map(|l| l.clipped_face), "clipped_around": l.map(|l| l.clipped_around),
                             "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
                             "rgb_real": f.liveness, "vote": format!("{:?}", f.vote),
                             "windows": f.windows.as_ref().map(|w| serde_json::json!({

@@ -97,6 +97,7 @@ A face gives no print and no vote if:
 | `edge` | box closer to a frame edge than inter-eye distance / 5 | F46 |
 | `too_bright` | lit face brightness > 205 | F44 status 2 |
 | `too_dark` | lit face brightness < 35 | F44 status 3 |
+| `clipped` | more than 1 % of the face ellipse (inscribed in the box) at pixel value 255: too close, or a lamp on the face | F44 status 6, F45 (counted as too close) |
 | `occluded` | Windows Hello occlusion model: 1 − p(none) > 0.9 (> 0.5 while enrolling); only with the converted models | F46 |
 | `not_frontal` | Windows Hello IR detector's head pose: \|yaw\| > 20° or \|pitch\| > 25°, or that detector has no face overlapping the SCRFD face (IoU ≥ 0.5; checked right after the size/edge gates, before the lighting status); only with the converted models | F46, F59 |
 
@@ -133,11 +134,30 @@ aligner's real eye contour (`examples/ms_check`, `brightness`).
 |---|---|---|
 | too bright (2) | lit > 205 | rejected |
 | too dark (3) | lit < 35 | rejected |
+| clipped (6) | > 1 % of the face ellipse clipped | rejected (`NOFACE clipped`) |
+| clipped around (7) | > 1 % of the band around the face clipped | print from the lit frame, used for matching; no vote; not used for augmentation |
 | weak (4) | d < 45, or ambient > 25 (strong ambient IR, e.g. sunlight) | print from the lit frame, used for matching; no vote; not used for augmentation |
 | good (1) | otherwise | print from `lit − min(lit, ambient)`; votes |
 
 Windows also turns `d > 205` into status 2; with lit ≤ 205 that cannot happen. It smooths the
-ambient brightness over frames and counts clipped pixels (status 6/7); linux_hello does neither.
+ambient brightness over frames; linux_hello does not.
+
+**Clipped pixels (F44 status 6/7, `CheckIfTooMuchSaturatedPixelOnFace`).** On the lit frame,
+`lighting::clipped` counts the pixels at 255 inside the ellipse inscribed in the tracked face's box
+(the Windows IR detector's, SCRFD's without the Windows models) and in the band around it, the box
+grown by 25 % of its width and height on every side, outside the ellipse (`CLIPPED_BAND`; Windows'
+band size is not recovered). More than 1 % of a region (`MAX_CLIPPED`, Windows' area · 1 / 100)
+means status 6 for the ellipse — the frame is rejected and reported as `clipped` (Windows counts
+it as "too close", F45) — and status 7 for the band: Windows keeps the print tagged (flag 0x20),
+and the status not being 1, does not subtract the ambient frame, so here the frame is handled like
+status 4. Windows defines a clipped pixel as one equal to its neighbours 2 px away in both
+directions; linux_hello takes the sensor's maximum, 255. The check sits between the exposure
+status and the ambient comparison, as in Windows, so a bright band is reported before weak
+lighting. On the owner's frontal frames no pixel reaches 255 (one on `watch_0435`); a 12×12
+clipped patch on the face (1.2 % of the ellipse) gives `clipped`, a 25 px clipped column beside
+the face `clippedaround` with the print kept and no vote (`examples/check_frames` on edited copies
+of `watch_0014_ir_lit.png`). `watch`'s `log.jsonl` carries the two fractions (`clipped_face`,
+`clipped_around`).
 
 ### 4. Ambient subtraction (F12, F13, F40)
 
@@ -313,9 +333,8 @@ best similarity, votes), once per track, as Windows (`ReAttemptRecognitionByMove
 before; `NOFACE` is never re-attempted (nothing was recognised). Each track keeps its own motion
 record, so a photo replacing the owner does not inherit the owner's movement; it can earn a
 re-attempt of its own if it reaches a verdict, so a session can run past 32 pairs only when
-another track decides it. Windows also refuses the re-attempt after more than one "too many
-saturated pixels" frame; linux_hello has no saturated-pixel count (F44 status 6/7), so that part
-is left out. A re-attempted session reads up to 32 pairs, ≈ 4.3 s at 15 fps plus the ≈ 0.5 s
+another track decides it. As Windows, a track with more than one clipped-face frame (§3 status
+6) gets no re-attempt: a face too close or under a lamp will not fix itself. A re-attempted session reads up to 32 pairs, ≈ 4.3 s at 15 fps plus the ≈ 0.5 s
 start-up, within the PAM module's 10 s timeout.
 
 Checked on saved frames (`validation_frames`): five consecutive lit frames of one sitting keep one
@@ -392,7 +411,7 @@ The first word is unchanged from earlier versions, so older PAM modules keep wor
 | `MATCH 0.812` | success | — |
 | `NOMATCH 0.310`, `NOMATCH 0.430 <token>` (enroll-on-failure candidate) | auth error | Face not recognized |
 | `NOTLIVE` | auth error | Face not accepted as live |
-| `NOFACE too_dark` / `too_bright` / `too_far` / `edge` / `no_face` | auth error | Face too dark: move closer… / Face too bright: move back… / Face too small: move closer… / Face at the edge… / No face seen… |
+| `NOFACE too_dark` / `too_bright` / `clipped` / `too_far` / `edge` / `occluded` / `not_frontal` / `no_face` | auth error | Face too dark: move closer… / Face too bright: move back… / Face too bright: move back or turn away from the lamp / Face too small: move closer… / Face at the edge… / Face covered… / Face turned away… / No face seen… |
 | `UNAVAILABLE lid_closed` | ignore | Face login not available: the lid is closed |
 | `NOTENROLLED`, `ERROR …` | ignore | — |
 

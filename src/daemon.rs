@@ -3,7 +3,7 @@
 //! Protocol, one line each way: the client sends `AUTH <user>`, the daemon answers with a
 //! [`Verdict`] (`MATCH 0.850`, `NOMATCH 0.120`, `NOTLIVE`, `NOFACE <reason>`, `NOTENROLLED`,
 //! `UNAVAILABLE lid_closed`) or `ERROR <message>`. The first word decides; `<reason>` is one of
-//! `no_face`, `too_dark`, `too_bright`, `too_far`, `edge`, `occluded`, `not_frontal` (see
+//! `no_face`, `too_dark`, `too_bright`, `clipped`, `too_far`, `edge`, `occluded`, `not_frontal` (see
 //! [`crate::FaceProblem`]).
 //!
 //! Enroll-on-failure (F31, opt-in with `--enroll-on-failure`): when a `NOMATCH` session has a
