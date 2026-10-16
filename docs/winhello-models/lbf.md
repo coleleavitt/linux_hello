@@ -145,9 +145,48 @@ for tracking). Input: 8-bit luminance **full lit frame** (`FaceProcessor`+56, `L
 
 `FaceProcessor::ProcessTrackedFaces` runs this aligner only on the legacy path. RetinaEngine (ONNX detector with a
 `landmarks` output, `IsRetinaFaceAlignmentEnabled`) is the alternative: `RetinaEngine::ComputeAlignment`
-0x18003d270 copies its **5 points into slots 0–4** of the same 31-slot result and (feature
-`IntegrateComplianceHelloModels`) synthesises eye-contour slots from them. So slots 0–4 = RetinaFace 5-point
-convention (OBSERVED copy; semantic INFERRED).
+0x18003d270 copies its **5 points into slots 0–4** of the same 31-slot result and fills slots 5–30 from them
+(see "Which aligner runs"). So slots 0–4 = RetinaFace 5-point convention (OBSERVED copy; semantic INFERRED).
+
+### Which aligner runs, and where landmarks 5–30 come from on the RetinaEngine path
+
+OBSERVED (FaceProcessorCore, pseudocode and disassembly in `~/SiteResearch/windows_hello/re/conv/landmarks/`):
+
+* `FaceProcessor` holds one `IFaceAlignment` (this+11, its shared_ptr control block at +12) and one
+  `IFaceOrientation` (+14/+15). `ProcessTrackedFaces` 0x180014db4 calls, per tracked face, context `SetParameter`
+  (vtable +8), then **one** `ComputeAlignment` (vtable +16 of this+11), then `AlignerContext::GetResult`
+  (`…InfraredAlignerContextGetResult`). There is no second alignment pass.
+* `InfraredFaceProcessor::Initialize` 0x18002e120 creates the `RetinaEngine` (feature `OnnxInfraredFaceDetector`)
+  and, when `StaticAdapterInfo::IsRetinaFaceAlignmentEnabled` 0x18002f72c is true, installs the engine's
+  `IFaceAlignment` sub-object (RetinaEngine+8) at this+11; when the byte at `StaticAdapterInfo`+2938 is set, its
+  `IFaceOrientation` (RetinaEngine+16) at this+14. `IsRetinaFaceAlignmentEnabled` returns 1 whenever feature
+  `IntegrateComplianceHelloModels` is on, else the byte at `StaticAdapterInfo`+2937 (0 in the constructor
+  0x18002f4a8, `dword_180067988 = 0x10000`, which also sets +2938 = 1; the adapter configuration that may
+  overwrite it was not traced — UNKNOWN).
+* `InitializeLegacyFaceAlignmentAndFaceOrientationIfNeeded` 0x18003a954 loads MODEL_FILES 102 and creates the
+  `LbfAligner` **only if this+11 is still null** (`if (this+11 != 0) goto LABEL_69`), and `IrFaceOrientation` only
+  if this+14 is null. So with Retina alignment the LBF database is never loaded and the aligner never runs.
+* `RetinaEngine::ComputeAlignment` 0x18003d270 takes the cached candidate of the context's tracking id
+  (`FindCachedResultCandidate`), requires exactly 5 landmarks (40 bytes), clamps them into the frame rect and
+  writes them to slots 0–4 of the 62-float result; then, with `IntegrateComplianceHelloModels` on:
+  * `d = (p1 − p0) · 0.75 · 0.5 · 0.5 = 0.1875 · (p1 − p0)` per axis; p7 = p0 − d, p10 = p0 + d, p13 = p1 − d,
+    p16 = p1 + d (eye corners along the eye line, clamped to the rect);
+  * p5, p6, p8, p9 = p0; p11, p12, p14, p15 = p1 (brows and eye top/bottom = eye centres);
+
+  and with the feature off: p5–p10 = p0, p11–p16 = p1. In both cases p17–p22 and p27–p30 = p2 (nose points = nose
+  tip) and p23–p26 = (p3 + p4) / 2 (mouth points = mouth-corner midpoint). Then `UpdateFacePoints(ctx, 0, 2·N, pts)`
+  with N from vtable +40 (31).
+
+Consequences (OBSERVED arithmetic on the copies above):
+
+* F43 brightness block (p3, p4, p9, p15): p9 = p0, p15 = p1 on either Retina variant, so the block is bounded by
+  the **eye centres and mouth corners** of the five detector points — the block linux_hello used with SCRFD's five
+  points, now taken from the Retina points.
+* F13 anchors: A = mean(p0, p7, p10, p8, p9) = p0 (the ±d corners cancel), B = p1, C = mean(p3, p4, 4 × midpoint)
+  = (p3 + p4) / 2. The affine warp is fitted through the eye centres and the mouth midpoint.
+* Which path a given Windows install runs depends on the feature flag / configuration byte (UNKNOWN). linux_hello
+  follows the Retina path: its other converted models are the compliance-flag variants (occlusion 120, detector
+  112 ≡ 110, cefa.md §5), under which `IsRetinaFaceAlignmentEnabled` is unconditionally true.
 
 ### Point layout (names INFERRED from mean shape + anchor groups; "L" = image left = subject's right)
 
@@ -290,9 +329,10 @@ feeds this path differently (orientation/mirroring, other preprocessing) is UNKN
   `FaceOrientationResult` (pitch, yaw, "roll", the 4 flags, frontal margin). Only the no-prior regression is ported
   (the prior path needs the same tracked face's estimate from the last 330 ms). `headpose_lda_knn.onnx` is not used.
 * Inputs used in linux_hello: the SCRFD box truncated to integers (`as i32`, like `int()` in the Python tools) on the
-  8-bit lit frame. Exposed in `examples/ms_check` (`pose.legacy`); **not used as a gate**: on this camera it reads
-  +24…26° of yaw on frontal faces (see Validation), so Windows' ±20° limit would reject the owner. The frontal
-  gate uses the RetinaEngine pose instead (`ldmf.md` §11).
+  8-bit lit frame. Exposed in `examples/ms_check` (`pose.legacy`, and its eye contour as the `lbf` brightness
+  block); **not used in the pipeline**: Windows' Retina path never runs it ("Which aligner runs"), and as a pose
+  gate it reads +24…26° of yaw on frontal faces from this camera (see Validation), so Windows' ±20° limit would
+  reject the owner. The frontal gate uses the RetinaEngine pose instead (`ldmf.md` §11).
 
 Verification: Rust vs `aligner.py` + `pose.py`, same image and same integer rect, on the 9 owner IR frames and the
 6 faces of the stranger photo (converted to gray with PIL and saved as PNG, so both read identical pixels):
@@ -314,8 +354,9 @@ which was equal everywhere.
 ## Open questions (UNKNOWN)
 
 * Meaning of header bytes 3–9 of MODEL_FILES 102 (`00 02 00 90 23 70 00`); `LoadDatabase` reads but ignores them.
-* Whether current Windows builds use this legacy path or RetinaEngine by default (`IsRetinaFaceAlignmentEnabled`,
-  feature `OnnxInfraredFaceDetector`); the legacy models still ship and load.
+* Whether a given Windows install uses this legacy path or RetinaEngine: `IsRetinaFaceAlignmentEnabled` is forced
+  on by feature `IntegrateComplianceHelloModels`, otherwise read from a configuration byte whose writer was not
+  traced ("Which aligner runs"); the legacy models still ship and load on the legacy path.
 * Exact detector box convention for the IR detector (FaceTrackerInternal) that seeds the aligner.
 * The k > 1 KNN branch of `LDARegressor::Regress` is not implemented (the shipped models use k = 1).
 * Why the head-pose yaw is biased on this camera (see Validation).
@@ -334,5 +375,9 @@ which was equal everywhere.
 | L8 | OBSERVED | engine 128×128 crop from first 5 points via 281×281 canvas, ref points at ENG 0x1800D7F68 | ENG 0x180015f68, 0x18001614c, 0x180016b20, 0x180016440 |
 | L9 | OBSERVED | RetinaEngine fills slots 0–4 with its 5 points | 0x18003d270 |
 | L10 | INFERRED | slots 0–4 = eyes, nose, mouth corners (RetinaFace order); other names from geometry | L7, L9, mean shape |
+| L11 | OBSERVED | one `ComputeAlignment` per face; the LBF aligner is created only when no Retina alignment is installed; Retina alignment is forced by `IntegrateComplianceHelloModels`, else a config byte | 0x180014db4, 0x18003a954, 0x18002e120, 0x18002f72c |
+| L12 | OBSERVED | Retina path fills slots 5–30 by copying: eye slots = eye centres (corners ±0.1875·IOD with the compliance flag), nose slots = nose tip, mouth slots 23–26 = mouth midpoint; hence F43 block = eye centres/mouth corners and F13 anchors = eye centres + mouth midpoint | 0x18003d270 |
+| L13 | OBSERVED | ambient anchors = `cur·(1−t') + prev·t'`, `t' = (t_amb − t_prev)/(t_cur − t_prev)` (prev = last lit frame, this+5; t_amb = this+6 set by `CropAndStoreAmbientImage`; t_cur = frame+16, also checked `< 300 ms` after prev); affine cur → interpolated through `DeriveTransform` (3 rows `[x, y, 1 | u, v]`, Gauss-Jordan); warped(p) = ambient(M·p) bilinear, zero padded, truncated | 0x180036c10 (asm 0x180036ca4–0x180036df2), 0x180036e78 (0x180037056–0x18003707f), 0x18003753c, 0x180032c34, 0x18002ad88 |
 
-Scratch (IDA copies, test scripts, dumps): `~/SiteResearch/windows_hello/re/conv/conv-lbf/`.
+Scratch (IDA copies, test scripts, dumps): `~/SiteResearch/windows_hello/re/conv/conv-lbf/`; the alignment-path
+and warp disassembly: `~/SiteResearch/windows_hello/re/conv/landmarks/` (`adjust.asm`).
