@@ -6,6 +6,12 @@
 //! models (FaceNox + MiniFASNetV2) veto instead. Votes are counted only from the frame the face is
 //! recognised (F48).
 
+pub mod check;
+pub mod recording;
+
+pub use check::{Builtin, Check, Frame, Observed};
+pub use recording::{Label, Meta};
+
 /// RGB liveness: mean P(real) below this vetoes the frame.
 pub const RGB_REAL_THRESHOLD: f32 = 0.5;
 /// Live frames needed to decide "live" (F25).

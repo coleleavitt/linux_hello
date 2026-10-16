@@ -14,8 +14,8 @@ use crate::lighting::{self, subtract_ambient, Lighting, LightingStatus};
 use crate::matcher::Condition;
 use crate::tracker::{iou, MIN_IOU};
 use crate::{
-    gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
-    MsRetinaDetector, MsRetinaFace, OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
+    gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceOrientation, FaceProblem, FaceStore,
+    IrPair, MsFrame, MsRetinaDetector, MsRetinaFace, OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
 };
 
 /// Minimum face box width in pixels (F46, F54).
@@ -44,6 +44,10 @@ pub struct Analysis {
     /// frame with weak lighting (F40); with the Windows Hello models also Microsoft's feature of
     /// the same image
     pub print: Option<Embedding>,
+    /// The Windows Hello occlusion model's 1 − p(none) (F46), when it ran
+    pub occlusion: Option<f32>,
+    /// The Windows IR detector's pose of the face (F59), when it found one
+    pub pose: Option<FaceOrientation>,
 }
 
 impl Analysis {
@@ -172,6 +176,11 @@ impl FacePipeline {
         }
     }
 
+    /// Whether the converted Windows Hello models run.
+    pub fn has_windows_hello(&self) -> bool {
+        self.windows.is_some()
+    }
+
     pub fn is_enrolled(&self, user: &str) -> bool {
         self.store.get(user).is_some()
     }
@@ -220,12 +229,13 @@ impl FacePipeline {
         retina: Option<&MsRetinaFace>,
         previous: &[LitFace],
     ) -> Result<Analysis> {
-        let rejected = |face, windows_face, lighting, problem| {
+        let pose = retina.and_then(|f| f.orientation);
+        let rejected = |face, windows_face, lighting, problem, occlusion| {
             debug!(?problem, ?lighting, "face rejected");
-            Ok(Analysis { face, windows_face, lighting, problem: Some(problem), print: None })
+            Ok(Analysis { face, windows_face, lighting, problem: Some(problem), print: None, occlusion, pose })
         };
         if let Some(problem) = geometry_problem(&face, pair.lit.width(), pair.lit.height()) {
-            return rejected(face, None, None, problem);
+            return rejected(face, None, None, problem, None);
         }
         let windows_face = retina.map(|f| f.face.clone());
         let tracked = windows_face.as_ref().unwrap_or(&face);
@@ -238,12 +248,12 @@ impl FacePipeline {
             LightingStatus::Clipped => Some(FaceProblem::Clipped),
             LightingStatus::Good | LightingStatus::Weak | LightingStatus::ClippedAround => None,
         };
-        let problem = match (problem, &mut self.windows) {
+        let (problem, occlusion) = match (problem, &mut self.windows) {
             (None, Some(w)) => windows_problem(w, &pair.lit, retina)?,
-            (problem, _) => problem,
+            (problem, _) => (problem, None),
         };
         if let Some(problem) = problem {
-            return rejected(face, windows_face, Some(lighting), problem);
+            return rejected(face, windows_face, Some(lighting), problem, occlusion);
         }
         let image = match lighting.status() {
             LightingStatus::Good => subtract_ambient(&pair.lit, &ambient),
@@ -254,7 +264,15 @@ impl FacePipeline {
         if let Some(w) = &mut self.windows {
             print.windows = Some(w.recognizer.embed(&image, &points)?.to_vec());
         }
-        Ok(Analysis { face, windows_face, lighting: Some(lighting), problem: None, print: Some(print) })
+        Ok(Analysis {
+            face,
+            windows_face,
+            lighting: Some(lighting),
+            problem: None,
+            print: Some(print),
+            occlusion,
+            pose,
+        })
     }
 
     /// The ambient frame moved onto the lit one (`AdjustFaceForAmbientLight`, F13): the face's anchors
@@ -506,18 +524,21 @@ fn corresponding<'a>(
 /// Gates that need the Windows Hello models, on `retina`, the Windows IR detector's face that overlaps
 /// the SCRFD face: occlusion on its box, then the frontal check (F46, F59) with its pose
 /// (`RetinaEngine::ComputeOrientation`). When that detector has no such face, Windows tracks no face
-/// and gets no orientation, so the frame is not frontal either.
+/// and gets no orientation, so the frame is not frontal either. Returns the problem, if any, and
+/// the occlusion model's 1 − p(none).
 fn windows_problem(
     w: &mut WindowsHelloModels,
     lit: &GrayImage,
     retina: Option<&MsRetinaFace>,
-) -> Result<Option<FaceProblem>> {
-    let Some(retina) = retina else { return Ok(Some(FaceProblem::NotFrontal)) };
-    if w.occlusion.check(lit, &retina.face)?.is_occluded {
-        return Ok(Some(FaceProblem::Occluded));
+) -> Result<(Option<FaceProblem>, Option<f32>)> {
+    let Some(retina) = retina else { return Ok((Some(FaceProblem::NotFrontal), None)) };
+    let occlusion = w.occlusion.check(lit, &retina.face)?;
+    if occlusion.is_occluded {
+        return Ok((Some(FaceProblem::Occluded), Some(1.0 - occlusion.clear_prob)));
     }
     debug!(orientation = ?retina.orientation, "IR detector pose");
-    Ok((!retina.orientation.is_some_and(|o| o.is_frontal())).then_some(FaceProblem::NotFrontal))
+    let frontal = retina.orientation.is_some_and(|o| o.is_frontal());
+    Ok(((!frontal).then_some(FaceProblem::NotFrontal), Some(1.0 - occlusion.clear_prob)))
 }
 
 /// Size and edge gates of Windows' per-frame check (F46). Occlusion and pose are checked in

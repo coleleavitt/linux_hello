@@ -78,6 +78,11 @@ pub struct OcclusionDetector {
     threshold: f32,
 }
 
+/// 1 − p(none) above which a face is occluded in an unlock (F46); 0.5 while enrolling.
+pub const OCCLUSION_THRESHOLD: f32 = 0.9;
+/// The enrollment threshold.
+pub const ENROLLMENT_OCCLUSION_THRESHOLD: f32 = 0.5;
+
 impl OcclusionDetector {
     /// Load the occlusion model from the given path.
     /// Uses auth threshold (0.9) by default; call `set_enrollment_mode(true)` for enrollment (0.5).
@@ -87,12 +92,12 @@ impl OcclusionDetector {
 
         let session = super::load_session(model_path)?;
 
-        Ok(Self { session, threshold: 0.9 })
+        Ok(Self { session, threshold: OCCLUSION_THRESHOLD })
     }
 
     /// Set enrollment mode (threshold 0.5) or auth mode (threshold 0.9).
     pub fn set_enrollment_mode(&mut self, enrollment: bool) {
-        self.threshold = if enrollment { 0.5 } else { 0.9 };
+        self.threshold = if enrollment { ENROLLMENT_OCCLUSION_THRESHOLD } else { OCCLUSION_THRESHOLD };
     }
 
     /// Check for occlusion using a grayscale image.

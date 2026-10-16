@@ -22,7 +22,7 @@ use crate::Face;
 
 /// Thresholds for the flag-on models (from `docs/winhello-models/convnet.md` section 4).
 /// Using mode 0 thresholds (lower, more permissive).
-mod thresholds {
+pub mod thresholds {
     // Slot 11 (general IR): prob[0] > real → live; prob[1] > spoof → spoof
     pub const GENERAL_IR_REAL: f32 = 0.4711;
     pub const GENERAL_IR_SPOOF: f32 = 1.0; // mode 0: never triggers spoof via threshold

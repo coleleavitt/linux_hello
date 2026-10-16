@@ -4,12 +4,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 
 use linux_hello::authenticator::{describe, describe_skipped, ENROLL_PRINTS};
 use linux_hello::lighting::subtract_ambient;
+use linux_hello::liveness::{Label, Meta};
 use linux_hello::{
     calibration, daemon, sysfs, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras,
     Rotation, Session, Verdict, WindowsHelloModels,
@@ -109,6 +110,22 @@ enum Commands {
         seconds: u64,
         #[arg(long, default_value = "/tmp/linux_hello_watch")]
         out: PathBuf,
+    },
+    /// Record a labelled recording for the liveness bench (docs/liveness-bench.md): `watch`'s
+    /// frames and log.jsonl plus meta.json, with the gates and face-metered exposure of an unlock
+    Capture {
+        dir: PathBuf,
+        /// What is in front of the camera: genuine, print, screen, impostor or mask
+        #[arg(long)]
+        label: Label,
+        /// Free text: the light, the attack medium, the distance
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        seconds: u64,
+        /// The user whose template the frames are compared with (default: current user)
+        #[arg(long)]
+        user: Option<String>,
     },
 }
 
@@ -244,64 +261,100 @@ fn main() -> Result<()> {
         Commands::Watch { user, seconds, out } => {
             let user = user.unwrap_or_else(current_user);
             let mut pipeline = pipeline(liveness()?)?;
-            std::fs::create_dir_all(&out)?;
-            let mut log = std::fs::File::create(out.join("log.jsonl"))?;
-            let mut cams = OpenCameras::open(&cameras.nodes()?, cameras.rotation)?;
-            let mut session = Session::default();
-            let start = Instant::now();
-            let mut n = 0;
-            while start.elapsed().as_secs() < seconds {
-                let capture = cams.capture()?;
-                let check = pipeline.check(&user, &capture.pair, capture.rgb.as_ref())?;
-                cams.expose_on(check.largest().map(|f| &f.analysis.face));
-                let verdict = session.add(&check);
-                let t = start.elapsed().as_secs_f32();
-                println!("{n:4} t={t:5.2}s {}", describe(&check, &session));
-                save_capture(&capture, &out, &format!("{n:04}"))?;
-                let faces: Vec<_> = check
-                    .faces
-                    .iter()
-                    .zip(session.attempts())
-                    .map(|(f, (track, attempt))| {
-                        let a = &f.analysis;
-                        let l = a.lighting;
-                        serde_json::json!({
-                            "track": track, "face": a.face.bbox,
-                            "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
-                            "clipped_face": l.map(|l| l.clipped_face), "clipped_around": l.map(|l| l.clipped_around),
-                            "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
-                            "rgb_real": f.liveness, "color": f.color.to_string(), "vote": format!("{:?}", f.vote),
-                            "windows": f.windows.as_ref().map(|w| serde_json::json!({
-                                "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
-                                "border": w.scores.border, "hh": w.scores.hh,
-                            })),
-                            "similarity": f.best.map(|b| b.similarity), "far": f.best.map(|b| b.far),
-                            "recognised": attempt.recognised(), "liveness": format!("{:?}", attempt.liveness()),
-                        })
-                    })
-                    .collect();
-                writeln!(
-                    log,
-                    "{}",
-                    serde_json::json!({
-                        "n": n, "t": t, "gap_ms": capture.pair.gap().as_secs_f32() * 1000.0,
-                        "faces": faces,
-                        "verdict": verdict.map(|v| v.to_string()),
-                    })
-                )?;
-                if let Some(verdict) = verdict {
-                    println!("     => {verdict}; new session");
-                    session = Session::default();
-                }
-                n += 1;
-            }
+            record(&mut pipeline, &cameras, &user, seconds, &out)?;
+        }
+
+        Commands::Capture { dir, label, note, seconds, user } => {
+            let user = user.unwrap_or_else(current_user);
+            let mut pipeline = pipeline(liveness()?)?;
+            let mut meta = Meta {
+                label,
+                note,
+                date: linux_hello::liveness::recording::utc_now(),
+                camera: camera_id.clone(),
+                max_ambient: cli.max_ambient,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                user: user.clone(),
+                enrolled: pipeline.is_enrolled(&user),
+                windows_hello: pipeline.has_windows_hello(),
+                seconds,
+                pairs: 0,
+            };
+            std::fs::create_dir_all(&dir)?;
+            meta.save(&dir)?;
+            println!("Recording {} for {seconds} s into {}", label.as_str(), dir.display());
+            meta.pairs = record(&mut pipeline, &cameras, &user, seconds, &dir)?;
+            meta.save(&dir)?;
+            println!("{} pairs; {}", meta.pairs, dir.join(Meta::FILE).display());
         }
     }
     Ok(())
 }
 
+/// `watch`: read frame pairs for `seconds` with an unlock's gates and face-metered exposure,
+/// print one line per pair ([`describe`]), save the frames as `NNNN_{lit,ambient,diff,rgb}.png` and
+/// the scores to `log.jsonl` in `out`, and run [`Session`]s back to back as the daemon does.
+/// Returns the pairs recorded.
+fn record(pipeline: &mut FacePipeline, cameras: &CameraSetup, user: &str, seconds: u64, out: &Path) -> Result<u32> {
+    std::fs::create_dir_all(out)?;
+    let mut log = std::fs::File::create(out.join("log.jsonl"))?;
+    let mut cams = OpenCameras::open(&cameras.nodes()?, cameras.rotation)?;
+    let mut session = Session::default();
+    let start = Instant::now();
+    let mut n = 0;
+    while start.elapsed().as_secs() < seconds {
+        let capture = cams.capture()?;
+        let check = pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+        cams.expose_on(check.largest().map(|f| &f.analysis.face));
+        let verdict = session.add(&check);
+        let t = start.elapsed().as_secs_f32();
+        println!("{n:4} t={t:5.2}s {}", describe(&check, &session));
+        save_capture(&capture, out, &format!("{n:04}"))?;
+        let faces: Vec<_> = check
+            .faces
+            .iter()
+            .zip(session.attempts())
+            .map(|(f, (track, attempt))| {
+                let a = &f.analysis;
+                let l = a.lighting;
+                serde_json::json!({
+                    "track": track, "face": a.face.bbox,
+                    "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
+                    "clipped_face": l.map(|l| l.clipped_face), "clipped_around": l.map(|l| l.clipped_around),
+                    "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
+                    "occlusion": a.occlusion, "pose": a.pose.map(|p| [p.yaw, p.pitch, p.roll]),
+                    "rgb_real": f.liveness, "color": f.color.to_string(), "vote": format!("{:?}", f.vote),
+                    "windows": f.windows.as_ref().map(|w| serde_json::json!({
+                        "total": w.total, "general_ir": w.scores.general_ir, "diffusion_ir": w.scores.diffusion_ir,
+                        "color": w.scores.color, "border": w.scores.border, "hh": w.scores.hh,
+                    })),
+                    "similarity": f.best.map(|b| b.similarity), "far": f.best.map(|b| b.far),
+                    "ms": f.best.and_then(|b| b.windows).map(|w| w.distance),
+                    "recognised": attempt.recognised(), "liveness": format!("{:?}", attempt.liveness()),
+                })
+            })
+            .collect();
+        writeln!(
+            log,
+            "{}",
+            serde_json::json!({
+                "n": n, "t": t, "gap_ms": capture.pair.gap().as_secs_f32() * 1000.0,
+                "lit_at": capture.pair.lit_at.as_secs_f64(), "ambient_at": capture.pair.ambient_at.as_secs_f64(),
+                "faces": faces,
+                "verdict": verdict.map(|v| v.to_string()),
+            })
+        )?;
+        if let Some(verdict) = verdict {
+            println!("     => {verdict}; new session");
+            session = Session::default();
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Save the lit, ambient and ambient-subtracted IR frames and the RGB frame as `<prefix>_*.png`.
-fn save_capture(capture: &linux_hello::Capture, dir: &std::path::Path, prefix: &str) -> Result<()> {
+fn save_capture(capture: &linux_hello::Capture, dir: &Path, prefix: &str) -> Result<()> {
     let pair = &capture.pair;
     pair.lit.save(dir.join(format!("{prefix}_lit.png")))?;
     pair.ambient.save(dir.join(format!("{prefix}_ambient.png")))?;
