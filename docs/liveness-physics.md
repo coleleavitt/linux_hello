@@ -206,3 +206,39 @@ sessions stay under 0.025. A hand-held print that is tilted should stay at the j
 
 **Role.** Logged; no threshold. As evidence it is one-sided: a high value is a head, a low value
 is a still head or a print.
+
+## 6. Stereo parallax (`parallax`)
+
+**Physics.** The IR and the RGB camera sit side by side in the lid, so a point nearer the
+cameras shifts more between the two views than a point farther away. The nose tip of a face at
+40–70 cm is 2–3 cm nearer than the eyes and the mouth; on a print every point lies in one plane
+and the relative shift is zero.
+
+**Measure.** The least-squares similarity map (scale, rotation, translation) from the IR face's
+eyes and mouth corners to the colour face's (SCRFD's points on both sides, so that the
+detector's own landmark bias is the same in both views), then the nose's residual along the
+baseline (x) as a fraction of the inter-ocular distance, signed as measured (`nose_disparity`).
+No calibration beyond that: the registration (F66) is box-to-box and 3–4 px coarse, so the
+similarity fit per frame replaces it.
+
+**Genuine.**
+
+| Set | frames | min | p10 | p50 | p90 | max |
+|---|---|---|---|---|---|---|
+| lh_lock | 59 | −0.020 | −0.016 | −0.009 | −0.004 | 0.005 |
+| lh_now | 54 | −0.081 | −0.021 | −0.014 | 0.006 | 0.017 |
+| lh_view | 28 | −0.022 | −0.020 | −0.011 | −0.006 | −0.002 |
+| validation_frames | 4 | −0.014 | — | −0.010 | — | −0.010 |
+
+The sign is consistent (−0.01 IOD ≈ −0.5 px on every set, at 40–70 cm), but so is its size
+with the expected parallax of this laptop: with the cameras ≈ 1.5 cm apart, a focal length of
+≈ 500 px and the nose 2.5 cm nearer at 60 cm, the relative disparity is f·b·Δz/z² ≈ 0.5 px —
+the same 0.01 IOD, and within the landmark noise (σ 0.005–0.017 IOD within a set). Whether the
+−0.01 is the parallax or SCRFD drawing the nose differently in IR and in colour cannot be told
+from genuine data alone; a print would answer it (its value is the detector bias). Either way
+the signal is at the noise floor at this baseline, so this check cannot separate a print from a
+face on this laptop; it is kept as measured and may serve a camera pair with a wider baseline.
+
+**Attack set.** Not recorded yet.
+
+**Role.** Logged; no threshold, and none expected here.

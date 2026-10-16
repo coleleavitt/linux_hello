@@ -14,7 +14,7 @@ use crate::{FaceCheck, Vote};
 
 /// The checks, in the order they are logged.
 pub fn all() -> Vec<Box<dyn Check>> {
-    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker), Box::new(Material), Box::new(Motion)]
+    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker), Box::new(Material), Box::new(Motion), Box::new(Parallax)]
 }
 
 /// Score every check on every face of `check` that has a print, record the scores in
@@ -422,6 +422,58 @@ impl Check for Motion {
     }
 }
 
+/// Stereo parallax: the IR and the RGB camera sit side by side, so a point nearer the cameras
+/// shifts more between the two views than a point farther away. The nose tip of a face at
+/// 40–70 cm is 2–3 cm nearer than the eyes and the mouth; on a print every point is in one
+/// plane. Score = after the least-squares similarity map from the IR face's eyes and mouth
+/// corners (SCRFD's points, as in the colour frame, so that the detector's own bias is the same
+/// on both sides) to the colour face's, the nose's residual along the baseline (x), as a
+/// fraction of the inter-ocular distance; signed as measured (negative on the genuine
+/// recordings). With this laptop's baseline (a few cm at 60 cm) the expected relative disparity
+/// is ≈ 0.5 px, within the landmark noise.
+pub struct Parallax;
+
+/// Least-squares similarity map (scale, rotation, translation) `from` → `to` applied to `p`.
+fn similarity_map(from: &[[f32; 2]], to: &[[f32; 2]], p: [f32; 2]) -> [f32; 2] {
+    let n = from.len() as f32;
+    let mean =
+        |pts: &[[f32; 2]]| [pts.iter().map(|p| p[0]).sum::<f32>() / n, pts.iter().map(|p| p[1]).sum::<f32>() / n];
+    let (mf, mt) = (mean(from), mean(to));
+    // z = (Σ conj(a)·b) / (Σ |a|²) over the centred points as complex numbers.
+    let (mut re, mut im, mut norm) = (0.0, 0.0, 0.0);
+    for (a, b) in from.iter().zip(to) {
+        let (ax, ay, bx, by) = (a[0] - mf[0], a[1] - mf[1], b[0] - mt[0], b[1] - mt[1]);
+        re += ax * bx + ay * by;
+        im += ax * by - ay * bx;
+        norm += ax * ax + ay * ay;
+    }
+    let (re, im) = (re / norm, im / norm);
+    let (x, y) = (p[0] - mf[0], p[1] - mf[1]);
+    [re * x - im * y + mt[0], im * x + re * y + mt[1]]
+}
+
+/// The nose's x residual after the eyes-and-mouth similarity map, over the IR inter-ocular distance.
+pub fn nose_disparity(ir: &[[f32; 2]; 5], rgb: &[[f32; 2]; 5]) -> f32 {
+    let from = [ir[0], ir[1], ir[3], ir[4]];
+    let to = [rgb[0], rgb[1], rgb[3], rgb[4]];
+    (rgb[2][0] - similarity_map(&from, &to, ir[2])[0]) / iod(ir)
+}
+
+impl Check for Parallax {
+    fn name(&self) -> &str {
+        "parallax"
+    }
+
+    fn higher_is_live(&self) -> bool {
+        false
+    }
+
+    fn score(&mut self, frame: &Frame, face: usize) -> Result<Option<f32>> {
+        let f = frame.face(face);
+        Ok(f.rgb_face.as_ref().map(|rgb| nose_disparity(&f.analysis.face.landmarks, &rgb.landmarks)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +549,14 @@ mod tests {
         let residual = affine_residual(&POINTS, &nose).unwrap();
         assert!(residual > 0.03, "{residual}");
         assert_eq!(affine_residual(&[[0.0, 0.0]; 5], &POINTS), None);
+    }
+
+    #[test]
+    fn nose_disparity_is_the_noses_shift_beyond_the_similarity_map() {
+        let rgb = POINTS.map(|[x, y]| [0.9 * x + 20.0, 0.9 * y + 10.0]);
+        assert!(nose_disparity(&POINTS, &rgb).abs() < 1e-5);
+        let mut closer = rgb;
+        closer[2][0] -= 3.0;
+        assert!((nose_disparity(&POINTS, &closer) + 3.0 / 60.0).abs() < 1e-4);
     }
 }
