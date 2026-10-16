@@ -12,6 +12,12 @@
 //! [`FAILURES_PER_NOTICE`] `NOMATCH` in a row for the user, and once after enroll-on-failure
 //! added a print; both are also logged at warn.
 //!
+//! `AUTH <user> [<seconds>] progress`: the client also wants to hear what happens before the
+//! verdict, as `NOTICE <event>` lines sent as they happen (`NOTICE recognized` the moment the
+//! face is recognised and the liveness votes begin: Windows' "Making sure it's you..."). A
+//! client that asks for it must read lines until the verdict word; without the flag the first
+//! line is the verdict, as before.
+//!
 //! Access control: the socket is world-connectable (a screen locker runs PAM as the user), and
 //! every request is checked against the peer's uid (`SO_PEERCRED`): root may ask about any user;
 //! another uid may only `AUTH` its own user name; `ENROLL_ON_FAILURE` is root only. One request
@@ -115,8 +121,17 @@ fn answer(state: &Mutex<State>, mut stream: UnixStream) {
     let reply = request(&mut stream).and_then(|request| {
         let peer = peer_uid(&stream)?;
         request.check_peer(peer)?;
+        // The progress lines go out as they happen; a client that did not ask gets none.
+        let wants_progress = matches!(request, Request::Auth { progress: true, .. });
+        let mut progress = |event: &str| {
+            if wants_progress {
+                if let Err(e) = writeln!(&stream, "NOTICE {event}") {
+                    warn!(error = %e, "could not send progress");
+                }
+            }
+        };
         match state.try_lock() {
-            Ok(mut state) => handle(&mut state, &request),
+            Ok(mut state) => handle(&mut state, &request, &mut progress),
             Err(TryLockError::WouldBlock) => {
                 info!(peer, "busy: another request is using the cameras");
                 Ok("BUSY".to_string())
@@ -125,7 +140,7 @@ fn answer(state: &Mutex<State>, mut stream: UnixStream) {
             // the models and the store are still usable.
             Err(TryLockError::Poisoned(e)) => {
                 warn!("the previous request panicked; carrying on");
-                handle(&mut e.into_inner(), &request)
+                handle(&mut e.into_inner(), &request, &mut progress)
             }
         }
     });
@@ -143,6 +158,8 @@ enum Request {
     Auth {
         user: String,
         wait: Option<Duration>,
+        /// `NOTICE <event>` lines before the verdict
+        progress: bool,
     },
     EnrollOnFailure {
         user: String,
@@ -169,33 +186,35 @@ fn request(stream: &mut UnixStream) -> Result<Request> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut line = String::new();
     BufReader::new(stream.take(256)).read_line(&mut line)?;
-    let mut words = line.split_whitespace();
-    match (words.next(), words.next(), words.next(), words.next()) {
-        (Some("AUTH"), Some(user), seconds, None) if valid_username(user) => {
-            let wait = match seconds {
+    let mut words: Vec<&str> = line.split_whitespace().collect();
+    let progress = words.last() == Some(&"progress");
+    if progress {
+        words.pop();
+    }
+    match words[..] {
+        ["AUTH", user] | ["AUTH", user, _] if valid_username(user) => {
+            let wait = match words.get(2) {
                 Some(s) => Some(Duration::from_secs(s.parse::<u64>().context("AUTH wait")?).min(MAX_WAIT)),
                 None => None,
             };
-            Ok(Request::Auth { user: user.to_string(), wait })
+            Ok(Request::Auth { user: user.to_string(), wait, progress })
         }
-        (Some("ENROLL_ON_FAILURE"), Some(user), Some(token), None) if valid_username(user) => {
+        ["ENROLL_ON_FAILURE", user, token] if valid_username(user) && !progress => {
             Ok(Request::EnrollOnFailure { user: user.to_string(), token: token.to_string() })
         }
         _ => bail!("malformed request"),
     }
 }
 
-fn handle(state: &mut State, request: &Request) -> Result<String> {
+fn handle(state: &mut State, request: &Request, progress: &mut dyn FnMut(&str)) -> Result<String> {
     let State { auth, pending, failures, notices } = state;
     match request {
-        Request::Auth { user, wait } => {
+        Request::Auth { user, wait, .. } => {
             // Re-read the store for enrollments made meanwhile; `verify` saves it again after a
             // successful unlock adds a print (a sealed store stays sealed).
             auth.pipeline.reload_store()?;
-            let outcome = match wait {
-                Some(wait) => auth.verify_within(user, Instant::now() + *wait),
-                None => auth.verify(user),
-            }?;
+            let deadline = wait.map(|wait| Instant::now() + wait);
+            let outcome = auth.verify_reporting(user, deadline, &mut || progress("recognized"))?;
             info!(user, ?wait, verdict = %outcome.verdict, on_failure_candidate = outcome.failed_print.is_some(), "request");
             let mut reply = outcome.verdict.to_string();
             if let Some(pending) = pending {
@@ -340,7 +359,7 @@ mod tests {
     fn a_user_may_only_ask_about_itself_and_root_about_anyone() {
         assert_eq!(uid_of("root"), Some(0));
         assert_eq!(uid_of("no-such-user-linux-hello"), None);
-        let auth = |user: &str| Request::Auth { user: user.to_string(), wait: None };
+        let auth = |user: &str| Request::Auth { user: user.to_string(), wait: None, progress: false };
         let enroll = Request::EnrollOnFailure { user: "root".into(), token: "t".into() };
         assert!(auth("root").check_peer(0).is_ok());
         assert!(auth("nobody").check_peer(0).is_ok());
@@ -373,6 +392,15 @@ mod tests {
         assert!(parse("AUTH cole soon").is_err());
         assert!(parse("AUTH cole 5 more").is_err());
         assert!(matches!(parse("ENROLL_ON_FAILURE cole tok"), Ok(Request::EnrollOnFailure { .. })));
+        // `progress` after the user or the wait asks for the interim NOTICE lines.
+        let progress = |line| match parse(line) {
+            Ok(Request::Auth { wait, progress, .. }) => (wait, progress),
+            _ => panic!("{line}"),
+        };
+        assert_eq!(progress("AUTH cole progress"), (None, true));
+        assert_eq!(progress("AUTH cole 5 progress"), (Some(Duration::from_secs(5)), true));
+        assert_eq!(progress("AUTH cole 5"), (Some(Duration::from_secs(5)), false));
+        assert!(parse("ENROLL_ON_FAILURE cole tok progress").is_err());
     }
 
     #[test]

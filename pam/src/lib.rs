@@ -17,7 +17,9 @@
 //!
 //! The daemon's reply may go on with `NOTICE <text>` lines (an enroll-on-failure addition since
 //! the last check, five `NOMATCH` in a row); each is shown as PAM_TEXT_INFO after the verdict's
-//! message.
+//! message. The request carries `progress`, so `NOTICE <event>` lines also come before the
+//! verdict as things happen; `NOTICE recognized` is shown at once as "Making sure it's you..."
+//! (Windows' text while the liveness votes are counted, docs/windows-hello-ui.md).
 //!
 //! Return codes are chosen for `auth sufficient pam_linux_hello.so` placed before the password
 //! modules: a match returns PAM_SUCCESS; a face that is wrong, spoofed or missing returns
@@ -211,9 +213,9 @@ fn check_face(pamh: *mut PamHandle, args: &Args) -> c_int {
 
     let service = item(pamh, PAM_SERVICE).unwrap_or_default();
     let wait = args.wait_services.contains(&service);
-    let request = if wait { format!("AUTH {user} {}", args.timeout) } else { format!("AUTH {user}") };
-    let mut lines = ask(stream, &request, Duration::from_secs(if wait { args.timeout } else { 0 }) + REPLY_MARGIN);
-    let reply = if lines.is_empty() { String::new() } else { lines.remove(0) };
+    let request = if wait { format!("AUTH {user} {} progress", args.timeout) } else { format!("AUTH {user} progress") };
+    let (reply, lines) =
+        ask(pamh, stream, &request, Duration::from_secs(if wait { args.timeout } else { 0 }) + REPLY_MARGIN);
 
     log(pamh, &format!("pam_linux_hello: service={service} user={user} request={request:?} reply={reply:?}"));
     let mut words = reply.split_whitespace();
@@ -247,6 +249,16 @@ fn check_face(pamh: *mut PamHandle, args: &Args) -> c_int {
     result
 }
 
+/// Windows' text for the daemon's progress events (`AUTH ... progress`), shown as they arrive:
+/// the face is recognised and the liveness votes are being counted (docs/windows-hello-ui.md
+/// state 3, resource 123).
+fn progress_message(event: &str) -> Option<&'static CStr> {
+    match event {
+        "recognized" => Some(c"Making sure it's you..."),
+        _ => None,
+    }
+}
+
 /// A short hint for a failed face check. The daemon's reply is the verdict word, then for
 /// `NOFACE` the most frequent reason a frame was unusable.
 fn failure_message(reply: &str) -> &'static CStr {
@@ -261,20 +273,34 @@ fn failure_message(reply: &str) -> &'static CStr {
         (Some("NOFACE"), Some("not_frontal")) => c"Face turned away: look at the screen",
         (Some("NOFACE"), _) => c"No face seen by the camera",
         (Some("NOTLIVE"), _) => c"Face not accepted as live",
-        _ => c"Face not recognized",
+        // Windows' resource 125 with "PIN" → "password" (docs/windows-hello-ui.md §2.1).
+        _ => c"Couldn't recognize you. Please sign in with your password.",
     }
 }
 
-/// Send one request line and read the reply lines until the daemon closes the connection;
-/// empty on any error.
-fn ask(mut stream: UnixStream, request: &str, timeout: Duration) -> Vec<String> {
-    (|| -> std::io::Result<Vec<String>> {
+/// Send one request line and read the reply until the daemon closes the connection: the
+/// verdict line (empty on any error) and the lines after it. `NOTICE <event>` lines before the
+/// verdict are the daemon's progress and are shown at once.
+fn ask(pamh: *mut PamHandle, mut stream: UnixStream, request: &str, timeout: Duration) -> (String, Vec<String>) {
+    let mut verdict = String::new();
+    let mut after = Vec::new();
+    let _ = (|| -> std::io::Result<()> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         writeln!(stream, "{request}")?;
-        BufReader::new(stream).lines().collect()
-    })()
-    .unwrap_or_default()
+        for line in BufReader::new(stream).lines() {
+            let line = line?;
+            if !verdict.is_empty() {
+                after.push(line);
+            } else if let Some(text) = line.strip_prefix("NOTICE ").and_then(progress_message) {
+                message(pamh, text);
+            } else if !line.starts_with("NOTICE ") {
+                verdict = line;
+            }
+        }
+        Ok(())
+    })();
+    (verdict, after)
 }
 
 /// The auth stack succeeded after this transaction's `NOMATCH`, so the password confirmed the
@@ -290,7 +316,7 @@ fn report_password_success(pamh: *mut PamHandle, args: Args) {
     remember_failure(pamh, None);
     let Some((user, token)) = saved.split_once(' ') else { return };
     let Ok(stream) = UnixStream::connect(&args.socket) else { return };
-    let reply = ask(stream, &format!("ENROLL_ON_FAILURE {user} {token}"), Duration::from_secs(5)).concat();
+    let (reply, _) = ask(pamh, stream, &format!("ENROLL_ON_FAILURE {user} {token}"), Duration::from_secs(5));
     log(pamh, &format!("pam_linux_hello: enroll-on-failure user={user} reply={reply:?}"));
     if reply.starts_with("ADDED ") {
         message(pamh, c"Face print added after password login");

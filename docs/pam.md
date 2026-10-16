@@ -32,8 +32,9 @@ presence wait, default 10), `wait_services=NAME,NAME` (the services that get a p
 default `swaylock,login`; `wait_services=` turns it off, `wait_services=swaylock,login,hyprlock`
 adds a locker), `password_prompt` (below, for `hello-greeter` only). The module reads
 `PAM_SERVICE` (the name the application gave `pam_start`; an `include` does not change it) and
-sends `AUTH <user> <timeout>` for a wait service, `AUTH <user>` otherwise. The reply's first
-word decides, as before; a reply may go on with `NOTICE <text>` lines (below).
+sends `AUTH <user> <timeout> progress` for a wait service, `AUTH <user> progress` otherwise.
+The verdict line's first word decides, as before; `NOTICE` lines may come before it (progress,
+shown at once) and after it (notices, shown after the reason).
 
 ### `password_prompt` (the greeter's lines)
 
@@ -77,8 +78,13 @@ stack before the password modules. The greeter answers only that prompt (its tex
    frames in a row ends the session with `NOFACE occluded` at once. After a borderline match it
    adds that pair's print to the template and saves the store (a sealed store stays sealed).
 3. `MATCH` → `PAM_SUCCESS` → `sufficient` ends the stack: no password.
-   `NOMATCH`/`NOTLIVE`/`NOFACE` → the module prints a short reason ("Face too dark: move closer
-   to the camera", "Face not accepted as live", ...) and returns `PAM_AUTH_ERR`.
+   `NOMATCH`/`NOTLIVE`/`NOFACE` → the module prints a short reason ("Couldn't recognize you.
+   Please sign in with your password." — Windows' text, id 125 — for `NOMATCH`; "Face too dark:
+   move closer to the camera", "Face not accepted as live", ...) and returns `PAM_AUTH_ERR`.
+   The request carries the word `progress`, so the daemon also streams `NOTICE recognized` the
+   moment the face is recognised and the liveness votes begin; the module shows it at once as
+   "Making sure it's you..." (Windows' id 123; [windows-hello-ui.md](windows-hello-ui.md) state
+   3). Without `progress` (older modules) the first line of the reply is the verdict, as before.
    `BUSY` (another request has the cameras), `UNAVAILABLE lid_closed`, `NOTENROLLED`, `ERROR`
    → `PAM_IGNORE`.
    In every case but `MATCH` the line is ignored and the normal password prompt runs
@@ -153,7 +159,7 @@ and `BUSY` at once.
 
 | Case | Result | Time |
 |------|--------|------|
-| Owner at the laptop, `sudo` | `PAM_SUCCESS` (similarity 0.82–0.89, liveness 0.84–0.96) | 2.1 s |
+| Owner at the laptop, `sudo` | `PAM_SUCCESS` (similarity 0.82–0.89, liveness 0.84–0.96); "Making sure it's you..." is printed when the face is recognised, before the votes (added 2026-10-16, checked with the stub daemon only) | 2.1 s |
 | Owner at the laptop, scratch daemon, `AUTH cole` / `AUTH cole 6` | `MATCH 0.84–0.86` | 1.9 s / 2.0 s |
 | Stranger's template, owner at the camera (`NOMATCH` with the re-attempt) | `PAM_AUTH_ERR` → password | 4.2 s |
 | Daemon not running | `PAM_IGNORE` → password | 0 s |
@@ -183,9 +189,11 @@ shell open the first time.
 
 `scripts/pam_harness.py <module.so> <socket> '<reply>|<reply>' [service [module args...]]`
 runs the module through real libpam under any service name with a stub daemon, without root
-or a camera: `swaylock` and `login` send `AUTH cole 10` (`AUTH cole 5` with `timeout=5`),
-`polkit-1`, `su` and `sudo` send `AUTH cole`, `BUSY` gives the message above and falls through,
-and a reply `NOMATCH 0.300\nNOTICE …` prints the notice after "Face not recognized". The same
+or a camera: `swaylock` and `login` send `AUTH cole 10 progress` (`AUTH cole 5 progress` with
+`timeout=5`), `polkit-1`, `su` and `sudo` send `AUTH cole progress`, `BUSY` gives the message
+above and falls through, a reply `NOMATCH 0.300\nNOTICE …` prints the notice after "Couldn't
+recognize you. …", and `NOTICE recognized\nMATCH 0.85` prints "Making sure it's you..." before
+the success. The same
 was checked on copies of this machine's `/etc/pam.d` after `install.sh` edited them: through
 the real include chains each service reaches the module once and sees its own name.
 
