@@ -139,6 +139,44 @@ The daemon runs as root and can open `/dev/tpmrm0`. To use the TPM as a normal u
 example with `--store` under your home), the user needs access to `/dev/tpmrm0` (usually group
 `tss`).
 
+### Once the TPM is on: checklist for this box (Gentoo, OpenRC)
+
+Not yet run here: the TPM was still off on 2026-10-16 (`/dev/tpm*` absent). Checked on this
+day: Secure Boot is off (`SecureBoot` EFI variable = 0), `tpm2-tss` is installed (the `tpm`
+feature links against it), `tpm2-tools` is not, and `contrib/install.sh` builds without the
+`tpm` feature.
+
+1. **See the device.** `ls -l /dev/tpm0 /dev/tpmrm0`; `cat /sys/class/tpm/tpm0/tpm_version_major`
+   prints `2`; `dmesg | grep -i tpm` names the driver (`tpm_tis` or `tpm_crb`). No device: the
+   firmware setting did not take, or the kernel is missing `CONFIG_TCG_TIS`/`CONFIG_TCG_CRB`.
+2. **Build with the feature.** `cargo build --release --features tpm`, then install that binary
+   (`contrib/install.sh` builds without it; pass the feature or copy the binary by hand) and
+   restart the daemon: `rc-service linux_hello restart`. The daemon runs as root and opens
+   `/dev/tpmrm0` with the default TCTI; nothing to configure.
+3. **Pick the PCRs.** With Secure Boot off, as it is here, PCR 7 says only "Secure Boot off" and
+   any live USB stick gets the same value, so `--pcrs 7` adds re-enrollment work and no
+   protection: seal **without PCRs** (`linux_hello seal`). Turn Secure Boot on first if PCR 7 is
+   wanted; then `seal --pcrs 7` makes a stick signed by another CA fail to unseal. PCRs 0 and
+   2 (firmware and option-ROM code) change only with firmware updates and would be the next
+   candidate (`--pcrs 0,7` once Secure Boot is on) — untested here, and every firmware update
+   then needs `unseal` before and `seal` after (above). Kernel-bound PCRs (4, 8, 9, 11) change on
+   every kernel update and need a signed policy this code does not have.
+4. **Seal** as root, with the daemon stopped, following "Migrating an existing plain store"
+   below (`linux_hello seal`, then `linux_hello list`).
+5. **Verify.** The store file starts with `"format": "linux_hello-tpm-v1"` and has no user
+   names or `features` in clear (`grep -c features /var/lib/linux_hello/faces.json` → 0);
+   `linux_hello list` names the users; `sudo -k && sudo true` unlocks with the face (the daemon
+   log shows the unseal once, then cached-key reloads); with PCRs, `tpm2_pcrread sha256:7`
+   (package `app-crypt/tpm2-tools`) shows the values the file's `pcrs` were bound to. Try the
+   failure path too: `TPM2TOOLS_TCTI=device:/dev/null linux_hello list` must say `cannot reach
+   the TPM`, not print templates.
+6. **Measure.** Time `linux_hello list` on the sealed store (the first open creates the primary
+   key: expect tens to hundreds of ms on a discrete TPM, against 18 ms on swtpm) and note it in
+   "How it was tested".
+7. **Remember the limits.** Swap and hibernation on this machine are unencrypted (above), so the
+   data key and templates can still land on disk; and `Clear Security Chip` in the firmware
+   destroys the sealed store — `unseal` before clearing.
+
 ## Migrating an existing plain store
 
 ```sh

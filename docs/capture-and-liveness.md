@@ -15,7 +15,8 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
      good ─▶ embed lit − min(lit, warped ambient) ─▶ live vote unless the RGB models veto
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
-/dev/video0 (RGB) ─▶ SCRFD faces ─▶ nearest to the IR face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
+/dev/video0 (RGB) ─▶ SCRFD faces ─▶ the one overlapping the registered IR box (none: colour net skipped) ─▶ colour net veto
+                                        (without the Windows models: FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5)
   track: every analysed face followed by box overlap and print similarity; a new face starts a new attempt
   attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50), no other face
            of the pair with a lower FAR → recognised; from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
@@ -146,7 +147,8 @@ A face gives no print and no vote if:
 The occlusion model is the converted Windows Hello one (`models/windows_hello/converted/occlusion`,
 docs/winhello-models/cefa.md). Its input is the face box resampled to 128×128, as in Windows; the box
 is the Windows IR detector's (on the owner's frontal frames p(none) is 0.991–0.999 with it, 0.961–0.998
-with SCRFD's box).
+with SCRFD's box). It is the only occlusion detector of Windows' stock path: the eye and mouth/nose
+detectors run only with `IsFaceOcclusionDetectorEnabled` off, the legacy path (F65), and are not ported.
 
 The frontal check uses the pose Windows uses: the 6-DoF output of its IR RetinaFace-style detector
 (`models/windows_hello/converted/ldmf/ort/MODEL_FILES_110.ort`, `RetinaEngine::ComputeOrientation`,
@@ -254,12 +256,32 @@ For a good frame:
 |---|---|
 | IR: without the Windows Hello models, the good lighting status (reflects the emitter like a nearby face, little ambient IR) | +1 |
 | IR: with the Windows Hello models, their frame total (F25), see below | −3…+1 |
-| RGB, only without the Windows Hello models: FaceNox + MiniFASNetV2 mean P(real) < 0.5, or no face in the RGB frame | −2 |
+| RGB, only without the Windows Hello models: FaceNox + MiniFASNetV2 mean P(real) < 0.5, or no RGB face corresponding to the IR face (below) | −2 |
 
-The RGB face of an IR face is the SCRFD face of the RGB frame whose box centre, normalised by the
-frame size, is nearest to the IR face's: the two cameras sit side by side with a similar field of
-view and the frames are not registered (`EvaluateColorFaceQuality` is not ported). With one face
-in each frame this is the largest face as before.
+**Colour face of an IR face (F66).** Windows pairs the IR face with the colour face that overlaps
+the IR box mapped into the colour frame by a per-registration affine, learnt at run time from
+observed pairs; the mapped box is grown by 7.5 % per side and the overlap must be at least 0.55 of
+the smaller box, else the pair is "low overlapping" and, with exactly one face in each frame, the
+two are paired anyway (the rule Windows applies before it has a registration); otherwise the face
+has no colour face and the colour net is skipped with status 7, no vote, as any classifier with
+missing input (F25). linux_hello does the same with a fixed registration
+(`pipeline::ColorRegistration::P16_GEN3`, `corresponding`): the cameras are built in side by side,
+so the IR SCRFD box maps to the RGB SCRFD box by a scale and offset per axis, x' = 0.91·x + 23,
+y' = 0.90·y + 70, the least-squares fit of the box corners over 148 saved pairs of the owner
+(`examples/color_pairs` on `validation_frames/watch_*` and a `watch` output; residual σ 3.3 px in
+x, 4.4 px in y, max 16.5 px; the face's IR box spanned x 277–361, y 98–166, so the fit is only
+checked in that area). The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes of the
+same face; the mapping is box to box, which is what the overlap needs. With it every saved pair
+overlaps fully (the grown box contains the RGB box); the RGB face has to sit ≈ 50 px (x) or
+≈ 70 px (y) away from where the IR face says, half a face, before the overlap falls under 0.55.
+Several faces in the RGB frame: the one overlapping most, as Windows (before: the nearest box
+centre). The fallback keeps the colour net running on a camera pair the constant does not fit;
+on this laptop it only matters when a single RGB face is far from the single IR face.
+
+Windows also computes four colour quality flags on the paired face (`EvaluateColorFaceQuality`,
+F66: exposure status of the colour face, low alignment confidence, both opposite edges cut = too
+close, too far) but only counts them in telemetry; they stop nothing, so linux_hello does not
+compute them.
 
 Frame total > 0 is a live vote, < 0 a spoof vote. Weak and rejected frames do not vote (and the
 liveness models are not run for them), so with the Windows Hello models a frame is live only when
@@ -315,6 +337,25 @@ the 16 prints of one enrollment the point is 0.503, with 31 (16 enrolled + 10 au
 on-failure) 0.525, so the bound stays honest as the template grows. Every per-frame log line and
 `watch`'s `log.jsonl` carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the
 daemon reply keeps the similarity only.
+
+**Verification condition (F67).** Windows reads the FAR of a comparison from the calibration
+table of its *verification condition*, derived from the quality flags of the probe frame and of
+the closest stored print: clean (0), weak lighting or a clipped band (1, statuses 4/5/7), a
+non-frontal pose (2), an edge cut (5), and the coupled mean/pair prints (4). The five tables of
+the v5 model are one per condition (cefa.md §2.2), all identical in the shipped build, and the
+best GFP is kept per condition with the lowest deciding, so the condition changes no number
+there; the print's source (enrolled, on-failure, on-success) does not enter it. Windows' × 1…4
+is the number of enrolled users, capped (F52): × 1 for one user, and linux_hello matches 1:1.
+Here every stored print comes from a good-lighting frame (enrollment, augmentation and
+enroll-on-failure take live frames only), so the condition is the probe frame's:
+`Condition::Clean` for a good frame, `Condition::Weak` for a weak or clipped-band frame
+(`Condition::of`, recorded in `PrintMatch::condition`); non-frontal and edge-cut frames give no
+print (§2). The FAR comes from the one table per camera, as Windows' identical tables; a
+per-condition table would need impostor data from weak-lighting frames, which there is none of.
+Two Windows details are not followed: on-failure prints are compared only while Windows'
+`AutoEnrollmentMode` is on (here they are matched whenever they are in the template, and only
+the daemon with `--enroll-on-failure` adds them), and Windows counts the 4 prints a track needs
+among the prints of the current frame's quality category (here any 4 prints of the track).
 
 **Second opinion (F28, F50, F51).** With the Windows Hello models, every print also carries Microsoft's
 own recognition feature: the v5 net (`MsRecognizer`, [winhello-models/cefa.md](winhello-models/cefa.md)

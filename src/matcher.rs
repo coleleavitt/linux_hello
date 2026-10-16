@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::calibration::{CalibrationTable, TARGET_FAR};
+use crate::lighting::LightingStatus;
 use crate::ms_models::recognizer::distance;
 use crate::Embedding;
 
@@ -60,6 +61,35 @@ impl Print {
     }
 }
 
+/// Verification condition of a comparison (F67): Windows derives it from the quality flags of
+/// the probe frame and of the matched print — weak lighting (F44 status 4/5), a clipped band
+/// (status 7), a non-frontal pose or an edge cut make the condition worse than clean — and
+/// takes the calibration table of that condition (the five tables of the v5 model, identical
+/// in the shipped build) and the best GFP per condition. Print sources (enrolled, on-failure,
+/// on-success) play no part in it. Here every stored print comes from a good-lighting frame
+/// (enrollment, augmentation and enroll-on-failure take live frames only), so the condition
+/// is the probe frame's; non-frontal and edge-cut frames give no print (F46).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Condition {
+    /// Good lighting (Windows condition 0)
+    Clean,
+    /// Weak lighting or a clipped band around the face: print kept, no vote (Windows
+    /// condition 1, print flags 0x1 and 0x20)
+    Weak,
+}
+
+impl Condition {
+    /// The condition of a print taken with this lighting status (F45: statuses 4, 5 and 7
+    /// tag the print; the others give a clean print or none).
+    pub fn of(status: LightingStatus) -> Self {
+        match status {
+            LightingStatus::Weak | LightingStatus::ClippedAround => Condition::Weak,
+            _ => Condition::Clean,
+        }
+    }
+}
+
 /// Microsoft's recogniser's opinion of a probe: its engine distance to the closest of the
 /// compared prints that carry a Windows feature (F28, F50) and Microsoft's FAR at that distance
 /// (F51).
@@ -76,6 +106,9 @@ pub struct PrintMatch {
     /// Estimated FAR of an attempt against the compared prints whose best comparison is this one
     /// ([`CalibrationTable::far`])
     pub far: f64,
+    /// The verification condition the FAR was read under (F67); with one calibration table per
+    /// camera it changes no number, as in the shipped Windows build
+    pub condition: Condition,
     pub generation: u8,
     /// The second opinion, when both the probe and a compared print have a Windows feature
     pub windows: Option<WindowsMatch>,
@@ -122,24 +155,27 @@ impl Template {
     }
 
     /// The highest cosine similarity over all prints (the minimum distance, F28), with the FAR of
-    /// an attempt against this many prints from `table`. With `windows`, Microsoft's table, and a
-    /// probe with a Windows feature, also the second opinion: the minimum engine distance over
-    /// the prints with one (Windows' own rule, F28) and Microsoft's FAR for it. That FAR is the
-    /// table's value as Windows uses it (`GFP`, F51), not scaled by the comparison count: Windows'
-    /// × 1…4 counts verification conditions (F52), and there is one here.
+    /// an attempt against this many prints from `table`, under `condition` (F67). With `windows`,
+    /// Microsoft's table, and a probe with a Windows feature, also the second opinion: the
+    /// minimum engine distance over the prints with one (Windows' own rule, F28) and Microsoft's
+    /// FAR for it. That FAR is the table's value as Windows uses it (`GFP`, F51), not scaled by
+    /// the comparison count: Windows' × 1…4 is the number of enrolled users, capped (F67), and
+    /// there is one here.
     pub fn best_match(
         &self,
         probe: &Embedding,
+        condition: Condition,
         table: &CalibrationTable,
         windows: Option<&CalibrationTable>,
     ) -> Option<PrintMatch> {
-        self.best_match_where(probe, table, windows, |_| true)
+        self.best_match_where(probe, condition, table, windows, |_| true)
     }
 
     /// The highest cosine similarity over the prints that `keep` selects.
     pub fn best_match_where(
         &self,
         probe: &Embedding,
+        condition: Condition,
         table: &CalibrationTable,
         windows: Option<&CalibrationTable>,
         keep: impl Fn(&Print) -> bool,
@@ -158,7 +194,7 @@ impl Template {
                 .map(|distance| WindowsMatch { distance, far: table.pair_far(1.0 - distance) }),
             _ => None,
         };
-        Some(PrintMatch { similarity, far: table.far(similarity, compared.len()), generation, windows })
+        Some(PrintMatch { similarity, far: table.far(similarity, compared.len()), condition, generation, windows })
     }
 
     /// Add `probe`, a live frame that matched a print of generation `matched.generation`
@@ -198,7 +234,8 @@ mod tests {
     }
 
     fn matched(similarity: f32, generation: u8) -> PrintMatch {
-        PrintMatch { similarity, far: crate::calibration::lfw_gray().far(similarity, 15), generation, windows: None }
+        let far = crate::calibration::lfw_gray().far(similarity, 15);
+        PrintMatch { similarity, far, condition: Condition::Clean, generation, windows: None }
     }
 
     /// Microsoft's v5 table around its FAR 1e-5 point (distance 0.350).
@@ -218,15 +255,29 @@ mod tests {
     }
 
     #[test]
+    fn condition_follows_the_probe_frame_and_is_recorded() {
+        assert_eq!(Condition::of(LightingStatus::Good), Condition::Clean);
+        assert_eq!(Condition::of(LightingStatus::Weak), Condition::Weak);
+        assert_eq!(Condition::of(LightingStatus::ClippedAround), Condition::Weak);
+        let table = crate::calibration::lfw_gray();
+        let template = Template::enrolled([emb(&[1.0, 0.0])]);
+        let weak = template.best_match(&emb(&[0.8, 0.6]), Condition::Weak, &table, None).unwrap();
+        let clean = template.best_match(&emb(&[0.8, 0.6]), Condition::Clean, &table, None).unwrap();
+        assert_eq!(weak.condition, Condition::Weak);
+        // One table per camera, as the five identical tables of the v5 model: the same FAR.
+        assert_eq!((weak.similarity, weak.far), (clean.similarity, clean.far));
+    }
+
+    #[test]
     fn best_match_is_the_max_over_prints() {
         let table = crate::calibration::lfw_gray();
         let template = Template::enrolled([emb(&[1.0, 0.0]), emb(&[0.0, 1.0]), emb(&[0.6, 0.8])]);
-        let m = template.best_match(&emb(&[0.0, 1.0]), &table, None).unwrap();
+        let m = template.best_match(&emb(&[0.0, 1.0]), Condition::Clean, &table, None).unwrap();
         assert!((m.similarity - 1.0).abs() < 1e-6);
         assert_eq!(m.far, table.far(m.similarity, 3));
         assert_eq!(m.generation, 0);
         assert_eq!(m.windows, None);
-        assert!(Template::default().best_match(&emb(&[1.0, 0.0]), &table, None).is_none());
+        assert!(Template::default().best_match(&emb(&[1.0, 0.0]), Condition::Clean, &table, None).is_none());
     }
 
     #[test]
@@ -237,21 +288,21 @@ mod tests {
         // ArcFace is sure (0.9); the Windows features of the two prints are at distance 0.5 and 0.3.
         let template = Template::enrolled([with(&[0.9, 0.436], &[0.5, 0.866]), with(&[1.0, 0.0], &[0.7, 0.714])]);
         let probe = with(&[1.0, 0.0], &[1.0, 0.0]);
-        let m = template.best_match(&probe, &table, Some(&windows)).unwrap();
+        let m = template.best_match(&probe, Condition::Clean, &table, Some(&windows)).unwrap();
         let w = m.windows.unwrap();
         assert!((w.distance - 0.3).abs() < 1e-3, "closest Windows feature, not the ArcFace-best print's");
         assert!(w.far < TARGET_FAR && m.far < TARGET_FAR && m.recognised());
         // Distance 0.5 alone: Microsoft's table says FAR > 1e-5, so the face is not recognised.
         let far = Template::enrolled([with(&[1.0, 0.0], &[0.5, 0.866])]);
-        let m = far.best_match(&probe, &table, Some(&windows)).unwrap();
+        let m = far.best_match(&probe, Condition::Clean, &table, Some(&windows)).unwrap();
         assert!(m.far < TARGET_FAR && m.windows.unwrap().far > TARGET_FAR && !m.recognised());
         assert!(!m.is_borderline());
         // No second opinion without Microsoft's table, without a probe feature, or against prints
         // without one; then ArcFace decides alone.
-        assert!(far.best_match(&probe, &table, None).unwrap().recognised());
-        assert!(far.best_match(&emb(&[1.0, 0.0]), &table, Some(&windows)).unwrap().recognised());
+        assert!(far.best_match(&probe, Condition::Clean, &table, None).unwrap().recognised());
+        assert!(far.best_match(&emb(&[1.0, 0.0]), Condition::Clean, &table, Some(&windows)).unwrap().recognised());
         let old = Template::enrolled([emb(&[1.0, 0.0])]);
-        let m = old.best_match(&probe, &table, Some(&windows)).unwrap();
+        let m = old.best_match(&probe, Condition::Clean, &table, Some(&windows)).unwrap();
         assert!(m.windows.is_none() && m.recognised());
     }
 
@@ -319,11 +370,12 @@ mod tests {
             template.prints.iter().filter(|p| p.source == PrintSource::OnFailure).map(|p| p.features[1]).collect();
         assert_eq!(kept, (1..=MAX_ON_FAILURE).map(|i| i as f32).collect::<Vec<_>>());
         let table = crate::calibration::lfw_gray();
-        let best = template.best_match(&emb(&[0.0, 1.0]), &table, None).unwrap();
+        let best = template.best_match(&emb(&[0.0, 1.0]), Condition::Clean, &table, None).unwrap();
         assert!(!template.augment(&emb(&[0.0, 1.0]), best));
         // The relaxed check can leave them out.
-        let enrolled =
-            template.best_match_where(&emb(&[0.0, 1.0]), &table, None, |p| p.source != PrintSource::OnFailure);
+        let enrolled = template.best_match_where(&emb(&[0.0, 1.0]), Condition::Clean, &table, None, |p| {
+            p.source != PrintSource::OnFailure
+        });
         assert_eq!(enrolled.unwrap().similarity, 0.0);
     }
 }

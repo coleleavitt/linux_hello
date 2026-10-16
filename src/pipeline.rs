@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use crate::calibration::CalibrationTable;
 use crate::camera::MAX_PAIR_GAP;
 use crate::lighting::{self, subtract_ambient, Lighting, LightingStatus};
+use crate::matcher::Condition;
 use crate::tracker::{iou, MIN_IOU};
 use crate::{
     gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
@@ -89,6 +90,8 @@ pub struct FacePipeline {
     store: FaceStore,
     /// Similarity → FAR for this camera (F51)
     calibration: CalibrationTable,
+    /// IR box → RGB frame, for the colour face of an IR face (F66)
+    registration: ColorRegistration,
     /// The faces of the last lit frame, for the ambient warp of the next pair (F13)
     previous: Vec<LitFace>,
 }
@@ -113,7 +116,16 @@ impl FacePipeline {
         let detector = FaceDetector::load(detector_path)?;
         let embedder = FaceEmbedder::load(embedder_path)?;
         let store = FaceStore::load(store_path)?;
-        Ok(Self { detector, embedder, liveness, windows: None, store, calibration, previous: Vec::new() })
+        Ok(Self {
+            detector,
+            embedder,
+            liveness,
+            windows: None,
+            store,
+            calibration,
+            registration: ColorRegistration::P16_GEN3,
+            previous: Vec::new(),
+        })
     }
 
     /// Add the Windows Hello anti-spoofing vote and the occlusion and frontal gates.
@@ -248,10 +260,12 @@ impl FacePipeline {
     /// Run every stage on one frame pair, for every analysed face. Faces are compared only with
     /// `user`'s template. The liveness models run on good-lighting faces only (the others cannot
     /// vote live); the RGB ones on the face of `rgb`, the frame captured alongside the pair, that
-    /// lies nearest (normalised centre) to the IR face.
+    /// corresponds to the IR face (F66); without one the colour net is skipped, as Windows skips
+    /// a classifier whose input is missing (F25 status 7).
     pub fn check(&mut self, user: &str, pair: &IrPair, rgb: Option<&RgbImage>) -> Result<FrameCheck> {
         let frame = [pair.lit.width(), pair.lit.height()];
         let analyses = self.analyze(pair)?;
+        let count = analyses.len();
         let good = analyses.iter().any(|a| a.print.is_some() && a.status() == Some(LightingStatus::Good));
         let rgb_faces = match rgb {
             Some(image) if good => self.detector.detect(image)?,
@@ -264,13 +278,17 @@ impl FacePipeline {
                 continue;
             };
             let windows_table = self.windows.as_ref().map(|w| &w.recognizer.calibration);
-            let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration, windows_table));
+            let condition = Condition::of(analysis.status().expect("a print has a lighting status"));
+            let best =
+                self.store.get(user).and_then(|t| t.best_match(print, condition, &self.calibration, windows_table));
             if analysis.status() != Some(LightingStatus::Good) {
                 let vote = Vote::from_evidence(false, None, None);
                 faces.push(FaceCheck { analysis, liveness: None, windows: None, vote, best });
                 continue;
             }
-            let rgb_face = rgb.and_then(|image| nearest(&rgb_faces, image, &analysis.face, frame).map(|f| (image, f)));
+            let rgb_face = rgb.and_then(|image| {
+                corresponding(&self.registration, &rgb_faces, &analysis.face, count).map(|f| (image, f))
+            });
             // The open RGB models stand in for Windows' colour net (slot 13). With the Windows Hello
             // models that net vetoes instead, so the RGB evidence is not counted twice (F24, F25).
             let open_rgb = self.windows.is_none() && !self.liveness.is_empty();
@@ -370,18 +388,69 @@ fn area(f: &Face) -> f32 {
     (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
 }
 
-/// The face of the RGB frame nearest to `ir_face` by box centre, each normalised by its frame
-/// size: the two cameras sit side by side with a similar field of view, and the frames are not
-/// registered to each other (`EvaluateColorFaceQuality` is not ported).
-fn nearest<'a>(rgb_faces: &'a [Face], rgb: &RgbImage, ir_face: &Face, ir_frame: [u32; 2]) -> Option<&'a Face> {
-    let centre =
-        |f: &Face, w: u32, h: u32| [(f.bbox[0] + f.bbox[2]) / 2.0 / w as f32, (f.bbox[1] + f.bbox[3]) / 2.0 / h as f32];
-    let [ix, iy] = centre(ir_face, ir_frame[0], ir_frame[1]);
-    let distance = |f: &Face| {
-        let [x, y] = centre(f, rgb.width(), rgb.height());
-        (x - ix) * (x - ix) + (y - iy) * (y - iy)
-    };
-    rgb_faces.iter().min_by(|a, b| distance(a).total_cmp(&distance(b)))
+/// Where an IR face lies in the RGB frame (F66): Windows maps the IR face box into the colour
+/// frame with a per-registration affine (`registrationAffinTransformData`, derived at run time
+/// from observed IR/colour face pairs); here a fixed scale and offset per axis, the cameras being
+/// built in side by side. [`ColorRegistration::P16_GEN3`] is the mean over the saved `watch_*`
+/// pairs of this laptop (`examples/color_pairs`, capture-and-liveness.md §5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorRegistration {
+    pub scale: [f32; 2],
+    pub offset: [f32; 2],
+}
+
+impl ColorRegistration {
+    /// ThinkPad P16 Gen 3, IR 640×360 to RGB 640×480: the least-squares fit of the box corners
+    /// over 148 saved pairs of the owner (x' = 0.912·x + 22.7, σ 3.3 px; y' = 0.896·y + 69.7,
+    /// σ 4.4 px). The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes.
+    pub const P16_GEN3: Self = Self { scale: [0.91, 0.90], offset: [23.0, 70.0] };
+
+    /// The IR box in RGB coordinates, grown by 7.5 % of its size on every side as Windows'
+    /// `registeredRect` (`Registration::GetAreaOfOverlap`).
+    pub fn map(&self, bbox: &[f32; 4]) -> [f32; 4] {
+        let [sx, sy] = self.scale;
+        let [tx, ty] = self.offset;
+        let [x1, y1, x2, y2] = [sx * bbox[0] + tx, sy * bbox[1] + ty, sx * bbox[2] + tx, sy * bbox[3] + ty];
+        let (gw, gh) = (REGISTERED_GROWTH * (x2 - x1), REGISTERED_GROWTH * (y2 - y1));
+        [x1 - gw, y1 - gh, x2 + gw, y2 + gh]
+    }
+}
+
+/// Growth of the registered IR box per side before the overlap (`GetAreaOfOverlap`: 0.075).
+const REGISTERED_GROWTH: f32 = 0.075;
+/// A colour face corresponds to the IR face when the overlap is at least this fraction of the
+/// smaller box (`lowOverlapping` below 0.55, F66).
+pub const MIN_COLOR_OVERLAP: f32 = 0.55;
+
+/// Intersection area of two boxes over the area of the smaller one (`percentOverlapped`).
+pub fn overlap(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let w = a[2].min(b[2]) - a[0].max(b[0]);
+    let h = a[3].min(b[3]) - a[1].max(b[1]);
+    if w <= 0.0 || h <= 0.0 {
+        return 0.0;
+    }
+    let area = |r: &[f32; 4]| (r[2] - r[0]) * (r[3] - r[1]);
+    w * h / area(a).min(area(b))
+}
+
+/// The colour face of `ir_face` (`FindCorrespondingFacesInColor`, F66): the RGB face overlapping
+/// the registered IR box most, if by at least [`MIN_COLOR_OVERLAP`]; otherwise, with one face in
+/// each frame, that face (Windows' pairing before it has a registration); otherwise none, and
+/// the colour net is skipped. `ir_faces` is the number of faces on the lit frame.
+fn corresponding<'a>(
+    registration: &ColorRegistration,
+    rgb_faces: &'a [Face],
+    ir_face: &Face,
+    ir_faces: usize,
+) -> Option<&'a Face> {
+    let mapped = registration.map(&ir_face.bbox);
+    let fraction = |f: &Face| overlap(&mapped, &f.bbox);
+    let best = rgb_faces.iter().max_by(|a, b| fraction(a).total_cmp(&fraction(b)))?;
+    if fraction(best) >= MIN_COLOR_OVERLAP {
+        return Some(best);
+    }
+    debug!(overlap = fraction(best), "colour face does not overlap the registered IR face");
+    (ir_faces == 1 && rgb_faces.len() == 1).then_some(best)
 }
 
 /// Gates that need the Windows Hello models, on `retina`, the Windows IR detector's face that overlaps
@@ -435,5 +504,42 @@ mod tests {
         assert_eq!(geometry_problem(&face([200.0, 5.0, 300.0, 230.0], 40.0), 640, 360), Some(FaceProblem::Edge));
         assert_eq!(geometry_problem(&face([200.0, 10.0, 300.0, 350.0], 40.0), 640, 360), None);
         assert_eq!(geometry_problem(&face([545.0, 100.0, 635.0, 230.0], 40.0), 640, 360), Some(FaceProblem::Edge));
+    }
+
+    #[test]
+    fn registration_maps_the_ir_box_onto_the_rgb_box() {
+        // watch_0014: SCRFD boxes of the IR and RGB frames (`examples/color_pairs`).
+        let ir = face([331.0, 165.0, 437.0, 305.0], 40.0);
+        let rgb = [328.0, 228.0, 422.0, 346.0];
+        let mapped = ColorRegistration::P16_GEN3.map(&ir.bbox);
+        assert!(overlap(&mapped, &rgb) > 0.95, "{mapped:?}");
+        // Grown by 7.5 % of the mapped size per side.
+        let unit = ColorRegistration { scale: [1.0, 1.0], offset: [0.0, 0.0] };
+        assert_eq!(unit.map(&[100.0, 100.0, 200.0, 300.0]), [92.5, 85.0, 207.5, 315.0]);
+        assert_eq!(overlap(&[0.0, 0.0, 10.0, 10.0], &[5.0, 0.0, 15.0, 10.0]), 0.5);
+        assert_eq!(overlap(&[0.0, 0.0, 10.0, 10.0], &[20.0, 0.0, 30.0, 10.0]), 0.0);
+        // Over the smaller box: a small box inside a large one overlaps fully.
+        assert_eq!(overlap(&[0.0, 0.0, 100.0, 100.0], &[10.0, 10.0, 20.0, 20.0]), 1.0);
+    }
+
+    #[test]
+    fn colour_face_is_the_overlapping_one_or_the_only_one() {
+        let reg = ColorRegistration { scale: [1.0, 1.0], offset: [0.0, 0.0] };
+        let ir = face([300.0, 100.0, 400.0, 230.0], 40.0);
+        let here = face([310.0, 110.0, 400.0, 225.0], 40.0);
+        let elsewhere = face([50.0, 100.0, 150.0, 230.0], 40.0);
+        let pick = |faces: &[Face], ir_faces| corresponding(&reg, faces, &ir, ir_faces).map(|f| f.bbox);
+        assert_eq!(pick(&[elsewhere.clone(), here.clone()], 1), Some(here.bbox));
+        assert_eq!(pick(std::slice::from_ref(&here), 2), Some(here.bbox));
+        // No face overlaps: with one face in each frame it is paired anyway, otherwise none.
+        assert_eq!(pick(std::slice::from_ref(&elsewhere), 1), Some(elsewhere.bbox));
+        assert_eq!(pick(std::slice::from_ref(&elsewhere), 2), None);
+        assert_eq!(pick(&[elsewhere.clone(), face([500.0, 100.0, 600.0, 230.0], 40.0)], 1), None);
+        assert_eq!(pick(&[], 1), None);
+        // Half a face away is still the same face (0.55 of the smaller box).
+        let shifted = face([350.0, 100.0, 450.0, 230.0], 40.0);
+        assert_eq!(pick(&[elsewhere.clone(), shifted.clone()], 2), Some(shifted.bbox));
+        let far = face([370.0, 100.0, 470.0, 230.0], 40.0);
+        assert_eq!(pick(&[elsewhere, far], 2), None);
     }
 }

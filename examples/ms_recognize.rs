@@ -17,7 +17,7 @@ use image::GrayImage;
 use linux_hello::calibration;
 use linux_hello::lighting::subtract_ambient;
 use linux_hello::ms_models::{MsRecognizer, MsRetinaDetector, RetinaModelType};
-use linux_hello::{gray_to_rgb, Embedding, Face, FaceDetector, FaceEmbedder, Template};
+use linux_hello::{gray_to_rgb, Condition, Embedding, Face, FaceDetector, FaceEmbedder, Template};
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -118,7 +118,8 @@ fn main() -> Result<()> {
         }
     }
     for (probe, name, template) in trials {
-        let m = template.best_match(&probe.print, &arcface, Some(windows)).context("empty template")?;
+        let m =
+            template.best_match(&probe.print, Condition::Clean, &arcface, Some(windows)).context("empty template")?;
         println!(
             "{}",
             json!({

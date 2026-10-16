@@ -35,7 +35,7 @@ pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
 pub use lighting::{Lighting, LightingStatus};
 pub use liveness::{LivenessSession, LivenessState, Vote};
-pub use matcher::{Print, PrintMatch, PrintSource, Template};
+pub use matcher::{Condition, Print, PrintMatch, PrintSource, Template};
 pub use ms_models::{FaceOrientation, IrFaceOrientation, LbfAligner, WindowsHelloModels};
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
