@@ -13,7 +13,8 @@ IR metadata (/dev/video3) ─ emitter on/off per frame ─┐
 IR camera (/dev/video2) ──────────────────────────────┴▶ lit + ambient frame pair
    lit frame ─▶ SCRFD face ─▶ size/edge/brightness gates ─▶ ArcFace on (lit − ambient) ─▶ best of the user's prints
 RGB camera (/dev/video0) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 (veto if mean P(real) < 0.5)
-   session: 4 prints + best similarity > 0.50 → recognised; then 2 live votes → MATCH, 3 spoof votes → reject; 16 pairs → give up
+   session: 4 prints + estimated FAR < 1e-5 (similarity ≈ 0.50) → recognised; then 2 live votes → MATCH, 3 spoof votes → reject
+            16 pairs → give up (once more if the face moved or the exposure changed); 4 occluded frames in a row → give up
 ```
 
 Details and the Windows Hello findings behind each step: [docs/capture-and-liveness.md](docs/capture-and-liveness.md).
@@ -29,11 +30,15 @@ Details and the Windows Hello findings behind each step: [docs/capture-and-liven
   the threshold); liveness votes count from then on. A good-lighting pair is a live vote; the RGB
   liveness models (trained on visible light) can veto it, which makes it a spoof vote. They are
   there to catch printed photos.
-- **Several prints per user:** enrollment keeps 5 prints; a probe matches on the closest one.
-  After a successful unlock with a borderline match the frame is added as an extra print (at most
-  10, at most 3 generations), so the template follows slow changes in appearance.
-- **Feedback:** a failed attempt says why (too dark, too bright, too far, at the edge, no face,
-  not live, not recognized).
+- **Several prints per user:** enrollment keeps 16 prints taken over a few seconds while you move
+  your head a little (near-identical frames do not count); `enroll --add` appends more (glasses,
+  other light) up to 100. A probe matches on the closest one, and the false-accept estimate is
+  charged for every print in the template. After a successful unlock with a borderline match the
+  frame is added as an extra print (at most 10, at most 3 generations), so the template follows
+  slow changes in appearance.
+- **Feedback:** a failed attempt says why (too dark, too bright, too far, at the edge, occluded,
+  not frontal, no face, not live, not recognized). Before giving up on a face that moved or whose
+  exposure changed, the session tries once more; a face covered for 4 frames in a row gives up at once.
 - **1:1 verification:** a face is only ever compared with the template of the user being
   authenticated, so one enrolled face cannot unlock another account.
 - **Two cameras at once:** works only if the RGB stream starts before the IR stream.
@@ -57,7 +62,8 @@ cargo build --release            # builds target/release/linux_hello and target/
 ## Use
 
 ```sh
-linux_hello enroll cole          # keeps 5 IR prints (each must pass the frame gates with good lighting)
+linux_hello enroll cole          # 16 IR prints over a few seconds (look at the camera, move a little); 10 s cap
+linux_hello enroll cole --add    # add prints to the existing template (e.g. with glasses on), up to 100
 linux_hello auth                 # verifies $USER: IR recognition, then liveness votes
 linux_hello watch --seconds 30   # logs every frame pair's scores, saves frames to /tmp/linux_hello_watch
 linux_hello camera               # saves one pair to /tmp/linux_hello_{lit,ambient,diff,rgb}.png
@@ -107,12 +113,12 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   evidence is only the lighting status, and the RGB models can only veto. A print or mask that
   reflects IR like skin passes the gate; the RGB veto has to catch it.
 - The head-pose and occlusion checks run only with the converted Windows Hello models
-  (`models/windows_hello/converted`, git-ignored); there is no face tracking across frames.
+  (`models/windows_hello/converted`, git-ignored); only the largest face is tracked across frames.
 - Ambient subtraction has no motion compensation (Windows warps with an affine transform); fast
   head movement between the two frames (67 ms) leaves edges in the difference image.
-- The similarity threshold is a raw cosine value (0.50), not a per-user false-accept estimate like
-  Windows' GFP. It was calibrated on grayscale LFW photos for a per-attempt FAR ≤ 1e-5
-  ([docs/calibration.md](docs/calibration.md)), not yet on IR captures.
+- The false-accept estimate behind the match decision (FAR < 1e-5 per attempt, charged for every
+  print in the template × 16 frame pairs) comes from a calibration table built on grayscale LFW
+  photos ([docs/calibration.md](docs/calibration.md)), not yet on IR captures.
 - The RGB camera underexposes 2–3 frames about every 5 s; `OpenCameras` skips frames much darker
   than the recent average, and a frame with no face in the RGB image counts as a veto.
 - Templates are stored unencrypted (root-only file) unless the store is sealed with the TPM
