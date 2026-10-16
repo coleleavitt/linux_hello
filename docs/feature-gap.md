@@ -38,7 +38,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | Partial: SCRFD per pair on the lit frame, largest face only, no tracking. The Windows IR Retina detector (MODEL_FILES_110, `MsRetinaDetector`) runs on the lit frame for the frontal check only; its box and landmarks are not used | Track id = IoU match between frames; needed for "same face" across pairing/votes |
-| 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | Partial: SCRFD 5 points | Enough for anchors (eyes, mouth); eye-contour box for brightness needs approximation from 5 points |
+| 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | Partial: SCRFD 5 points in the pipeline; Windows' 31 points are available from `LbfAligner` (bit-exact port) but not used yet | Use `LbfAligner` points for the F43 brightness box and the F13 anchors |
 | Recognition crop 3× box, ≤ 400 px, 8-bit lit luminance (F38) | Different: ArcFace 112×112 aligned crop from the RGB-converted IR frame | Keep ArcFace alignment; do subtraction on a 3× crop before aligning |
 | Face brightness = mean of 2×2-subsampled cheek/nose box (F43) | **Done** (approximation): box between eyes and mouth corners from SCRFD's 5 points (`lighting::face_brightness`) | — |
 | Exposure status: > 205 too bright, < 35 too dark, clipped pixels > 1 % → reject (F44, F45) | **Done** for 205/35 (rejected, no print, no vote); clipped-pixel statuses 6/7 Missing | Add saturated-pixel count (pixel = 255 or equal to ±2 neighbours) |
@@ -131,7 +131,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Face tracker with ids across frames (FaceTrackerInternal) | Missing | IoU tracker (needed by pairing, votes, min-prints) |
-| Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | Missing | `lbf.md` documents a converter (`pose.py`) |
+| Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | **Done** as API, not a gate: `LbfAligner` + `IrFaceOrientation` read resources 102, 104–107 and match the bit-exact Python reference exactly (lbf.md "Rust port"); it reads ~+25° yaw on frontal faces from this camera, so the frontal gate uses the Retina pose | Prior (tracking) path of the KNN regression, once a tracker exists |
 | Presence / wake-on-approach (WinBio presence monitor, `PresenceLifetimeInSeconds`) (F55) | N/A (no lock-screen integration) | Would need a long-running capture loop; power cost |
 | FaceBootstrapAdapter (virtual sensor `{063436EF-…}` bootstrap) | N/A (Windows WinBio plumbing) | — |
 | Hardware-model selection via OneSettings (`HardwareModelContainer`) (F51) | N/A | — |

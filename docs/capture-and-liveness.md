@@ -63,8 +63,9 @@ The frontal check uses the pose Windows uses: the 6-DoF output of its IR RetinaF
 docs/winhello-models/ldmf.md §7, §11). The detector runs on the whole lit frame (about 3 ms at 640×360) after the
 other gates. If it reports no face where SCRFD found one, the frame is rejected too: Windows tracks faces with
 this detector, so such a face would get no orientation there. The owner's frontal frames read |yaw| ≤ 5° and
-pitch −11…−15°. The legacy Windows estimator (LBF aligner + `IrFaceOrientation`, docs/winhello-models/lbf.md)
-is not a gate: it reads about +25° of yaw on frontal faces from this camera, so it would reject most real frames.
+pitch −11…−15°. The legacy Windows estimator (LBF aligner + `IrFaceOrientation`) is ported bit-exact
+(`LbfAligner`, `IrFaceOrientation`, docs/winhello-models/lbf.md) but is not a gate: it reads about +25° of yaw on
+frontal faces from this camera, so it would reject most real frames.
 
 ### 3. Face brightness and lighting status (F14, F43, F44)
 

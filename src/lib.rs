@@ -39,7 +39,7 @@ pub use tracker::{FaceTracker, Track, TrackState};
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{OcclusionDetector, OcclusionType, OcclusionResult};
 pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
-pub use ms_models::{FaceOrientation, HeadPose, PoseChecker, PoseConfig, WindowsHelloModels};
+pub use ms_models::{FaceOrientation, IrFaceOrientation, LbfAligner, WindowsHelloModels};
 
 use ort::environment::Environment;
 use serde::{Deserialize, Serialize};

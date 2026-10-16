@@ -9,6 +9,8 @@ mod prep;
 
 pub mod ir_liveness;
 
+pub mod lbf;
+
 pub mod occlusion;
 
 pub mod retina;
@@ -17,15 +19,17 @@ pub mod pose;
 
 pub use ir_liveness::{MsFrame, MsIrLiveness, MsModelScores};
 
+pub use lbf::{Alignment, LbfAligner};
+
 pub use occlusion::{OcclusionDetector, OcclusionType, OcclusionResult};
 
 pub use retina::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
 
-pub use pose::{HeadPose, PoseChecker, PoseConfig};
+pub use pose::IrFaceOrientation;
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 
 /// Load one converted Windows Hello model (ONNX or ORT format).
@@ -63,6 +67,68 @@ impl FaceOrientation {
     /// `IsFrontal` 0x18001a404: no flag set.
     pub fn is_frontal(&self) -> bool {
         !self.flags.contains(&true)
+    }
+}
+
+/// Little-endian reader for the original resource files.
+struct Reader {
+    data: Vec<u8>,
+    pos: usize,
+    path: std::path::PathBuf,
+}
+
+impl Reader {
+    fn open(path: &Path) -> Result<Self> {
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        Ok(Self { data, pos: 0, path: path.to_path_buf() })
+    }
+
+    fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let Some(bytes) = self.data.get(self.pos..self.pos + N) else {
+            bail!("{}: truncated at offset {}", self.path.display(), self.pos);
+        };
+        self.pos += N;
+        Ok(bytes.try_into().expect("N bytes"))
+    }
+
+    fn skip(&mut self, n: usize) -> Result<()> {
+        if self.pos + n > self.data.len() {
+            bail!("{}: truncated at offset {}", self.path.display(), self.pos);
+        }
+        self.pos += n;
+        Ok(())
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take::<1>()?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.take()?))
+    }
+
+    fn i16(&mut self) -> Result<i16> {
+        Ok(i16::from_le_bytes(self.take()?))
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take()?))
+    }
+
+    fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_le_bytes(self.take()?))
+    }
+
+    fn f32s(&mut self, n: usize) -> Result<Vec<f32>> {
+        (0..n).map(|_| self.f32()).collect()
+    }
+
+    /// Fail unless the whole file was read.
+    fn finish(self) -> Result<()> {
+        if self.pos != self.data.len() {
+            bail!("{}: {} trailing bytes", self.path.display(), self.data.len() - self.pos);
+        }
+        Ok(())
     }
 }
 
