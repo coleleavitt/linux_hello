@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 use linux_hello::authenticator::{describe, describe_skipped, observe, ENROLL_PRINTS};
 use linux_hello::lighting::subtract_ambient;
+use linux_hello::liveness::physics::{self, TrainedGate};
 use linux_hello::{
     calibration, daemon, sysfs, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras,
     Rotation, Session, Verdict, WindowsHelloModels,
@@ -60,6 +61,11 @@ struct Cli {
     /// genuine blink rate is measured on few recordings yet
     #[arg(long, global = true)]
     blink_challenge: bool,
+
+    /// Veto frames with the trained lighting gate, <models>/trained_gate.json from
+    /// tools/train_gate.py (docs/liveness-physics.md §8; trained on few recordings of one person)
+    #[arg(long, global = true)]
+    trained_gate: bool,
 
     /// Face store (default: /var/lib/linux_hello/faces.json as root, else ~/.local/share/linux_hello/faces.json)
     #[arg(long, env = "LINUX_HELLO_STORE", global = true)]
@@ -163,6 +169,11 @@ fn main() -> Result<()> {
         }
         Ok(pipeline.with_windows_hello(WindowsHelloModels::load(&dir)?))
     };
+    // The physics checks (docs/liveness-physics.md), with the trained gate when asked for.
+    let checks = || -> Result<Vec<Box<dyn linux_hello::Check + Send>>> {
+        let gate = cli.trained_gate.then(|| TrainedGate::load(format!("{models}/trained_gate.json"))).transpose()?;
+        Ok(physics::with_gate(gate))
+    };
     let current_user = || std::env::var("USER").unwrap_or_default();
 
     match cli.command {
@@ -170,8 +181,9 @@ fn main() -> Result<()> {
             let user = user.unwrap_or_else(current_user);
             let pipeline = pipeline(liveness()?)?;
             let start = Instant::now();
-            let verdict =
-                Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge }.verify(&user)?.verdict;
+            let verdict = Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge, checks: checks()? }
+                .verify(&user)?
+                .verdict;
             println!("{user}: {verdict} ({:.2} s)", start.elapsed().as_secs_f32());
             if !matches!(verdict, Verdict::Match { .. }) {
                 std::process::exit(1);
@@ -180,7 +192,7 @@ fn main() -> Result<()> {
 
         Commands::Enroll { user, frames, force, add } => {
             let pipeline = pipeline(Vec::new())?;
-            let mut auth = Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge };
+            let mut auth = Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge, checks: checks()? };
             println!(
                 "Look at the camera and move your head a little, as when talking to someone: \
                  {frames} prints are taken over a few seconds."
@@ -246,7 +258,7 @@ fn main() -> Result<()> {
         Commands::Daemon { socket, enroll_on_failure } => {
             let pipeline = pipeline(liveness()?)?;
             daemon::serve(
-                &mut Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge },
+                &mut Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge, checks: checks()? },
                 &socket,
                 enroll_on_failure,
             )?;
@@ -260,7 +272,7 @@ fn main() -> Result<()> {
             let mut cams = OpenCameras::open(&cameras.nodes()?, cameras.rotation)?;
             let mut session = Session::default();
             let mut history = Vec::new();
-            let mut checks = linux_hello::liveness::physics::all();
+            let mut checks = checks()?;
             let start = Instant::now();
             let mut n = 0;
             while start.elapsed().as_secs() < seconds {

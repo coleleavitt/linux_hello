@@ -555,7 +555,7 @@ pub fn describe(check: &FrameCheck, session: &Session) -> String {
 /// session's verdict, if any.
 pub fn observe(
     pipeline: &mut FacePipeline,
-    checks: &mut [Box<dyn Check>],
+    checks: &mut [Box<dyn Check + Send>],
     user: &str,
     capture: Capture,
     session: &mut Session,
@@ -579,6 +579,38 @@ pub fn observe(
     Ok((check, verdict))
 }
 
+/// The blink challenge (docs/liveness-physics.md §7): the match of `track` stands only if
+/// the face blinks within [`BLINK_PAIRS`] more pairs ([`physics::Blink`] scores
+/// [`physics::BLINK_RISE`] or more); otherwise the session ends `NOTLIVE`.
+#[allow(clippy::too_many_arguments)]
+fn await_blink(
+    pipeline: &mut FacePipeline,
+    cams: &mut OpenCameras,
+    checks: &mut [Box<dyn Check + Send>],
+    user: &str,
+    session: &mut Session,
+    history: &mut Vec<Observed>,
+    track: u32,
+    matched: Verdict,
+) -> Result<Verdict> {
+    info!(user, track, "blink challenge: the match leaned on the ambient limit without a sure glint");
+    for _ in 0..BLINK_PAIRS {
+        let capture = cams.capture()?;
+        let (check, _) = observe(pipeline, checks, user, capture, session, history)?;
+        cams.expose_on(check.largest().map(|f| &f.analysis.face));
+        info!(user, "{}", describe(&check, session));
+        let blinked = check.faces.iter().zip(session.attempts()).any(|(f, (id, _))| {
+            id == track && f.physics.iter().any(|(n, s)| n == "blink" && s.is_some_and(|s| s >= physics::BLINK_RISE))
+        });
+        if blinked {
+            info!(user, "blink seen");
+            return Ok(matched);
+        }
+    }
+    info!(user, "no blink within {BLINK_PAIRS} pairs");
+    Ok(Verdict::NotLive)
+}
+
 /// What [`Authenticator::verify`] found.
 pub struct Outcome {
     pub verdict: Verdict,
@@ -599,6 +631,8 @@ pub struct Authenticator {
     /// Confirm a match that leaned on `--max-ambient` without a sure glint by asking for a
     /// blink (`--blink-challenge`, docs/liveness-physics.md §7)
     pub blink_challenge: bool,
+    /// The physics checks scored on every pair ([`physics::with_gate`])
+    pub checks: Vec<Box<dyn Check + Send>>,
 }
 
 /// Pairs the blink challenge waits for a closure: ≈ 3 s at 7.5 pairs/s, two or three natural
@@ -646,14 +680,13 @@ impl Authenticator {
         }
         let mut cams = OpenCameras::open(&nodes, self.cameras.rotation)?;
         let mut reported = false;
-        let mut checks = physics::all();
+        let checks = &mut self.checks;
         let (mut verdict, mut session, mut history) = loop {
             let mut session = Session::default();
             let mut history = Vec::new();
             let verdict = loop {
                 let capture = cams.capture()?;
-                let (check, verdict) =
-                    observe(&mut self.pipeline, &mut checks, user, capture, &mut session, &mut history)?;
+                let (check, verdict) = observe(&mut self.pipeline, checks, user, capture, &mut session, &mut history)?;
                 cams.expose_on(check.largest().map(|f| &f.analysis.face));
                 info!(user, "{}", describe(&check, &session));
                 if !reported && session.recognised() {
@@ -673,7 +706,16 @@ impl Authenticator {
         if let (true, Verdict::Match { .. }, Some(track)) = (self.blink_challenge, verdict, session.decided_track()) {
             if physics::needs_blink(&history, track) {
                 on_event("blink");
-                verdict = self.await_blink(&mut cams, &mut checks, user, &mut session, &mut history, track, verdict)?;
+                verdict = await_blink(
+                    &mut self.pipeline,
+                    &mut cams,
+                    checks,
+                    user,
+                    &mut session,
+                    &mut history,
+                    track,
+                    verdict,
+                )?;
             }
         }
         drop(cams);
@@ -694,39 +736,6 @@ impl Authenticator {
             _ => None,
         };
         Ok(Outcome { verdict, failed_print })
-    }
-
-    /// The blink challenge (docs/liveness-physics.md §7): the match of `track` stands only if
-    /// the face blinks within [`BLINK_PAIRS`] more pairs ([`physics::Blink`] scores
-    /// [`physics::BLINK_RISE`] or more); otherwise the session ends `NOTLIVE`.
-    #[allow(clippy::too_many_arguments)]
-    fn await_blink(
-        &mut self,
-        cams: &mut OpenCameras,
-        checks: &mut [Box<dyn Check>],
-        user: &str,
-        session: &mut Session,
-        history: &mut Vec<Observed>,
-        track: u32,
-        matched: Verdict,
-    ) -> Result<Verdict> {
-        info!(user, track, "blink challenge: the match leaned on the ambient limit without a sure glint");
-        for _ in 0..BLINK_PAIRS {
-            let capture = cams.capture()?;
-            let (check, _) = observe(&mut self.pipeline, checks, user, capture, session, history)?;
-            cams.expose_on(check.largest().map(|f| &f.analysis.face));
-            info!(user, "{}", describe(&check, session));
-            let blinked = check.faces.iter().zip(session.attempts()).any(|(f, (id, _))| {
-                id == track
-                    && f.physics.iter().any(|(n, s)| n == "blink" && s.is_some_and(|s| s >= physics::BLINK_RISE))
-            });
-            if blinked {
-                info!(user, "blink seen");
-                return Ok(matched);
-            }
-        }
-        info!(user, "no blink within {BLINK_PAIRS} pairs");
-        Ok(Verdict::NotLive)
     }
 
     /// Enroll up to `wanted` prints from frame pairs that pass every frame gate with good lighting,

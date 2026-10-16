@@ -275,3 +275,33 @@ the matched track keeps the `MATCH`, otherwise the reply is `NOTLIVE`. In a dark
 **Attack set.** Not recorded yet.
 
 **Role.** Opt-in challenge; log-only otherwise.
+
+## 8. Trained lighting gate (`gate`, `--trained-gate`)
+
+**What.** A logistic regression over the checks above (`glint`, `shape`, `flicker`,
+`material`, `motion`, `parallax`) and the lighting numbers (`lit`, `ambient`, `d`), trained on
+labelled recordings and run as one more check that vetoes below its threshold.
+
+**Pipeline.** `examples/physics_replay` writes one JSON line per pair of a recording (the
+scores, the lighting numbers, the Windows frame total); `tools/train_gate.py --genuine … --attack
+… --out models/trained_gate.json` standardises the features, fits the regression (numpy
+gradient descent, classes balanced, L2), sets the threshold at the score that keeps 99 % of the
+genuine training pairs (`--genuine-accept`), and prints a leave-one-recording-out table: for
+every recording held out, the share of its pairs the gate trained on the others accepts. Pairs
+missing a feature (the first three of a session: no flicker or motion yet) are left out of
+training, and the gate abstains on them. `linux_hello --trained-gate` (global option) loads
+`<models>/trained_gate.json` (`physics::TrainedGate`), scores every face with a print
+(`gate=0.98` in the log) and takes the live vote away below the threshold; without the option
+the gate does not run. `physics_replay --gate <json>` scores a recording with it.
+
+**Numbers.** No attack recording exists yet, so no gate is trained or shipped; the file is not
+in the repository. A smoke test with a synthetic "attack" (the `lh_lock` scores with `shape` × 5
+and `glint` × 0.3) trained and loaded end to end (`physics_replay --gate`) and accepted 99–100 %
+of `lh_view`; it says nothing about real prints. When the attack set lands, this section gets
+the cross-validated table.
+
+**Caveat (honest).** The genuine side is one person, one camera, three café sittings and four
+dark-room frames; the attack side will be a handful of prints and screens made by the owner.
+A gate fitted on that separates those recordings, not prints in general: a different printer,
+paper or screen, or another user's face, is outside the data. Hence opt-in, and the physics
+checks' own numbers stay in the log next to it.

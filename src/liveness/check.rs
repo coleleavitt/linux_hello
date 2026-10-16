@@ -207,7 +207,8 @@ impl Check for Builtin {
 /// Every check the bench scores: the built-in ones, then the checks added since. A check that
 /// needs models takes them in its constructor and is added here with the models directory.
 pub fn all() -> Vec<Box<dyn Check>> {
-    Builtin::ALL.iter().map(|b| Box::new(*b) as Box<dyn Check>).chain(super::physics::all()).collect()
+    let physics = super::physics::all().into_iter().map(|c| c as Box<dyn Check>);
+    Builtin::ALL.iter().map(|b| Box::new(*b) as Box<dyn Check>).chain(physics).collect()
 }
 
 #[cfg(test)]

@@ -5,15 +5,22 @@
 //! with a [`Check::threshold`], set where no genuine recording loses more than 1 % of its good
 //! frames, and none has one yet (`VETO_THRESHOLDS`).
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use image::{GrayImage, RgbImage};
 
 use crate::lighting::{block_mean, LightingStatus, MAX_AMBIENT};
 use crate::liveness::check::{Check, Frame, Observed};
 use crate::{FaceCheck, Vote};
 
-/// The checks, in the order they are logged.
-pub fn all() -> Vec<Box<dyn Check>> {
+/// The checks of a session: [`all`] and, with `--trained-gate`, the gate after them.
+pub fn with_gate(gate: Option<TrainedGate>) -> Vec<Box<dyn Check + Send>> {
+    let mut checks = all();
+    checks.extend(gate.map(|g| Box::new(g) as Box<dyn Check + Send>));
+    checks
+}
+
+/// The model-free checks, in the order they are logged.
+pub fn all() -> Vec<Box<dyn Check + Send>> {
     vec![
         Box::new(Glint),
         Box::new(Shape),
@@ -28,7 +35,7 @@ pub fn all() -> Vec<Box<dyn Check>> {
 /// Score every check on every face of `check` that has a print, record the scores in
 /// [`FaceCheck::physics`] and, where a check has a threshold the face fails, take the frame's
 /// live vote away (−1 on Windows' frame total, as its colour net, F24: the frame abstains).
-pub fn apply(checks: &mut [Box<dyn Check>], frame: &Frame, check: &mut crate::FrameCheck) -> Result<()> {
+pub fn apply(checks: &mut [Box<dyn Check + Send>], frame: &Frame, check: &mut crate::FrameCheck) -> Result<()> {
     for (i, face) in check.faces.iter_mut().enumerate() {
         if face.analysis.print.is_none() {
             continue;
@@ -546,6 +553,96 @@ pub fn needs_blink(history: &[Observed], track: u32) -> bool {
     ambient && !sure
 }
 
+/// The trained lighting gate (`--trained-gate`, docs/liveness-physics.md §8): a logistic
+/// regression over the other checks' scores and the lighting numbers, trained by
+/// `tools/train_gate.py` on labelled recordings and read from `<models>/trained_gate.json`.
+/// Score = p(genuine); the file's threshold vetoes below it. It abstains when a feature is
+/// missing (the first pairs of a session have no flicker or motion).
+pub struct TrainedGate {
+    features: Vec<String>,
+    mean: Vec<f32>,
+    scale: Vec<f32>,
+    weights: Vec<f32>,
+    bias: f32,
+    threshold: f32,
+    /// The checks the features come from, run again here on the same frame
+    checks: Vec<Box<dyn Check + Send>>,
+}
+
+#[derive(serde::Deserialize)]
+struct GateFile {
+    features: Vec<String>,
+    mean: Vec<f32>,
+    scale: Vec<f32>,
+    weights: Vec<f32>,
+    bias: f32,
+    threshold: f32,
+}
+
+impl TrainedGate {
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let file: GateFile =
+            serde_json::from_reader(std::fs::File::open(path).with_context(|| path.display().to_string())?)?;
+        let n = file.features.len();
+        if file.mean.len() != n || file.scale.len() != n || file.weights.len() != n {
+            bail!(
+                "{}: {} features but {}/{}/{} mean/scale/weights",
+                path.display(),
+                n,
+                file.mean.len(),
+                file.scale.len(),
+                file.weights.len()
+            );
+        }
+        let checks: Vec<Box<dyn Check + Send>> =
+            all().into_iter().filter(|c| file.features.iter().any(|f| f == c.name())).collect();
+        for f in &file.features {
+            if !matches!(f.as_str(), "lit" | "ambient" | "d") && !checks.iter().any(|c| c.name() == f) {
+                bail!("{}: unknown feature {f}", path.display());
+            }
+        }
+        Ok(Self {
+            features: file.features,
+            mean: file.mean,
+            scale: file.scale,
+            weights: file.weights,
+            bias: file.bias,
+            threshold: file.threshold,
+            checks,
+        })
+    }
+}
+
+impl Check for TrainedGate {
+    fn name(&self) -> &str {
+        "gate"
+    }
+
+    fn threshold(&self) -> Option<f32> {
+        Some(self.threshold)
+    }
+
+    fn score(&mut self, frame: &Frame, face: usize) -> Result<Option<f32>> {
+        let lighting = frame.face(face).analysis.lighting;
+        let mut logit = self.bias;
+        for (i, feature) in self.features.iter().enumerate() {
+            let value = match feature.as_str() {
+                "lit" => lighting.map(|l| l.lit),
+                "ambient" => lighting.map(|l| l.ambient),
+                "d" => lighting.map(|l| l.gain()),
+                name => match self.checks.iter_mut().find(|c| c.name() == name) {
+                    Some(c) => c.score(frame, face)?,
+                    None => None,
+                },
+            };
+            let Some(value) = value else { return Ok(None) };
+            logit += (value - self.mean[i]) / self.scale[i] * self.weights[i];
+        }
+        Ok(Some(1.0 / (1.0 + (-logit).exp())))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,5 +740,34 @@ mod tests {
             (lid_ratio(&open, &frame(0, &[]), &POINTS).unwrap(), lid_ratio(&closed, &frame(0, &[]), &POINTS).unwrap());
         assert!(open < 0.7 && (closed - 1.0).abs() < 1e-6, "{open} {closed}");
         assert!(closed - open >= BLINK_RISE);
+    }
+
+    #[test]
+    fn trained_gate_reads_its_file_and_names_its_features() {
+        let dir = std::env::temp_dir().join(format!("trained_gate_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trained_gate.json");
+        std::fs::write(
+            &path,
+            r#"{"features":["glint","d"],"mean":[0.5,60.0],"scale":[0.2,10.0],"weights":[1.0,0.5],"bias":0.1,"threshold":0.4}"#,
+        )
+        .unwrap();
+        let gate = TrainedGate::load(&path).unwrap();
+        assert_eq!(gate.threshold(), Some(0.4));
+        assert_eq!(gate.checks.len(), 1);
+        std::fs::write(
+            &path,
+            r#"{"features":["nothing"],"mean":[0],"scale":[1],"weights":[1],"bias":0,"threshold":0.5}"#,
+        )
+        .unwrap();
+        let error = TrainedGate::load(&path).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(error.contains("unknown feature"), "{error}");
+        std::fs::write(
+            &path,
+            r#"{"features":["glint"],"mean":[0,1],"scale":[1],"weights":[1],"bias":0,"threshold":0.5}"#,
+        )
+        .unwrap();
+        assert!(TrainedGate::load(&path).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

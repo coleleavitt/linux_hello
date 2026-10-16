@@ -1,5 +1,6 @@
 //! Score the physics liveness checks (docs/liveness-physics.md) on saved recordings: one JSON
-//! line per pair with every check's score for the largest face, then a summary per recording
+//! line per pair with every check's score for the largest face (and its lighting numbers and
+//! Windows frame total, the input of `tools/train_gate.py`), then a summary per recording
 //! (count, min, 1st/10th/50th/90th percentiles, max per check, and each check's maximum over
 //! the recording's 16-pair sessions). The pipeline runs as in `watch`, with the Windows Hello
 //! models when `<models_dir>/windows_hello/converted` exists and no template (nothing matches).
@@ -8,7 +9,7 @@
 //! `NNNN_rgb.png`) or `validation_frames` (`ir_NN_lit.png` with `ir_(NN-1)_dark.png`;
 //! `watch_*_ir_lit.png` with `watch_*_rgb.png`, no ambient frame). Pairs are given the
 //! camera's timing (133 ms apart, ambient 67 ms before the lit frame).
-//! Usage: cargo run --release --example physics_replay -- [--max-ambient N] <recording_dir>... [--models <dir>]
+//! Usage: cargo run --release --example physics_replay -- [--max-ambient N] [--gate <trained_gate.json>] <recording_dir>... [--models <dir>]
 
 use anyhow::{Context, Result};
 use image::GrayImage;
@@ -65,6 +66,7 @@ fn percentile(sorted: &[f32], p: f32) -> f32 {
 
 fn main() -> Result<()> {
     let mut dirs = Vec::new();
+    let mut gate = None;
     let mut models = std::env::var("LINUX_HELLO_MODELS")
         .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/models").to_string());
     let mut args = std::env::args().skip(1);
@@ -72,11 +74,12 @@ fn main() -> Result<()> {
         match arg.as_str() {
             "--models" => models = args.next().context("--models <dir>")?,
             "--max-ambient" => linux_hello::lighting::set_max_ambient(args.next().context("--max-ambient N")?.parse()?),
+            "--gate" => gate = Some(args.next().context("--gate <trained_gate.json>")?),
             _ => dirs.push(PathBuf::from(arg)),
         }
     }
     if dirs.is_empty() {
-        anyhow::bail!("usage: physics_replay [--max-ambient N] <recording_dir>... [--models <dir>]");
+        anyhow::bail!("usage: physics_replay [--max-ambient N] [--gate <json>] <recording_dir>... [--models <dir>]");
     }
     let calibration = calibration::load(format!("{models}/calibration.json"), None)?;
     let store = std::env::temp_dir().join("physics_replay_empty_store.json");
@@ -91,7 +94,7 @@ fn main() -> Result<()> {
     if converted.exists() {
         pipeline = pipeline.with_windows_hello(WindowsHelloModels::load(&converted)?);
     }
-    let mut checks = physics::all();
+    let mut checks = physics::with_gate(gate.map(physics::TrainedGate::load).transpose()?);
 
     for dir in dirs {
         let mut session = Session::default();
@@ -112,9 +115,15 @@ fn main() -> Result<()> {
                 (None, Some(s)) => format!("{s:?}").to_lowercase(),
                 (None, None) => "-".to_string(),
             });
+            let lighting = face.and_then(|f| f.analysis.lighting);
             println!(
                 "{}",
-                serde_json::json!({ "n": n, "file": files.lit.file_name().unwrap().to_str(), "status": status, "scores": line })
+                serde_json::json!({
+                    "n": n, "file": files.lit.file_name().unwrap().to_str(), "status": status,
+                    "lit": lighting.map(|l| l.lit), "ambient": lighting.map(|l| l.ambient), "d": lighting.map(|l| l.gain()),
+                    "windows_total": face.and_then(|f| f.windows.as_ref()).map(|w| w.total),
+                    "scores": line,
+                })
             );
             if let Some(f) = face {
                 for (k, v) in &f.physics {
