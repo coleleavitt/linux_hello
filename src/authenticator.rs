@@ -95,7 +95,16 @@ impl OpenCameras {
     /// The RGB camera after its first frame, or `None` if that frame did not come within
     /// [`RGB_FRAME_TIMEOUT`].
     fn open_rgb(device: &str, rotation: Rotation) -> Result<Option<Camera>> {
-        let mut camera = Camera::open_with(device, CameraType::Rgb, 0, LIVENESS_BUFFERS)?;
+        // Another process (a webcam light meter, a video call) may hold the RGB camera; the colour
+        // net is then skipped for the session, as for a stalled camera.
+        let mut camera = match Camera::open_with(device, CameraType::Rgb, 0, LIVENESS_BUFFERS) {
+            Ok(camera) => camera,
+            Err(e) if camera::device_busy(&e) => {
+                warn!(device, "RGB camera busy: continuing without it (no colour-net veto)");
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
         camera.rotate(rotation);
         camera.set_timeout(RGB_FRAME_TIMEOUT);
         without_rgb_on_timeout(camera.skip(1).map(|()| camera), "no first RGB frame")

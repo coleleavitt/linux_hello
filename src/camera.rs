@@ -474,6 +474,11 @@ pub fn timed_out(error: &anyhow::Error) -> bool {
     error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::TimedOut))
 }
 
+/// Whether an open or capture error is `EBUSY`: another process holds the device.
+pub fn device_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e| e.raw_os_error() == Some(libc::EBUSY)))
+}
+
 /// Sum of every 5th pixel of every 5th row, like Windows' `FrameStrobe` (F15).
 fn brightness_sum(image: &GrayImage) -> u64 {
     image.rows().step_by(5).flat_map(|row| row.step_by(5)).map(|p| p.0[0] as u64).sum()
