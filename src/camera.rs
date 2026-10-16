@@ -250,9 +250,10 @@ impl IrPair {
         self.lit_at.abs_diff(self.ambient_at)
     }
 
-    /// The ambient frame, if it shows anything. This camera blanks its emitter-off frames (every
-    /// pixel ≤ 6 in every recording, day or night), so `lit − ambient` is the lit frame and not a
-    /// difference image; the anti-spoofing nets must then get the general-IR treatment (F42).
+    /// The ambient frame, if it shows anything. The emitter-off frame is a real readout, but indoors
+    /// it has held no light in every recording so far (every pixel ≤ 6; docs/camera.md), so
+    /// `lit − ambient` is the lit frame and not a difference image; the anti-spoofing nets then get
+    /// the general-IR treatment (F42).
     pub fn ambient_image(&self) -> Option<&GrayImage> {
         let mean = self.ambient.pixels().step_by(7).map(|p| u32::from(p[0])).sum::<u32>() as f32
             / self.ambient.pixels().step_by(7).count().max(1) as f32;

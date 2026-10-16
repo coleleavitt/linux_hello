@@ -46,7 +46,7 @@ Details and the Windows Hello findings behind each step: [docs/capture-and-liven
   exposure changed, the session tries once more; a face covered for 4 frames in a row gives up at once.
 - **1:1 verification:** a face is only ever compared with the template of the user being
   authenticated, so one enrolled face cannot unlock another account.
-- **Two cameras at once:** works only if the RGB stream starts before the IR stream.
+- **Two cameras at once:** the RGB stream is captured at 640×360; at 640×480 the frames arrive truncated while the IR stream runs (docs/capture-and-liveness.md §1).
 
 ## Components
 
@@ -126,9 +126,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
 
 ## Known limitations
 
-- This camera's emitter-off frames are blank, so there is no ambient image: the ambient subtraction
-  is a no-op and strong sunlight is not detected (Windows' ambient > 25 rule cannot fire). The
-  general-IR anti-spoofing net runs instead of the diffusion net (F42).
+- The emitter-off frames have been black in every recording so far (no 940 nm light indoors), so the
+  ambient subtraction is a no-op and the sunlight rule has not fired yet; the general-IR anti-spoofing
+  net runs instead of the diffusion net (F42). Direct sunlight is still to be measured (docs/camera.md).
 - Not yet tested against a real printed-photo or phone-screen attack.
 - The IR anti-spoofing vote, the head-pose gate and the occlusion gate run only with the converted
   Windows Hello models (`models/windows_hello/converted`, git-ignored, personal use). Without them
