@@ -126,6 +126,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
 
 ## Known limitations
 
+- This camera's emitter-off frames are blank, so there is no ambient image: the ambient subtraction
+  is a no-op and strong sunlight is not detected (Windows' ambient > 25 rule cannot fire). The
+  general-IR anti-spoofing net runs instead of the diffusion net (F42).
 - Not yet tested against a real printed-photo or phone-screen attack.
 - The IR anti-spoofing vote, the head-pose gate and the occlusion gate run only with the converted
   Windows Hello models (`models/windows_hello/converted`, git-ignored, personal use). Without them

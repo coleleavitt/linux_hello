@@ -236,7 +236,19 @@ impl IrPair {
     pub fn gap(&self) -> Duration {
         self.lit_at.abs_diff(self.ambient_at)
     }
+
+    /// The ambient frame, if it shows anything. This camera blanks its emitter-off frames (every
+    /// pixel ≤ 6 in every recording, day or night), so `lit − ambient` is the lit frame and not a
+    /// difference image; the anti-spoofing nets must then get the general-IR treatment (F42).
+    pub fn ambient_image(&self) -> Option<&GrayImage> {
+        let mean = self.ambient.pixels().step_by(7).map(|p| u32::from(p[0])).sum::<u32>() as f32
+            / self.ambient.pixels().step_by(7).count().max(1) as f32;
+        (mean > BLANK_AMBIENT).then_some(&self.ambient)
+    }
 }
+
+/// Mean pixel value (0–255) above which an ambient frame is taken to show the scene.
+pub const BLANK_AMBIENT: f32 = 1.0;
 
 /// One IR frame with its illumination flag.
 pub struct IrFrame {
@@ -671,6 +683,19 @@ pub fn find_ir_camera() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_ambient_frame_gives_no_ambient_image() {
+        let pair = |value: u8| IrPair {
+            lit: GrayImage::from_pixel(64, 36, image::Luma([100])),
+            ambient: GrayImage::from_pixel(64, 36, image::Luma([value])),
+            lit_at: Duration::from_millis(67),
+            ambient_at: Duration::ZERO,
+        };
+        assert!(pair(0).ambient_image().is_none());
+        assert!(pair(1).ambient_image().is_none());
+        assert!(pair(20).ambient_image().is_some());
+    }
 
     /// 41 `uvc_meta_buf` blocks recorded from /dev/video3 while /dev/video2 streamed: one
     /// header-only block, then 40 frames whose illumination flag alternates.

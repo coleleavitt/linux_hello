@@ -209,6 +209,15 @@ For good frames, recognition uses `diff = lit − min(lit, ambient)` per pixel, 
 emitter added. This removes sunlight and other ambient IR, so enrollment and unlock see the same
 lighting. Enrollment uses only good frames, so every enrolled print is a difference image.
 
+**This camera gives no ambient image.** Its emitter-off frames are blank (every pixel ≤ 6 of 255 in
+every recording, by day and by night), so on the P16 Gen 3 the subtraction is a no-op, the "ambient"
+brightness is always 0, and the sunlight rule (ambient > 25) can never fire: linux_hello is blind to
+ambient IR here. `IrPair::ambient_image` reports such a frame as absent (mean ≤ `BLANK_AMBIENT`), and
+the anti-spoofing nets then get the general-IR treatment of §5 instead of the difference-image one
+(F42). Measured 2026-10-16 in daylight, lying down: the diffusion net (slot 12) read p(real)
+0.38–0.47 on 74 frames of the owner (0 % live, every attempt `NOTLIVE`), the general net (slot 11)
+read 0.61 (100 % live); after the change 14 of 14 sessions matched.
+
 The ambient frame is first moved onto the lit one, as Windows does (`AdjustFaceForAmbientLight`,
 `RemoveAmbientLightFromFace`, F13, F40):
 

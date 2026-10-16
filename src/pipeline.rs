@@ -293,10 +293,11 @@ impl FacePipeline {
             // models that net vetoes instead, so the RGB evidence is not counted twice (F24, F25).
             let open_rgb = self.windows.is_none() && !self.liveness.is_empty();
             let liveness = open_rgb.then(|| self.rgb_liveness(rgb_face)).transpose()?;
-            // The Windows nets take Windows' landmarks for their crop (F23).
+            // The Windows nets take Windows' landmarks for their crop (F23). Without a usable ambient
+            // frame the crop is not a difference image, so the general IR net runs (F42).
             let face = analysis.windows_face.as_ref().unwrap_or(&analysis.face);
             let windows = match &mut self.windows {
-                Some(w) => Some(w.liveness.frame(&pair.lit, Some(&pair.ambient), face, rgb_face)?),
+                Some(w) => Some(w.liveness.frame(&pair.lit, pair.ambient_image(), face, rgb_face)?),
                 None => None,
             };
             let vote = Vote::from_evidence(true, liveness, windows.as_ref().map(|w| w.total));
