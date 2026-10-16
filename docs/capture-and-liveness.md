@@ -302,20 +302,21 @@ The earliest possible `MATCH` is therefore at the 5th pair (4 prints, the 4th fr
 the 5th too), where voting from the first pair allowed a match at the 2nd pair.
 
 **Re-attempt (F49).** Before a session ends in `NOMATCH` or `NOTLIVE` (at the pair limit or by three
-spoof votes), it checks what the tracked face did over the attempt's frames, as Windows'
+spoof votes), it checks what the deciding track's face did over the attempt's frames, as Windows'
 `sub_1800575E0` does for a track about to become a guest. If the face moved — the range of its box
 centre, normalised by the frame width and height, has ((Δx)² + (Δy)²) / 2 > 0.01 (about 0.14 of
 the frame), or its box width changed by more than 20 % — or the exposure changed — the standard
 deviation of the last 10 lit face brightness values (§3, including rejected too-dark/too-bright
 frames) is above 12 — the session gets another 16 pairs with fresh counters for the track (prints,
-best similarity, votes), once per session (`ReAttemptRecognitionByMovement`,
+best similarity, votes), once per track, as Windows (`ReAttemptRecognitionByMovement`,
 `ReAttemptRecognitionByExposure`). A still face in steady light is rejected at the 16th pair as
-before; `NOFACE` is never re-attempted (nothing was recognised). The motion record starts over
-with a new track, so a photo replacing the owner does not inherit the owner's movement. Windows
-also refuses the re-attempt after more than one "too many saturated pixels" frame; linux_hello
-has no saturated-pixel count (F44 status 6/7), so that part is left out. A re-attempted session
-reads up to 32 pairs, ≈ 4.3 s at 15 fps plus the ≈ 0.5 s start-up, within the PAM module's 10 s
-timeout.
+before; `NOFACE` is never re-attempted (nothing was recognised). Each track keeps its own motion
+record, so a photo replacing the owner does not inherit the owner's movement; it can earn a
+re-attempt of its own if it reaches a verdict, so a session can run past 32 pairs only when
+another track decides it. Windows also refuses the re-attempt after more than one "too many
+saturated pixels" frame; linux_hello has no saturated-pixel count (F44 status 6/7), so that part
+is left out. A re-attempted session reads up to 32 pairs, ≈ 4.3 s at 15 fps plus the ≈ 0.5 s
+start-up, within the PAM module's 10 s timeout.
 
 Checked on saved frames (`validation_frames`): five consecutive lit frames of one sitting keep one
 track (boxes move ≤ 2 px); the owner's frames from another sitting, 110 px higher, and the stranger

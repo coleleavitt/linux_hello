@@ -114,7 +114,8 @@ pub const MAX_PAIRS: u32 = 16;
 /// `IdentifyAsGuest(3)`): a mask or a hand will not go away within the pair budget.
 pub const OCCLUDED_GIVE_UP: u32 = 4;
 
-/// One authentication: up to [`MAX_PAIRS`] frame pairs, once more after a re-attempt (F49). Every
+/// One authentication: up to [`MAX_PAIRS`] frame pairs, once more after a re-attempt (F49, once per
+/// track). Every
 /// analysed face is tracked across pairs by place and by print ([`FaceTracker`]) and each track
 /// gets its own [`Attempt`] (F37, F47), so the prints and votes of one face never count for
 /// another (the owner's face, then a photo held up next to it or in its place). The verdict comes
@@ -128,9 +129,8 @@ pub struct Session {
     current: Vec<u32>,
     /// The track whose attempt gave the verdict
     decided: Option<u32>,
-    /// Pairs since the session, or the re-attempt, started
+    /// Pairs since the session, or the last re-attempt, started
     pairs: u32,
-    reattempted: bool,
     /// Rejection reasons of the largest face over the whole session, for `NOFACE <reason>`
     problems: HashMap<FaceProblem, u32>,
 }
@@ -143,6 +143,8 @@ struct Track {
     motion: FaceMotion,
     /// Consecutive occluded frames
     occluded: u32,
+    /// Whether the track has had its re-attempt (F49: once per track)
+    reattempted: bool,
 }
 
 impl Session {
@@ -184,13 +186,14 @@ impl Session {
         let verdict = verdict.or_else(|| (self.pairs >= MAX_PAIRS).then(|| self.give_up()));
         match verdict {
             Some((id, verdict @ (Verdict::NoMatch { .. } | Verdict::NotLive)))
-                if !self.reattempted && self.tracks[&id].motion.changed() =>
+                if !self.tracks[&id].reattempted && self.tracks[&id].motion.changed() =>
             {
-                let motion = &self.tracks[&id].motion;
+                let track = self.tracks.get_mut(&id).expect("decided");
+                let motion = &track.motion;
                 info!(?verdict, track = id, moved = motion.moved(), exposure = motion.exposure_changed(), "re-attempt");
-                self.reattempted = true;
+                track.reattempted = true;
+                track.attempt = Attempt::default();
                 self.pairs = 0;
-                self.tracks.get_mut(&id).expect("decided").attempt = Attempt::default();
                 None
             }
             Some((id, verdict)) => {
@@ -217,9 +220,9 @@ impl Session {
         }
     }
 
-    /// Whether the re-attempt (F49) has been used.
+    /// Whether any track has had its re-attempt (F49).
     pub fn reattempted(&self) -> bool {
-        self.reattempted
+        self.tracks.values().any(|t| t.reattempted)
     }
 
     /// The track of each face of the last pair, in face order, with its attempt.
@@ -250,8 +253,8 @@ const REATTEMPT_SIZE_CHANGE: f32 = 0.2;
 const REATTEMPT_BRIGHTNESS_SIGMA: f32 = 12.0;
 const BRIGHTNESS_WINDOW: usize = 10;
 
-/// Movement and exposure of the tracked face over an attempt, for the one re-attempt a session
-/// gets before it ends in `NOMATCH` or `NOTLIVE` (F49): the face may have been recognised had
+/// Movement and exposure of the tracked face over an attempt, for the one re-attempt a track
+/// gets before it ends the session in `NOMATCH` or `NOTLIVE` (F49): the face may have been recognised had
 /// it held still, or the camera may have been adjusting its exposure. Windows also skips the
 /// re-attempt after too many saturated frames; linux_hello has no saturated-pixel count (F44
 /// status 6/7 are not implemented), so that condition is left out.
@@ -826,6 +829,29 @@ mod tests {
             settled.add(&usable(Vote::Live, 0.3));
         }
         assert_eq!(settled.add(&usable(Vote::Live, 0.3)), Some(Verdict::NoMatch { similarity: 0.3 }));
+    }
+
+    #[test]
+    fn each_track_reattempts_once() {
+        // The owner's track re-attempts at the pair limit; a photo held up next (its own track,
+        // moving) gets a re-attempt of its own at the next limit, and none after that.
+        let mut s = Session::default();
+        for i in 0..MAX_PAIRS {
+            assert_eq!(s.add(&usable_at(shifted(10.0 * i as f32), Vote::Live, 0.3)), None);
+        }
+        assert!(s.reattempted());
+        let photo = |i: u32| {
+            let dx = 10.0 * i as f32;
+            stranger_at([PHOTO[0] + dx, PHOTO[1], PHOTO[2] + dx, PHOTO[3]], Vote::Live, 0.35)
+        };
+        for i in 0..MAX_PAIRS {
+            assert_eq!(s.add(&photo(i)), None);
+        }
+        assert_eq!(attempt(&s).prints, 0, "the photo's track re-attempted");
+        for i in 1..MAX_PAIRS {
+            assert_eq!(s.add(&photo(MAX_PAIRS + i)), None);
+        }
+        assert_eq!(s.add(&photo(2 * MAX_PAIRS)), Some(Verdict::NoMatch { similarity: 0.35 }));
     }
 
     #[test]
