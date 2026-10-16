@@ -3,9 +3,14 @@
 set -eu
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 
-for svc in sudo sudo-i; do
+for svc in sudo sudo-i swaylock system-local-login su polkit-1; do
     f=/etc/pam.d/$svc
     [ -f "$f" ] && grep -q pam_linux_hello "$f" || continue
+    if head -n1 "$f" | grep -q 'created by linux_hello'; then
+        rm "$f"
+        echo "removed $f (created by install.sh)"
+        continue
+    fi
     grep -v pam_linux_hello "$f" > "$f.new" && chmod 644 "$f.new" && mv "$f.new" "$f"
     echo "removed face line from $f"
 done

@@ -1,14 +1,30 @@
 //! `pam_linux_hello.so`: asks the `linux_hello daemon` over its Unix socket whether the
 //! person at the camera is the user being authenticated.
 //!
-//! Module arguments: `socket=PATH` (default `/run/linux_hello.sock`), `timeout=SECONDS` (default 10).
+//! Module arguments: `socket=PATH` (default `/run/linux_hello.sock`), `timeout=SECONDS` (default
+//! 10), `wait_services=NAME,NAME,...` (default `swaylock,login`).
 //!
 //! Face login is skipped (PAM_IGNORE) for remote sessions: SSH_CONNECTION/SSH_TTY set or PAM_RHOST set.
 //!
+//! The behaviour depends on the PAM service (`PAM_SERVICE`, the name the application passed to
+//! `pam_start`). For a service in `wait_services`, a lock screen or a console login where the
+//! user has just asked to be let in, the module asks the daemon for a presence wait
+//! (`AUTH <user> <timeout>`): the daemon looks for the face for up to `timeout` seconds, keeping
+//! the cameras open between sessions. For every other service (`sudo`, `su`, `polkit-1`, ...)
+//! the daemon runs one session (`AUTH <user>`), 2–4.5 s. Windows keeps tracking until the UI
+//! stops it (F55, F57); the 120 s after which its lock screen asks for a confirmation (F56) has
+//! no counterpart here because the lock screen only runs PAM once the user submits.
+//!
+//! The daemon's reply may go on with `NOTICE <text>` lines (an enroll-on-failure addition since
+//! the last check, five `NOMATCH` in a row); each is shown as PAM_TEXT_INFO after the verdict's
+//! message.
+//!
 //! Return codes are chosen for `auth sufficient pam_linux_hello.so` placed before the password
 //! modules: a match returns PAM_SUCCESS; a face that is wrong, spoofed or missing returns
-//! PAM_AUTH_ERR and prints a short reason (`NOFACE too_dark` → "Face too dark: ..."); anything that means "face login is not available" (daemon down, user not
-//! enrolled, lid closed over a built-in camera, bad reply) returns PAM_IGNORE. Either way the stack falls through to the password.
+//! PAM_AUTH_ERR and prints a short reason (`NOFACE too_dark` → "Face too dark: ..."); anything
+//! that means "face login is not available" (daemon down or busy, user not enrolled, lid closed
+//! over a built-in camera, bad reply) returns PAM_IGNORE. Either way the stack falls through to
+//! the password.
 //!
 //! Enroll-on-failure (F31, when the daemon runs with `--enroll-on-failure`): a `NOMATCH` reply with
 //! a token is remembered in this PAM transaction (`pam_set_data`). If the application then calls
@@ -52,7 +68,12 @@ extern "C" {
 
 const LOG_NOTICE: c_int = 5;
 const PAM_TEXT_INFO: c_int = 4;
+const PAM_SERVICE: c_int = 1;
 const PAM_RHOST: c_int = 4;
+/// How much longer than the presence wait the module waits for the reply: the session running
+/// at the deadline finishes first (up to 16 pairs, ≈ 2–4.5 s), and a single session (no wait)
+/// takes as long.
+const REPLY_MARGIN: Duration = Duration::from_secs(10);
 const PAM_ESTABLISH_CRED: c_int = 0x2;
 const PAM_REINITIALIZE_CRED: c_int = 0x8;
 /// `pam_set_data` name of `"<user> <token>"` after a `NOMATCH` with an enroll-on-failure token.
@@ -81,18 +102,26 @@ pub extern "C" fn pam_sm_setcred(pamh: *mut PamHandle, flags: c_int, argc: c_int
 
 struct Args {
     socket: String,
-    timeout: Duration,
+    /// The presence wait of the services in `wait_services`
+    timeout: u64,
+    wait_services: Vec<String>,
 }
 
 fn args(argc: c_int, argv: *const *const c_char) -> Args {
-    let mut args = Args { socket: "/run/linux_hello.sock".into(), timeout: Duration::from_secs(10) };
+    let mut args = Args {
+        socket: "/run/linux_hello.sock".into(),
+        timeout: 10,
+        wait_services: vec!["swaylock".into(), "login".into()],
+    };
     for i in 0..argc.max(0) as usize {
         // SAFETY: PAM passes `argc` valid NUL-terminated strings.
         let arg = unsafe { CStr::from_ptr(*argv.add(i)) }.to_string_lossy();
         if let Some(path) = arg.strip_prefix("socket=") {
             args.socket = path.to_string();
         } else if let Some(secs) = arg.strip_prefix("timeout=").and_then(|s| s.parse().ok()) {
-            args.timeout = Duration::from_secs(secs);
+            args.timeout = secs;
+        } else if let Some(names) = arg.strip_prefix("wait_services=") {
+            args.wait_services = names.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
         }
     }
     args
@@ -121,11 +150,15 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
     };
     message(pamh, c"Looking for your face...");
 
-    let reply = ask(stream, &format!("AUTH {user}"), args.timeout);
+    let service = item(pamh, PAM_SERVICE).unwrap_or_default();
+    let wait = args.wait_services.contains(&service);
+    let request = if wait { format!("AUTH {user} {}", args.timeout) } else { format!("AUTH {user}") };
+    let mut lines = ask(stream, &request, Duration::from_secs(if wait { args.timeout } else { 0 }) + REPLY_MARGIN);
+    let reply = if lines.is_empty() { String::new() } else { lines.remove(0) };
 
-    log(pamh, &format!("pam_linux_hello: user={user} reply={reply:?}"));
+    log(pamh, &format!("pam_linux_hello: service={service} user={user} request={request:?} reply={reply:?}"));
     let mut words = reply.split_whitespace();
-    match words.next() {
+    let result = match words.next() {
         Some("MATCH") => PAM_SUCCESS,
         Some(word @ ("NOMATCH" | "NOTLIVE" | "NOFACE")) => {
             // `NOMATCH <similarity> <token>`: the daemon keeps this face for enroll-on-failure.
@@ -140,8 +173,19 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
             message(pamh, c"Face login not available: the lid is closed");
             PAM_IGNORE
         }
+        Some("BUSY") => {
+            message(pamh, c"Face login not available: another program is using the camera");
+            PAM_IGNORE
+        }
         _ => PAM_IGNORE,
+    };
+    // `NOTICE <text>` lines after the verdict: things the daemon wants the user to know.
+    for notice in lines.iter().filter_map(|l| l.strip_prefix("NOTICE ")) {
+        if let Ok(text) = CString::new(notice) {
+            message(pamh, &text);
+        }
     }
+    result
 }
 
 /// A short hint for a failed face check. The daemon's reply is the verdict word, then for
@@ -162,15 +206,14 @@ fn failure_message(reply: &str) -> &'static CStr {
     }
 }
 
-/// Send one request line and read the one-line reply; empty on any error.
-fn ask(mut stream: UnixStream, request: &str, timeout: Duration) -> String {
-    (|| -> std::io::Result<String> {
+/// Send one request line and read the reply lines until the daemon closes the connection;
+/// empty on any error.
+fn ask(mut stream: UnixStream, request: &str, timeout: Duration) -> Vec<String> {
+    (|| -> std::io::Result<Vec<String>> {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         writeln!(stream, "{request}")?;
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line)?;
-        Ok(line.trim_end().to_string())
+        BufReader::new(stream).lines().collect()
     })()
     .unwrap_or_default()
 }
@@ -188,7 +231,7 @@ fn report_password_success(pamh: *mut PamHandle, args: Args) {
     remember_failure(pamh, None);
     let Some((user, token)) = saved.split_once(' ') else { return };
     let Ok(stream) = UnixStream::connect(&args.socket) else { return };
-    let reply = ask(stream, &format!("ENROLL_ON_FAILURE {user} {token}"), Duration::from_secs(5));
+    let reply = ask(stream, &format!("ENROLL_ON_FAILURE {user} {token}"), Duration::from_secs(5)).concat();
     log(pamh, &format!("pam_linux_hello: enroll-on-failure user={user} reply={reply:?}"));
     if reply.starts_with("ADDED ") {
         message(pamh, c"Face print added after password login");
@@ -212,10 +255,15 @@ fn is_remote(pamh: *mut PamHandle) -> bool {
     if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
         return true;
     }
-    let mut rhost: *const c_void = ptr::null();
-    // SAFETY: PAM_RHOST is a C string item owned by libpam, or NULL when unset.
-    let ok = unsafe { pam_get_item(pamh, PAM_RHOST, &mut rhost) } == PAM_SUCCESS;
-    ok && !rhost.is_null() && !unsafe { CStr::from_ptr(rhost.cast()) }.to_bytes().is_empty()
+    item(pamh, PAM_RHOST).is_some_and(|rhost| !rhost.is_empty())
+}
+
+/// A string item of the PAM handle (`PAM_SERVICE`, `PAM_RHOST`), `None` when unset.
+fn item(pamh: *mut PamHandle, item_type: c_int) -> Option<String> {
+    let mut value: *const c_void = ptr::null();
+    // SAFETY: string items are C strings owned by libpam, or NULL when unset.
+    let ok = unsafe { pam_get_item(pamh, item_type, &mut value) } == PAM_SUCCESS;
+    (ok && !value.is_null()).then(|| unsafe { CStr::from_ptr(value.cast()) }.to_string_lossy().into_owned())
 }
 
 fn message(pamh: *mut PamHandle, text: &CStr) {
