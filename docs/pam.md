@@ -1,6 +1,8 @@
 # Face login through PAM: sudo, screen lock, polkit, su, console login
 
-Status: the module and the daemon are tested with real libpam as a normal user
+Status: a `NOFACE` session whose last pair had no face at all used to panic the daemon
+(`Session::decided` indexed a track that did not exist; fixed on 2026-10-16, with the daemon now
+surviving a panicked request). The module and the daemon are tested with real libpam as a normal user
 (`pam_start_confdir`, `scripts/pam_harness.py`, stub daemon) for every service below, and the
 daemon's access control and presence wait with the daemon running as a user on a scratch socket
 and the real cameras. The live `sudo` path is tested end to end; `swaylock` and `polkit` live
@@ -142,7 +144,8 @@ and `BUSY` at once.
 | Another request running (`BUSY`) | `PAM_IGNORE` → password, message (libpam test with a stub daemon) | 0 s |
 | `SSH_CONNECTION` / `SSH_TTY` / `PAM_RHOST` set | `PAM_IGNORE` → password | 0 s |
 | Nobody at the camera, `sudo` | `PAM_AUTH_ERR` → password | up to ~2–3 s |
-| Nobody at the camera, lock screen | `NOFACE` sessions until `timeout`, then `PAM_AUTH_ERR` → password | `timeout` + up to one session (not measured live: the owner was at the camera) |
+| Nobody at the camera, lock screen (`AUTH cole 6`, frames rotated 180° so that no face is found) | three `NOFACE` sessions back to back, then `NOFACE no_face` → `PAM_AUTH_ERR` → password | 7.2 s (6 s + the session running at the deadline) |
+| Nobody at the camera, one session (same setup, `AUTH cole`) | `NOFACE no_face` | 2.8 s |
 
 ## Install / remove
 

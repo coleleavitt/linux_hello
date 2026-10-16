@@ -279,9 +279,10 @@ impl Session {
         self.current.iter().map(|id| (*id, &self.tracks[id].attempt))
     }
 
-    /// The attempt of the track that gave the verdict.
+    /// The attempt of the track that gave the verdict; `None` for a `NOFACE` without any track
+    /// in the last pair.
     pub fn decided(&self) -> Option<&Attempt> {
-        self.decided.map(|id| &self.tracks[&id].attempt)
+        self.decided.and_then(|id| self.tracks.get(&id)).map(|t| &t.attempt)
     }
 
     /// The enroll-on-failure candidate (F31) of a session that saw only one face: Windows aborts
@@ -857,6 +858,17 @@ mod tests {
             .collect();
         assert!(verdicts[..MAX_PAIRS as usize - 1].iter().all(Option::is_none));
         assert_eq!(verdicts.last().unwrap(), &Some(Verdict::NoFace { problem: FaceProblem::TooDark }));
+    }
+
+    #[test]
+    fn no_face_at_all_decides_without_a_track() {
+        let mut s = Session::default();
+        for _ in 1..MAX_PAIRS {
+            assert_eq!(s.add(&rejected(FaceProblem::NoFace)), None);
+        }
+        assert_eq!(s.add(&rejected(FaceProblem::NoFace)), Some(Verdict::NoFace { problem: FaceProblem::NoFace }));
+        assert!(s.decided().is_none());
+        assert!(s.failed_print().is_none());
     }
 
     #[test]

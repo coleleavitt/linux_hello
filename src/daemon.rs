@@ -121,7 +121,12 @@ fn answer(state: &Mutex<State>, mut stream: UnixStream) {
                 info!(peer, "busy: another request is using the cameras");
                 Ok("BUSY".to_string())
             }
-            Err(TryLockError::Poisoned(e)) => bail!("daemon state poisoned: {e}"),
+            // A request that panicked (printed by the panic hook) closed its cameras on unwind;
+            // the models and the store are still usable.
+            Err(TryLockError::Poisoned(e)) => {
+                warn!("the previous request panicked; carrying on");
+                handle(&mut e.into_inner(), &request)
+            }
         }
     });
     let reply = reply.unwrap_or_else(|e| {
