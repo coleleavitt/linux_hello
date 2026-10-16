@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Run pam_linux_hello.so through real libpam against a stub daemon, without root or a camera.
 
-Usage: pam_harness.py <libpam_linux_hello.so> <socket path> '<reply>|<reply>...'
+Usage: pam_harness.py <libpam_linux_hello.so> <socket path> '<reply>|<reply>...' [service [module args...]]
 
 Writes a one-off PAM service (`auth sufficient <module>`, then `pam_permit` standing in for the
 password) under /tmp, serves the given daemon replies one per connection on the socket, then calls
 pam_start_confdir, pam_authenticate and pam_setcred(PAM_ESTABLISH_CRED). Prints the requests the
-stub received and every conversation message (style, text). Example (docs/sudo.md):
+stub received and every conversation message (style, text). `service` is the PAM service name the
+module sees (default `lhtest`; `swaylock`, `polkit-1`, `su`, ... to check the per-service
+behaviour), and any further arguments go on the module's line. Examples (docs/pam.md):
 
     pam_harness.py target/debug/libpam_linux_hello.so /tmp/lh.sock 'NOMATCH 0.430 tok|ADDED 0.432'
+    pam_harness.py target/debug/libpam_linux_hello.so /tmp/lh.sock 'NOFACE no_face' swaylock timeout=5
 """
 import ctypes
 import os
@@ -18,10 +21,12 @@ import threading
 import time
 
 sofile, sock, replies = sys.argv[1], sys.argv[2], sys.argv[3].split("|")
+service = sys.argv[4] if len(sys.argv) > 4 else "lhtest"
+module_args = " ".join(sys.argv[5:])
 confdir = "/tmp/pam_linux_hello_harness"
 os.makedirs(confdir, exist_ok=True)
-with open(f"{confdir}/lhtest", "w") as f:
-    f.write(f"auth sufficient {os.path.abspath(sofile)} socket={sock}\nauth required pam_permit.so\n")
+with open(f"{confdir}/{service}", "w") as f:
+    f.write(f"auth sufficient {os.path.abspath(sofile)} socket={sock} {module_args}\nauth required pam_permit.so\n")
 
 received = []
 
@@ -82,7 +87,7 @@ callback = CONV(conv)
 pam_conv = PamConv(callback, None)
 pamh = ctypes.c_void_p()
 user = os.environ.get("USER", "nobody").encode()
-print("pam_start_confdir", libpam.pam_start_confdir(b"lhtest", user, ctypes.byref(pam_conv), confdir.encode(), ctypes.byref(pamh)))
+print("pam_start_confdir", libpam.pam_start_confdir(service.encode(), user, ctypes.byref(pam_conv), confdir.encode(), ctypes.byref(pamh)))
 print("pam_authenticate", libpam.pam_authenticate(pamh, 0))
 print("pam_setcred(ESTABLISH)", libpam.pam_setcred(pamh, 0x2))
 libpam.pam_end(pamh, 0)

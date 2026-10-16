@@ -11,7 +11,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| IR camera found by sensor-group / FaceAuth profile, hidden from apps (F4, F6) | Done (different mechanism): CLI `--device` (default `/dev/video2`) and `--ir-metadata` (default `/dev/video3`); `find_ir_camera` (unused) probes by card name | Optional: match by USB VID:PID / `V4L2_CAP_META_CAPTURE` sibling instead of name |
+| IR camera found by sensor-group / FaceAuth profile, hidden from apps (F4, F6) | **Done** (by USB id instead of the INF): `--camera vid:pid`, default the first of `KNOWN_IR_CAMERAS` present (`30c9:00f3`); at every request `camera::find_cameras` reads sysfs and `VIDIOC_QUERYCAP`/`ENUM_FMT`: the IR node is the greyscale (`GREY`) capture node of that USB device, the metadata node the `META_CAPTURE` node on the same USB interface, the RGB camera the colour capture node of the same device (here `/dev/video2`, `/dev/video3`, `/dev/video0`); unknown id → card-name probe with a warning. Not hidden from apps (no Linux equivalent) | — |
 | IR format = first FaceAuth format; warn < 7.5 fps or < 340 px (F7) | Partial: `camera.rs` asks 640×480 GREY then YUYV; driver gives 640×360 | Read back the actual format and refuse/ warn below 340 px or 7.5 fps |
 | Emitter alternate-frame mode via `FACEAUTH_MODE` = 2 (F8, F9, F16, F17) | N/A on this camera: the IR function strobes by itself and has no MSXU face-auth control (L1, L4, L5) | Only needed for other cameras: UVC XU `{0F3F95DC…}` selector 6 via `UVCIOC_CTRL_QUERY` |
 | Per-frame lit/unlit flag from `MF_CAPTURE_METADATA_FRAME_ILLUMINATION` (F10, F19) | **Done**: `IrCamera` reads `UVCM` metadata from `/dev/video3` (item 6, `Flags & 1`), paired with video by sequence; frames without a flag are dropped (L2, L3) | — |
@@ -104,18 +104,19 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| WinBio presence monitor, capture every 125 ms, no service timeout; UI ends the session (F2, F55, F57) | Different: daemon on demand per PAM request, up to 16 frame pairs, PAM timeout 10 s | Optional: time-based budget |
-| Auto-logon confirmation after 120 s on the lock screen; switch timeout 10 s (F56) | N/A (sudo only; screen lock on hold per docs/README.md) | Relevant once a screen locker is supported |
-| Remote-session suppression | Done: PAM ignores `SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST` | — |
+| WinBio presence monitor, capture every 125 ms, no service timeout; UI ends the session (F2, F55, F57) | **Done** for the lock screen and console login (`pam.md`): `AUTH <user> <seconds>` → `Authenticator::verify_within` runs sessions back to back with the cameras open while they end in `NOFACE`, until the deadline (PAM `timeout=`, default 10 s; daemon cap 120 s); `NOMATCH`/`NOTLIVE` end it. sudo/polkit/su keep one session. Capture runs at the camera's 15 fps rather than every 125 ms | — |
+| Auto-logon confirmation after 120 s on the lock screen; switch timeout 10 s (F56) | **Done** by construction: swaylock runs PAM only when the user submits (Enter), so the confirmation key press always comes first and the presence wait (default 10 s, the switch timeout) starts from it; the daemon's 120 s wait cap is the same figure | — |
+| Remote-session suppression | Done: PAM ignores `SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST`; the installer never touches `system-login`, `system-remote-login` or `sshd` | — |
 | Lid-closed / external-camera suppression (`IsLidClosedScenario`, `ShouldForbidExternalCameras`) | **Done**: `verify` first refuses with `UNAVAILABLE lid_closed` (PAM: ignore, password) when an ACPI lid reports closed and the IR camera is built in (its USB device's sysfs `removable` is `fixed`; unknown counts as built in). `/dev/video2` here: `fixed` | — |
-| Daemon down → password (PAM_IGNORE) | Done | — |
+| Daemon down → password (PAM_IGNORE) | Done; also `BUSY` (another request has the cameras) and `ERROR` | — |
+| Access from the user's session (the credential provider runs in LogonUI; WinBio is a system service with per-client sessions) | **Done**: the socket is world-connectable for the lock screen's PAM child (runs as the user); `SO_PEERCRED` limits a non-root peer to `AUTH` of its own account, `ENROLL_ON_FAILURE` to root, one request at a time (`pam.md`, "Who may ask") | — |
 
 ## User feedback & telemetry
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Feedback reasons: too close/far, too bright/dark, too much ambient, backlight, occluded, large pose (F45, F46) | **Done** for too dark/bright/far, clipped (too close / lamp), edge, occluded, not frontal, no face, not live, not recognized (`NOFACE <reason>` reply, PAM `PAM_TEXT_INFO`); ambient Missing | — |
-| Notifications: improve recognition, liveness suggestion, get help (days intervals) (F56) | N/A | — |
+| Notifications: improve recognition, liveness suggestion, get help (days intervals) (F56) | **Partial**: improve recognition after every 5th `NOMATCH` in a row (`FAILURES_PER_NOTICE`) and a notice after an enroll-on-failure addition, as `NOTICE` lines of the next reply shown by the PAM module (`PAM_TEXT_INFO`; swaylock shows none) and `warn` logs; counted per daemon run, not per days. Liveness suggestion and get-help: Missing | Interval-based reminders if wanted |
 | Extensive telemetry (per-frame decisions, GFP, counts) | Partial: `watch` command, tracing logs | Log gate reasons and vote counts per session |
 
 ## Multi-user & multi-camera
@@ -123,7 +124,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Multiple tracked faces, multiple enrolled users, best-user assignment (F47, F48) | **Done** for tracked faces: the 3 largest faces of each pair are analysed and tracked, one `Attempt` each; the verdict comes from the user's track (the recognised one, else the best match), and the user is recognised on a track only if no other face in the pair matches better. Multiple enrolled users: N/A by design (1:1 for the requested user) | Optionally reject if a second face is present (shoulder-surfer case) |
-| Sensor allow-list, device watcher, camera re-selection (`SensorAllowListManager`, `SensorEnumeration`) | Partial: fixed device paths / CLI | udev-based discovery |
+| Sensor allow-list, device watcher, camera re-selection (`SensorAllowListManager`, `SensorEnumeration`) | **Done** (per request instead of a watcher): `camera::KNOWN_IR_CAMERAS` is the allow-list (USB `vid:pid`; the first one present is the default, `--camera` overrides); the nodes are re-selected from sysfs at every request, so a camera re-plugged or renumbered between requests is found without a udev watcher. A camera unplugged during a request fails that request (`ERROR`, PAM falls through to the password) | A udev watcher only if a request should survive a re-plug |
 | Per-hardware calibration tables (F51, F60) | **Done** (structure): `models/calibration.json` maps the IR camera's USB `vid:pid` (sysfs `idVendor:idProduct`, `sysfs::usb_id`; here `30c9:00f3`) to a named table, with a default for unlisted cameras; the only ArcFace table is the LFW one. Microsoft's v5 table (five identical per-hardware-model copies) is loaded for the second opinion, first hardware model | An IR-calibrated table per camera; Windows' hardware-model ids are not mapped to cameras (cefa.md §8) |
 
 ## Anything else
@@ -132,7 +133,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 |---|---|---|
 | Face tracker with ids across frames (FaceTrackerInternal) | **Done** for the 3 largest faces of each pair (`src/tracker.rs`): a face continues the free track whose last box it overlaps best. Addition: a print below cosine 0.50 (`SAME_FACE_SIMILARITY`) to the track's last print cannot continue it, so a photo held where the face was starts a new attempt; Windows tracks by geometry alone. Faces beyond the 3 largest are not analysed (≈ 35 ms per analysed face per pair) | — |
 | Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | **Done** as API, not a gate: `LbfAligner` + `IrFaceOrientation` read resources 102, 104–107 and match the bit-exact Python reference exactly (lbf.md "Rust port"); it reads ~+25° yaw on frontal faces from this camera, so the frontal gate uses the Retina pose | Prior (tracking) path of the KNN regression, now that a tracker exists |
-| Presence / wake-on-approach (WinBio presence monitor, `PresenceLifetimeInSeconds`) (F55) | N/A (no lock-screen integration) | Would need a long-running capture loop; power cost |
+| Presence / wake-on-approach (WinBio presence monitor, `PresenceLifetimeInSeconds`) (F55) | Partial: the presence wait above runs only after a key press at the lock screen; no capture while locked and idle (power, and swaylock has no hook for it) | A long-running capture loop and a locker that unlocks on a signal |
 | FaceBootstrapAdapter (virtual sensor `{063436EF-…}` bootstrap) | N/A (Windows WinBio plumbing) | — |
 | Hardware-model selection via OneSettings (`HardwareModelContainer`) (F51) | N/A | — |
 | Data retention of up to 3 raw frames (feature `FaceDataRetention`) (F32) | Partial: `watch` saves frames to `/tmp` on request | Keep off by default |

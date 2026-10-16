@@ -74,10 +74,12 @@ linux_hello watch --seconds 30   # logs every frame pair's scores, saves frames 
 linux_hello camera               # saves one pair to /tmp/linux_hello_{lit,ambient,diff,rgb}.png
 ```
 
-Flags: `--device` (IR, default `/dev/video2`), `--ir-metadata` (default `/dev/video3`),
-`--no-ir-metadata` (tell lit frames by brightness), `--liveness-device` (default `/dev/video0`),
-`--no-liveness` (no RGB veto; the lighting status still votes), `--rotate 0|90|180|270` (turn the
-frames of a sideways or upside-down camera upright, counter-clockwise), `--store`.
+Flags: `--camera vid:pid` (the IR camera by USB id; default: the first known IR camera present,
+`30c9:00f3` on this ThinkPad; its IR, metadata and RGB nodes are looked up in sysfs at every
+request, so renumbering or re-plugging is followed; see [docs/capture-and-liveness.md](docs/capture-and-liveness.md#1-litambient-pairs-f10-f12-f13-f15-l1l3)),
+`--no-ir-metadata` (tell lit frames by brightness), `--no-liveness` (no RGB veto; the lighting
+status still votes), `--rotate 0|90|180|270` (turn the frames of a sideways or upside-down camera
+upright, counter-clockwise), `--store`.
 The face store is `/var/lib/linux_hello/faces.json` as root, `~/.local/share/linux_hello/faces.json`
 otherwise; it is written atomically with mode 0600.
 
@@ -88,11 +90,16 @@ or `sudo contrib/install.sh` for the system store). There is no conversion.
 ## Install (as root)
 
 ```sh
-sudo contrib/install.sh      # installs, enrolls $SUDO_USER, enables face login for sudo and sudo -i
+sudo contrib/install.sh      # installs, enrolls $SUDO_USER, enables face login for sudo, swaylock, polkit, su and console login
+sudo contrib/install.sh --no-lock --no-polkit --no-login --no-su   # any subset; sudo always
 sudo contrib/uninstall.sh    # undo (add --purge to delete the face store)
 ```
 
-Details, flow and caveats: [docs/sudo.md](docs/sudo.md). Face login is skipped for SSH sessions
+sudo, polkit and su get one face session; the lock screen (swaylock) and console login get a
+presence wait of up to 10 s after Enter (`timeout=`, `wait_services=` module arguments). The
+daemon's socket is open to local users, who may only ask about themselves and cannot obtain a
+credential; the PAM stack grants. Details, flow, what each application shows and caveats:
+[docs/pam.md](docs/pam.md). Face login is skipped for SSH sessions
 (`SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST`), because the camera sees whoever sits at the laptop.
 
 ## TPM sealing (optional)

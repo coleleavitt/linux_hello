@@ -26,8 +26,23 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
 
 ### 1. Lit/ambient pairs (F10, F12, F13, F15, L1–L3)
 
+**Which nodes (F4).** Windows finds the IR sensor through its INF (`30C9:00F3 MI_02` is a
+`KSCATEGORY_SENSOR_CAMERA`, F4) and the WinBio sensor allow-list. linux_hello takes the IR camera's
+USB id (`--camera vid:pid`, default the first of `camera::KNOWN_IR_CAMERAS` present: `30c9:00f3`)
+and, at every request (`CameraSetup::nodes` → `camera::find_cameras`), reads
+`/sys/class/video4linux/video*` and asks each node `VIDIOC_QUERYCAP` and `VIDIOC_ENUM_FMT`: the IR
+node is the video-capture node of that USB device offering the 8-bit greyscale format `GREY`, its
+metadata node the `META_CAPTURE` node on the same USB interface (sysfs `device` link), and the RGB
+camera the colour-only capture node of the same device. On this ThinkPad that is `/dev/video2`
+(interface 1.2, `GREY` only), `/dev/video3` (interface 1.2, metadata) and `/dev/video0` (interface
+1.0, `MJPG`/`YUYV`). Looking up at every request follows a renumbering or a re-plug between
+requests; it costs four `open`+`ioctl` pairs. An id with no such device falls back to the card-name
+probe (`find_ir_camera`, "ir"/"infrared" in the name) with a warning; on this machine the names are
+truncated (`Integrated Camera: Integrated I`), so the probe finds nothing and the request fails
+with `no IR camera found`.
+
 The IR emitter lights every other frame by itself (L1). The camera's uvcvideo metadata node
-(`/dev/video3`, `--ir-metadata`) carries Microsoft's `MetadataId_FrameIllumination` item for every
+(`/dev/video3` here) carries Microsoft's `MetadataId_FrameIllumination` item for every
 frame (L2, L3); this is the same signal Windows reads as `InfraredMediaFrame.IsIlluminated` (F10).
 
 - `linux_hello` sets the node's format to `UVCM` (`V4L2_META_FMT_UVC_MSXU_1_5`) before streaming;
@@ -92,6 +107,16 @@ angle from its ACPI `_PLD` (or the `OrientationCW` registry override), not by th
 orientation (F63); linux_hello has no automatic source either: this ThinkPad has no IIO
 accelerometer (`/sys/bus/iio` is absent) and no iio-sensor-proxy, so the angle is the option only.
 Default 0; the built-in camera of this laptop needs none.
+
+**Presence wait (F55, F57).** Windows runs face as a WinBio presence monitor with no service
+timeout; the UI ends the session. `Authenticator::verify` is one session (up to 16 pairs, plus a
+re-attempt). `Authenticator::verify_within(user, deadline)`, used by the daemon for
+`AUTH <user> <seconds>` (lock screen, console login; [pam.md](pam.md)), keeps the cameras open
+and runs sessions back to back while they end in `NOFACE` (any reason, `not_frontal` included)
+and the deadline has not passed; the session running at the deadline finishes. `NOMATCH` and
+`NOTLIVE` end the wait at once, so a wrong face gets exactly the single session plus its one
+re-attempt (F49). Between sessions the tracker starts over; the camera keeps its exposure, so the
+second session needs no warm-up (L7). The daemon caps the wait at 120 s.
 
 ### 2. Frame gates (F45, F46)
 

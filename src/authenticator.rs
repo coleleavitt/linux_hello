@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::camera::{self, Rotation};
+use crate::camera::{self, CameraNodes, Rotation};
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::pipeline::{Analysis, FaceCheck};
@@ -42,15 +42,28 @@ fn brightness(image: &RgbImage) -> f32 {
 }
 
 pub struct CameraSetup {
-    /// IR camera used for recognition
-    pub device: String,
-    /// uvcvideo metadata node of the IR camera, for the per-frame illumination flag. Without it,
-    /// the brighter of two consecutive frames is taken as the lit one.
-    pub ir_metadata: Option<String>,
-    /// RGB camera for the liveness models (they only work on visible light)
-    pub liveness_device: Option<String>,
+    /// USB `vid:pid` of the IR camera, `None` for the first of [`camera::KNOWN_IR_CAMERAS`] present
+    pub camera: Option<String>,
+    /// Read the IR camera's uvcvideo metadata node for the per-frame illumination flag. Without
+    /// it, the brighter of two consecutive frames is taken as the lit one.
+    pub ir_metadata: bool,
+    /// Use the RGB camera for the liveness models (they only work on visible light)
+    pub liveness: bool,
     /// Rotation that turns both cameras' frames upright (F10)
     pub rotation: Rotation,
+}
+
+impl CameraSetup {
+    /// The device nodes to open now ([`camera::find_cameras`]: looked up at every call, so a
+    /// camera renumbered or re-plugged between requests is followed), less the ones not wanted.
+    pub fn nodes(&self) -> Result<CameraNodes> {
+        let nodes = camera::find_cameras(self.camera.as_deref())?;
+        Ok(CameraNodes {
+            ir_metadata: nodes.ir_metadata.filter(|_| self.ir_metadata),
+            rgb: nodes.rgb.filter(|_| self.liveness),
+            ..nodes
+        })
+    }
 }
 
 /// One IR frame pair and, if configured, the RGB frame captured right after it.
@@ -68,14 +81,13 @@ pub struct OpenCameras {
 }
 
 impl OpenCameras {
-    pub fn open(setup: &CameraSetup) -> Result<Self> {
+    pub fn open(nodes: &CameraNodes, rotation: Rotation) -> Result<Self> {
         // IR first: alone, its stream delivers the first frame in ≈ 90 ms. The RGB stream's
         // first frame takes ≈ 245 ms when it starts first and ≈ 50 ms after the IR stream
         // (docs/capture-and-liveness.md §1).
-        let mut ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
-        ir.rotate(setup.rotation);
-        let liveness =
-            setup.liveness_device.as_deref().map(|d| Self::open_rgb(d, setup.rotation)).transpose()?.flatten();
+        let mut ir = IrCamera::open(&nodes.ir, nodes.ir_metadata.as_deref())?;
+        ir.rotate(rotation);
+        let liveness = nodes.rgb.as_deref().map(|d| Self::open_rgb(d, rotation)).transpose()?.flatten();
         Ok(Self { ir, liveness, rgb_level: None })
     }
 
@@ -267,9 +279,10 @@ impl Session {
         self.current.iter().map(|id| (*id, &self.tracks[id].attempt))
     }
 
-    /// The attempt of the track that gave the verdict.
+    /// The attempt of the track that gave the verdict; `None` for a `NOFACE` without any track
+    /// in the last pair.
     pub fn decided(&self) -> Option<&Attempt> {
-        self.decided.map(|id| &self.tracks[&id].attempt)
+        self.decided.and_then(|id| self.tracks.get(&id)).map(|t| &t.attempt)
     }
 
     /// The enroll-on-failure candidate (F31) of a session that saw only one face: Windows aborts
@@ -524,23 +537,44 @@ impl Authenticator {
     /// template if it was a borderline match (F53) and save the store. After `NOMATCH`, return
     /// the session's enroll-on-failure candidate.
     pub fn verify(&mut self, user: &str) -> Result<Outcome> {
-        if lid::lid_closed() && lid::built_in(&self.cameras.device) {
+        self.run(user, None)
+    }
+
+    /// [`Self::verify`] as a presence wait for a lock screen or console login (F55, F57: Windows
+    /// keeps tracking until the UI stops it): sessions run back to back with the cameras kept
+    /// open while they end in `NOFACE` (nobody there yet, face turned away) and `deadline` has
+    /// not passed; the session running at the deadline finishes. A wrong or spoofed face ends the
+    /// wait as it ends a single check, so a stranger gets no more tries than with `sudo`.
+    pub fn verify_within(&mut self, user: &str, deadline: Instant) -> Result<Outcome> {
+        self.run(user, Some(deadline))
+    }
+
+    fn run(&mut self, user: &str, deadline: Option<Instant>) -> Result<Outcome> {
+        let nodes = self.cameras.nodes()?;
+        if lid::lid_closed() && lid::built_in(&nodes.ir) {
             return Ok(Verdict::LidClosed.into());
         }
         if !self.pipeline.is_enrolled(user) {
             return Ok(Verdict::NotEnrolled.into());
         }
-        let mut cams = OpenCameras::open(&self.cameras)?;
-        let mut session = Session::default();
-        let verdict = loop {
-            let capture = cams.capture()?;
-            let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
-            cams.expose_on(check.largest().map(|f| &f.analysis.face));
-            let verdict = session.add(&check);
-            info!(user, "{}", describe(&check, &session));
-            if let Some(verdict) = verdict {
-                break verdict;
+        let mut cams = OpenCameras::open(&nodes, self.cameras.rotation)?;
+        let (verdict, session) = loop {
+            let mut session = Session::default();
+            let verdict = loop {
+                let capture = cams.capture()?;
+                let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+                cams.expose_on(check.largest().map(|f| &f.analysis.face));
+                let verdict = session.add(&check);
+                info!(user, "{}", describe(&check, &session));
+                if let Some(verdict) = verdict {
+                    break verdict;
+                }
+            };
+            let waiting = deadline.is_some_and(|d| Instant::now() < d);
+            if !(waiting && matches!(verdict, Verdict::NoFace { .. })) {
+                break (verdict, session);
             }
+            info!(user, %verdict, "no usable face yet; next session");
         };
         drop(cams);
         let augmentation = session.decided().and_then(Attempt::augmentation);
@@ -593,7 +627,8 @@ impl Authenticator {
         };
         let existing = collected.len();
         let mut skipped: BTreeMap<&'static str, u32> = BTreeMap::new();
-        let mut ir = IrCamera::open(&self.cameras.device, self.cameras.ir_metadata.as_deref())?;
+        let nodes = self.cameras.nodes()?;
+        let mut ir = IrCamera::open(&nodes.ir, nodes.ir_metadata.as_deref())?;
         ir.rotate(self.cameras.rotation);
         self.pipeline.set_enrolling(true);
         let start = Instant::now();
@@ -829,6 +864,17 @@ mod tests {
             .collect();
         assert!(verdicts[..MAX_PAIRS as usize - 1].iter().all(Option::is_none));
         assert_eq!(verdicts.last().unwrap(), &Some(Verdict::NoFace { problem: FaceProblem::TooDark }));
+    }
+
+    #[test]
+    fn no_face_at_all_decides_without_a_track() {
+        let mut s = Session::default();
+        for _ in 1..MAX_PAIRS {
+            assert_eq!(s.add(&rejected(FaceProblem::NoFace)), None);
+        }
+        assert_eq!(s.add(&rejected(FaceProblem::NoFace)), Some(Verdict::NoFace { problem: FaceProblem::NoFace }));
+        assert!(s.decided().is_none());
+        assert!(s.failed_print().is_none());
     }
 
     #[test]
