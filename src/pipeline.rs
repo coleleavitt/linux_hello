@@ -27,6 +27,8 @@ const EDGE_MARGIN_EYES: f32 = 0.2;
 /// What a frame pair gives for recognition.
 #[derive(Debug, Clone)]
 pub struct Analysis {
+    /// Width and height of the IR frame, to normalise face positions (F49)
+    pub frame: [u32; 2],
     /// Largest face, detected on the lit frame
     pub face: Option<Face>,
     /// The same face as the Windows IR detector reports it (box and five points), when the
@@ -132,9 +134,11 @@ impl FacePipeline {
     /// with, F58); without them SCRFD's box and points stand in. The ambient frame is moved onto the
     /// lit one before it is measured and subtracted (F13, F40).
     pub fn analyze(&mut self, pair: &IrPair) -> Result<Analysis> {
+        let frame = [pair.lit.width(), pair.lit.height()];
         let faces = self.detector.detect_gray(&pair.lit)?;
         let Some(face) = faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))) else {
             return Ok(Analysis {
+                frame,
                 face: None,
                 windows_face: None,
                 lighting: None,
@@ -144,7 +148,7 @@ impl FacePipeline {
         };
         let rejected = |face, windows_face, lighting, problem| {
             debug!(?problem, ?lighting, "frame rejected");
-            Ok(Analysis { face: Some(face), windows_face, lighting, problem: Some(problem), print: None })
+            Ok(Analysis { frame, face: Some(face), windows_face, lighting, problem: Some(problem), print: None })
         };
         if let Some(problem) = geometry_problem(&face, pair.lit.width(), pair.lit.height()) {
             return rejected(face, None, None, problem);
@@ -174,7 +178,14 @@ impl FacePipeline {
             _ => pair.lit.clone(),
         };
         let print = self.embedder.embed_face(&gray_to_rgb(&image), &face)?;
-        Ok(Analysis { face: Some(face), windows_face, lighting: Some(lighting), problem: None, print: Some(print) })
+        Ok(Analysis {
+            frame,
+            face: Some(face),
+            windows_face,
+            lighting: Some(lighting),
+            problem: None,
+            print: Some(print),
+        })
     }
 
     /// The ambient frame moved onto the lit one (`AdjustFaceForAmbientLight`, F13): the face's anchors

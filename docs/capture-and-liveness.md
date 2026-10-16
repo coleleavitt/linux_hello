@@ -19,7 +19,7 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
   track: largest face followed by box overlap; a new face starts a new attempt
   attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50) → recognised;
            from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
-  session: 16 pairs over all attempts → give up
+  session: 16 pairs over all attempts → give up; once more if the face moved or the exposure changed
   after MATCH: add the best live print if it was a borderline match
 ```
 
@@ -254,7 +254,7 @@ or that comes back after 7 pairs (≈ 1 s, Windows' 1000 ms purge, F37) without 
 track, and a new track starts a new attempt: its prints, best similarity and liveness votes start
 from zero. So the owner's prints never recognise a photo held up next, and the owner's live votes
 never count for it. Pairs without a face keep the current track. The 16-pair limit counts the
-whole session.
+whole session (twice, after a re-attempt, below).
 
 1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the estimated FAR of
    the best similarity over them is < 1e-5 (similarity > 0.50 with the shipped table).
@@ -267,11 +267,27 @@ whole session.
 The earliest possible `MATCH` is therefore at the 5th pair (4 prints, the 4th frame votes live,
 the 5th too), where voting from the first pair allowed a match at the 2nd pair.
 
+**Re-attempt (F49).** Before a session ends in `NOMATCH` or `NOTLIVE` (at the pair limit or by three
+spoof votes), it checks what the tracked face did over the attempt's frames, as Windows'
+`sub_1800575E0` does for a track about to become a guest. If the face moved — the range of its box
+centre, normalised by the frame width and height, has ((Δx)² + (Δy)²) / 2 > 0.01 (about 0.14 of
+the frame), or its box width changed by more than 20 % — or the exposure changed — the standard
+deviation of the last 10 lit face brightness values (§3, including rejected too-dark/too-bright
+frames) is above 12 — the session gets another 16 pairs with fresh counters for the track (prints,
+best similarity, votes), once per session (`ReAttemptRecognitionByMovement`,
+`ReAttemptRecognitionByExposure`). A still face in steady light is rejected at the 16th pair as
+before; `NOFACE` is never re-attempted (nothing was recognised). The motion record starts over
+with a new track, so a photo replacing the owner does not inherit the owner's movement. Windows
+also refuses the re-attempt after more than one "too many saturated pixels" frame; linux_hello
+has no saturated-pixel count (F44 status 6/7), so that part is left out. A re-attempted session
+reads up to 32 pairs, ≈ 4.3 s at 15 fps plus the ≈ 0.5 s start-up, within the PAM module's 10 s
+timeout.
+
 Checked on saved frames (`validation_frames`): five consecutive lit frames of one sitting keep one
 track (boxes move ≤ 2 px); the owner's frames from another sitting, 110 px higher, and the stranger
 photo each start a new track. Limits: only the largest face is tracked; a photo held exactly where
-the face was (IoU ≥ 0.3) continues the track. Not implemented: the re-attempt on movement or
-exposure change (F49) and the "closer to another user" check (1:1 by design).
+the face was (IoU ≥ 0.3) continues the track. Not implemented: the "closer to another user" check
+(1:1 by design).
 
 ### 8. Template augmentation (F31, F53)
 
