@@ -269,7 +269,7 @@ mod tests {
         // A store from before multi-print templates is refused, not silently misread.
         fs::write(&path, r#"{"alice": {"features": [0.6, 0.8]}}"#).unwrap();
         let err = FaceStore::load(&path).err().unwrap();
-        assert!(format!("{err:#}").contains("re-enrolled"));
+        assert!(format!("{err:#}").contains("enroll again"));
         fs::remove_dir_all(dir).unwrap();
     }
 

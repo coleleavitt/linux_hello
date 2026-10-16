@@ -150,7 +150,10 @@ impl FacePipeline {
             Some(image) => self.largest_face(image)?.map(|f| (image, f)),
             None => None,
         };
-        let liveness = (!self.liveness.is_empty()).then(|| self.rgb_liveness(rgb_face.as_ref())).transpose()?;
+        // The open RGB models stand in for Windows' colour net (slot 13). With the Windows Hello models
+        // that net vetoes instead, so the RGB evidence is not counted twice (F24, F25).
+        let open_rgb = self.windows.is_none() && !self.liveness.is_empty();
+        let liveness = open_rgb.then(|| self.rgb_liveness(rgb_face.as_ref())).transpose()?;
         let windows = match &mut self.windows {
             Some(w) => {
                 Some(w.liveness.frame(&pair.lit, Some(&pair.ambient), face, rgb_face.as_ref().map(|(i, f)| (*i, f)))?)

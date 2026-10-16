@@ -18,8 +18,10 @@ service in `/tmp`). The system-wide install (`contrib/install.sh`) needs root on
    face on the lit frame → size/edge/brightness gates → print (from `lit − ambient` when the
    lighting is good) → similarity with the closest of **that user's** prints. Once 4 prints are in
    and the best similarity is > 0.50 ([calibration.md](calibration.md)) the user is recognised;
-   from then on each good-lighting pair is a live vote unless the RGB liveness models veto it
-   (mean of FaceNox and MiniFASNetV2 < 0.5 → spoof vote).
+   from then on each good-lighting pair votes: live when the Windows Hello anti-spoofing nets
+   agree (their colour net on the RGB frame can veto), or, without those models, unless the open
+   RGB models veto it (mean of FaceNox and MiniFASNetV2 < 0.5 → spoof vote). See
+   [capture-and-liveness.md](capture-and-liveness.md) §5.
    It replies `MATCH` after 2 live votes, `NOTLIVE` after 3 spoof votes, and after 16 pairs
    `NOTLIVE` (recognised but not live), `NOMATCH <similarity>` or `NOFACE <reason>`. After a
    borderline match it adds that pair's print to the template and saves the store (a sealed store

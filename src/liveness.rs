@@ -2,8 +2,9 @@
 //!
 //! The IR evidence of a frame is the lighting gate (a face that reflects the emitter like skin,
 //! with little ambient IR, F14) and, when the converted Windows Hello models are installed, their
-//! frame vote (F25). The open RGB models (FaceNox + MiniFASNetV2) can only veto, like Windows'
-//! colour CNN. Votes are counted only from the frame the face is recognised (F48).
+//! frame vote (F25), which includes Windows' colour-net veto. Without those models the open RGB
+//! models (FaceNox + MiniFASNetV2) veto instead. Votes are counted only from the frame the face is
+//! recognised (F48).
 
 /// RGB liveness: mean P(real) below this vetoes the frame.
 pub const RGB_REAL_THRESHOLD: f32 = 0.5;

@@ -107,11 +107,17 @@ For a good frame:
 |---|---|
 | IR: without the Windows Hello models, the good lighting status (reflects the emitter like a nearby face, little ambient IR) | +1 |
 | IR: with the Windows Hello models, their frame total (F25), see below | −3…+1 |
-| RGB models (FaceNox + MiniFASNetV2) mean P(real) < 0.5, or no face in the RGB frame | −2 |
+| RGB, only without the Windows Hello models: FaceNox + MiniFASNetV2 mean P(real) < 0.5, or no face in the RGB frame | −2 |
 
 Frame total > 0 is a live vote, < 0 a spoof vote. Weak and rejected frames do not vote (and the
 liveness models are not run for them), so with the Windows Hello models a frame is live only when
 the lighting status and the Windows nets agree.
+
+With the Windows Hello models the open RGB models do not run: Windows' colour net (slot 13) is the
+RGB veto, as in Windows, and counting both would weigh the same RGB evidence twice. This matters
+in backlight: on 147 live frames of the owner with a lamp behind the head, FaceNox gave P(real)
+≈ 0.002 and MiniFASNetV2 ≈ 0.998 on almost every frame. Their mean sat on the 0.5 veto line, so
+20 % of good frames became spoof votes and 8 of 15 sessions ended NOTLIVE.
 
 **Windows Hello frame total** (when `models/windows_hello/converted` exists; `--no-windows-hello`
 turns it off). Good frames are the frames Windows sends to its diffusion net (status 1, ambient
