@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 use linux_hello::authenticator::describe;
 use linux_hello::lighting::subtract_ambient;
 use linux_hello::{
-    daemon, AntiSpoof, Attempt, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras, Verdict,
+    daemon, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras, Session, Verdict,
     WindowsHelloModels,
 };
 
@@ -65,6 +65,9 @@ enum Commands {
         /// Frame pairs to keep as prints (each must pass the IR lighting gate)
         #[arg(long, default_value_t = 5)]
         frames: usize,
+        /// Enroll even if the face matches another enrolled user
+        #[arg(long)]
+        force: bool,
     },
     /// Remove an enrolled face
     Remove { user: String },
@@ -86,6 +89,10 @@ enum Commands {
     Daemon {
         #[arg(long, default_value = "/run/linux_hello.sock")]
         socket: PathBuf,
+        /// After a failed face check that the user then passes with the password, add the face
+        /// to the template (opt-in; see docs/sudo.md)
+        #[arg(long)]
+        enroll_on_failure: bool,
     },
     /// Log every frame pair's scores for SECONDS (for spoof testing); frames are saved to --out
     Watch {
@@ -141,16 +148,16 @@ fn main() -> Result<()> {
             let user = user.unwrap_or_else(current_user);
             let pipeline = pipeline(liveness()?)?;
             let start = Instant::now();
-            let verdict = Authenticator { pipeline, cameras }.verify(&user)?;
+            let verdict = Authenticator { pipeline, cameras }.verify(&user)?.verdict;
             println!("{user}: {verdict} ({:.2} s)", start.elapsed().as_secs_f32());
             if !matches!(verdict, Verdict::Match { .. }) {
                 std::process::exit(1);
             }
         }
 
-        Commands::Enroll { user, frames } => {
+        Commands::Enroll { user, frames, force } => {
             let pipeline = pipeline(Vec::new())?;
-            Authenticator { pipeline, cameras }.enroll(&user, frames)?;
+            Authenticator { pipeline, cameras }.enroll(&user, frames, force)?;
             println!("Enrolled {user} with {frames} prints into {}", store.display());
         }
 
@@ -188,9 +195,9 @@ fn main() -> Result<()> {
             println!("Saved /tmp/linux_hello_{{lit,ambient,diff,rgb}}.png (pair {:?} apart)", capture.pair.gap);
         }
 
-        Commands::Daemon { socket } => {
+        Commands::Daemon { socket, enroll_on_failure } => {
             let pipeline = pipeline(liveness()?)?;
-            daemon::serve(&mut Authenticator { pipeline, cameras }, &socket)?;
+            daemon::serve(&mut Authenticator { pipeline, cameras }, &socket, enroll_on_failure)?;
         }
 
         Commands::Watch { user, seconds, out } => {
@@ -199,16 +206,20 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&out)?;
             let mut log = std::fs::File::create(out.join("log.jsonl"))?;
             let mut cams = OpenCameras::open(&cameras)?;
-            let mut attempt = Attempt::default();
+            let mut session = Session::default();
             let start = Instant::now();
             let mut n = 0;
             while start.elapsed().as_secs() < seconds {
                 let capture = cams.capture()?;
                 let check = pipeline.check(&user, &capture.pair, capture.rgb.as_ref())?;
-                let verdict = attempt.add(&check);
+                let verdict = session.add(&check);
                 let t = start.elapsed().as_secs_f32();
-                let (recognised, liveness) = (attempt.recognised(), attempt.liveness());
-                println!("{n:4} t={t:5.2}s {} recognised={recognised} liveness={liveness:?}", describe(&check));
+                let (track, recognised, liveness) =
+                    (session.track(), session.attempt().recognised(), session.attempt().liveness());
+                println!(
+                    "{n:4} t={t:5.2}s {} track={track:?} recognised={recognised} liveness={liveness:?}",
+                    describe(&check)
+                );
                 save_capture(&capture, &out, &format!("{n:04}"))?;
                 let a = &check.analysis;
                 let l = a.lighting;
@@ -222,13 +233,13 @@ fn main() -> Result<()> {
                         "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
                         "border": w.scores.border, "hh": w.scores.hh,
                     })),
-                    "similarity": check.best.map(|b| b.similarity),
+                    "similarity": check.best.map(|b| b.similarity), "track": track,
                     "recognised": recognised, "liveness": format!("{liveness:?}"),
                     "verdict": verdict.map(|v| v.to_string()),
                 }))?;
                 if let Some(verdict) = verdict {
                     println!("     => {verdict}; new session");
-                    attempt = Attempt::default();
+                    session = Session::default();
                 }
                 n += 1;
             }

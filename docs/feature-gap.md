@@ -37,7 +37,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | Partial: SCRFD per pair on the lit frame, largest face only, no tracking. The Windows IR Retina detector (MODEL_FILES_110, `MsRetinaDetector`) runs on the lit frame for the frontal check only; its box and landmarks are not used | Track id = IoU match between frames; needed for "same face" across pairing/votes |
+| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | **Done** (largest face only): SCRFD per pair on the lit frame; `FaceTracker` follows the largest face by box IoU ≥ 0.3, dropped after 7 pairs (≈ 1 s, F37) without a face. The Windows IR Retina detector (MODEL_FILES_110, `MsRetinaDetector`) runs on the lit frame for the frontal check only; its box and landmarks are not used | — |
 | 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | Partial: SCRFD 5 points in the pipeline; Windows' 31 points are available from `LbfAligner` (bit-exact port) but not used yet | Use `LbfAligner` points for the F43 brightness box and the F13 anchors |
 | Recognition crop 3× box, ≤ 400 px, 8-bit lit luminance (F38) | Different: ArcFace 112×112 aligned crop from the RGB-converted IR frame | Keep ArcFace alignment; do subtraction on a 3× crop before aligning |
 | Face brightness = mean of 2×2-subsampled cheek/nose box (F43) | **Done** (approximation): box between eyes and mouth corners from SCRFD's 5 points (`lighting::face_brightness`) | — |
@@ -71,7 +71,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Distance 1 − cos, clamped ≤ 1 (F50) | Done (cosine similarity) | — |
 | Min distance over all stored prints (+coupled mean/pair prints) (F28) | **Done** (max cosine over prints); coupled prints Missing | Coupled prints optional |
 | Distance → FAR via per-hardware calibration table, × 1…4 correction; accept FAR < 1e-5 (F27, F51) | Partial: fixed cosine `MATCH_THRESHOLD` 0.50 from `docs/calibration.md` (FAR ≤ 1e-5 per attempt on LFW) | Store a (FAR, distance) table per camera/model and threshold on FAR; collect IR genuine/impostor data on this camera |
-| ≥ 4 prints on the track before deciding (F48, F54) | **Done** per session (no tracker: largest face of each pair) | Tracker, see below |
+| ≥ 4 prints on the track before deciding (F48, F54) | **Done** per track: a new track starts a new `Attempt` (prints, best similarity, votes) within the 16-pair session | — |
 | 1:N with "closer to another tracked/enrolled user" check (F48) | N/A by design: 1:1 for the PAM user | Could add: reject if another enrolled user scores higher |
 | Recognise first, then liveness on the same track (F47, F48) | **Done** (`Attempt`) | — |
 
@@ -80,7 +80,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Multi-pose enrolment, 16 prints, quality-gated frames, registration per hardware model (F54, Q5) | Partial: 5 individual prints, each from a gated good-lighting frame; no pose guidance | Guide the user through slight poses; more prints |
-| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | Missing | Compare new prints against other users' prints at the FAR threshold |
+| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | **Done**: `enroll` refuses when a new print matches another user's template above `MATCH_THRESHOLD` (0.50) and names that user; `--force` overrides | — |
 | Per-hardware-model registrations (`Registration`, `HardwareModelContainer`) (F51) | N/A (single camera) | Store camera id with prints if a second camera is used |
 
 ## Template update
@@ -88,8 +88,8 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Enroll-on-success: after a live success, borderline match (GFP in [FAR/2, FAR]), once per session, generation < 3, FIFO eviction (F31, F53) | **Done**: best live print with similarity in (0.50, 0.55], once per session, generation ≤ 3, ≤ 10 augmented (FIFO) | — |
-| Enroll-on-failure: add print after face fail + password success, relaxed threshold, must not match others (F31, `EnrollOnFailure*Threshold`) | Missing | PAM `pam_sm_setcred`/session hook after password success → daemon stores the last unmatched print, only if it clears a relaxed threshold |
-| Print categories (normal, on-failure, on-success, flags) used as verification conditions (F28) | Missing | Tag prints in the store |
+| Enroll-on-failure: add print after face fail + password success, relaxed threshold, must not match others (F31, `EnrollOnFailure*Threshold`) | **Done**, opt-in (`daemon --enroll-on-failure`): after `NOMATCH` of one real (≥ 2 live votes), unrecognised face, the best live print waits ≤ 60 s in the daemon; `pam_sm_setcred` after the password success of the same PAM transaction (token) commits it if similarity to the enrolled/augmented prints ≥ 0.40 and no other user matches; ≤ 5 such prints (FIFO); root only (`SO_PEERCRED`). Windows' threshold values are runtime policy data, not recovered | — |
+| Print categories (normal, on-failure, on-success, flags) used as verification conditions (F28) | Partial: prints are tagged `enroll`, `augment`, `on_failure`; all are matched alike; on-failure prints are left out of the enroll-on-failure check and never seed augmentation | Per-category thresholds if needed |
 
 ## Storage & key protection
 
@@ -107,7 +107,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | WinBio presence monitor, capture every 125 ms, no service timeout; UI ends the session (F2, F55, F57) | Different: daemon on demand per PAM request, up to 16 frame pairs, PAM timeout 10 s | Optional: time-based budget |
 | Auto-logon confirmation after 120 s on the lock screen; switch timeout 10 s (F56) | N/A (sudo only; screen lock on hold per docs/README.md) | Relevant once a screen locker is supported |
 | Remote-session suppression | Done: PAM ignores `SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST` | — |
-| Lid-closed / external-camera suppression (`IsLidClosedScenario`, `ShouldForbidExternalCameras`) | Missing | Check lid switch (`/proc/acpi/button/lid/*/state`) and refuse |
+| Lid-closed / external-camera suppression (`IsLidClosedScenario`, `ShouldForbidExternalCameras`) | **Done**: `verify` first refuses with `UNAVAILABLE lid_closed` (PAM: ignore, password) when an ACPI lid reports closed and the IR camera is built in (its USB device's sysfs `removable` is `fixed`; unknown counts as built in). `/dev/video2` here: `fixed` | — |
 | Daemon down → password (PAM_IGNORE) | Done | — |
 
 ## User feedback & telemetry
@@ -130,8 +130,8 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Face tracker with ids across frames (FaceTrackerInternal) | Missing | IoU tracker (needed by pairing, votes, min-prints) |
-| Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | **Done** as API, not a gate: `LbfAligner` + `IrFaceOrientation` read resources 102, 104–107 and match the bit-exact Python reference exactly (lbf.md "Rust port"); it reads ~+25° yaw on frontal faces from this camera, so the frontal gate uses the Retina pose | Prior (tracking) path of the KNN regression, once a tracker exists |
+| Face tracker with ids across frames (FaceTrackerInternal) | **Done** for the largest face (`src/tracker.rs`); other faces in the frame are not tracked | — |
+| Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | **Done** as API, not a gate: `LbfAligner` + `IrFaceOrientation` read resources 102, 104–107 and match the bit-exact Python reference exactly (lbf.md "Rust port"); it reads ~+25° yaw on frontal faces from this camera, so the frontal gate uses the Retina pose | Prior (tracking) path of the KNN regression, now that a tracker exists |
 | Presence / wake-on-approach (WinBio presence monitor, `PresenceLifetimeInSeconds`) (F55) | N/A (no lock-screen integration) | Would need a long-running capture loop; power cost |
 | FaceBootstrapAdapter (virtual sensor `{063436EF-…}` bootstrap) | N/A (Windows WinBio plumbing) | — |
 | Hardware-model selection via OneSettings (`HardwareModelContainer`) (F51) | N/A | — |

@@ -37,6 +37,7 @@ service in `/tmp`). The system-wide install (`contrib/install.sh`) needs root on
 | Owner at the laptop | `PAM_SUCCESS` (similarity 0.82–0.89, liveness 0.84–0.96) | 2.1 s |
 | Daemon not running | `PAM_IGNORE` → password | 0 s |
 | User not enrolled | `PAM_IGNORE` → password | 0 s |
+| Lid closed, built-in IR camera (`UNAVAILABLE lid_closed`) | `PAM_IGNORE` → password, message "Face login not available: the lid is closed" (libpam test with a stub daemon) | 0 s |
 | `SSH_CONNECTION` / `SSH_TTY` / `PAM_RHOST` set | `PAM_IGNORE` → password | 0 s |
 | Nobody / someone else at the camera | `PAM_AUTH_ERR` → password | up to ~2–3 s |
 
@@ -49,6 +50,53 @@ sudo contrib/uninstall.sh [--purge]                  # removes everything (--pur
 
 The installer backs up `/etc/pam.d/sudo` and `sudo-i` to `*.linux_hello.bak`. Keep a root shell
 open the first time.
+
+## Enroll-on-failure (opt-in)
+
+When your face is not recognised (`NOMATCH`) and you then type your password, the daemon can add
+that face to your template, so the next sudo recognises you in the same conditions (glasses,
+lighting). Details and limits: [capture-and-liveness.md](capture-and-liveness.md#9-enroll-on-failure-f31-opt-in).
+
+Enable it in the daemon only:
+
+```sh
+echo 'LINUX_HELLO_ARGS="--enroll-on-failure"' > /etc/conf.d/linux_hello
+rc-service linux_hello restart
+```
+
+The PAM configuration stays as installed; no extra line is needed:
+
+```
+auth		sufficient	pam_linux_hello.so
+auth	substack		system-auth
+```
+
+The commit is made from `pam_sm_setcred` of the same `auth` line. sudo calls `pam_setcred` (with
+`PAM_REINITIALIZE_CRED`, sudo 1.9.17 `plugins/sudoers/auth/pam.c`) only after the auth stack
+succeeded, and only in the PAM transaction whose face check failed holds the token. A session
+hook (`pam_sm_open_session`) is not used: it would need a `session` line, and an `auth optional`
+line after `system-auth` is not safe because it also runs after a wrong password (a substack
+failure does not stop the parent stack). `Defaults !pam_setcred` in sudoers turns the commit off.
+
+Checked with real libpam (`pam_start_confdir`, a test service with `pam_permit` standing in for the
+password, and a stub daemon):
+
+| Case | Daemon receives |
+|------|-----------------|
+| `NOMATCH … <token>`, password ok, `PAM_USER` changed to root, `pam_setcred(REINITIALIZE)` | `ENROLL_ON_FAILURE cole <token>` once |
+| `MATCH`, `pam_setcred` | nothing |
+| `NOMATCH … <token>`, then a second face check `NOFACE`, password ok, `pam_setcred` | nothing |
+| `NOMATCH` without token, `pam_setcred` | nothing |
+| `NOMATCH … <token>`, `pam_setcred(DELETE)` only | nothing |
+| `NOMATCH … <token>`, `pam_setcred(ESTABLISH)` twice | one `ENROLL_ON_FAILURE` |
+| `NOMATCH … <token>`, password wrong | auth fails, no `pam_setcred` |
+
+The real daemon, run as a normal user, refuses `ENROLL_ON_FAILURE` with `ERROR … from uid 1000:
+only root may add prints`. Not tested: a full sudo run as root with the camera.
+
+**Risk:** anyone who knows your password can add their face this way if it is already similar to
+yours (similarity ≥ 0.40), and then use sudo with their face. The daemon logs every
+`enroll-on-failure` result; `linux_hello enroll <user>` resets the template.
 
 ## Caveats
 

@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use crate::lighting::{subtract_ambient, Lighting, LightingStatus};
 use crate::{
     gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
-    PrintMatch, Template, Vote, WindowsHelloModels,
+    OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
 };
 
 /// Minimum face box width in pixels (F46, F54).
@@ -170,10 +170,16 @@ impl FacePipeline {
         Ok(total / self.liveness.len() as f32)
     }
 
-    /// Store one print per enrollment frame (no averaging, F28) and save.
-    pub fn enroll(&mut self, user_id: &str, prints: Vec<Embedding>) -> Result<()> {
+    /// Store one print per enrollment frame (no averaging, F28) and save. Unless `force`, refuse
+    /// prints that match another enrolled user (`CheckForDuplicateEnrollment`).
+    pub fn enroll(&mut self, user_id: &str, prints: Vec<Embedding>, force: bool) -> Result<()> {
         if prints.is_empty() {
             bail!("no enrollment prints");
+        }
+        if let (false, Some((other, similarity))) = (force, self.store.duplicate(user_id, &prints)) {
+            bail!(
+                "this face matches enrolled user {other} (similarity {similarity:.3}); use --force to enroll it anyway"
+            );
         }
         let count = prints.len();
         self.store.add(user_id.to_string(), Template::enrolled(prints));
@@ -191,6 +197,16 @@ impl FacePipeline {
         }
         self.store.save().context("saving face store")?;
         Ok(true)
+    }
+
+    /// Enroll-on-failure (F31): add `print` to the user's template if [`FaceStore::add_on_failure`]
+    /// accepts it, and save the store.
+    pub fn add_on_failure(&mut self, user_id: &str, print: &Embedding) -> Result<OnFailure> {
+        let result = self.store.add_on_failure(user_id, print);
+        if let OnFailure::Added { .. } = result {
+            self.store.save().context("saving face store")?;
+        }
+        Ok(result)
     }
 
     pub fn unenroll(&mut self, user_id: &str) -> Result<bool> {
