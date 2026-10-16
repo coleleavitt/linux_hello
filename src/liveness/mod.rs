@@ -7,8 +7,10 @@
 //! recognised (F48).
 
 pub mod check;
+pub mod recording;
 
 pub use check::{Builtin, Check, Frame, Observed};
+pub use recording::{Label, Meta};
 
 /// RGB liveness: mean P(real) below this vetoes the frame.
 pub const RGB_REAL_THRESHOLD: f32 = 0.5;

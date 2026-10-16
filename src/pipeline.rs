@@ -176,6 +176,11 @@ impl FacePipeline {
         }
     }
 
+    /// Whether the converted Windows Hello models run.
+    pub fn has_windows_hello(&self) -> bool {
+        self.windows.is_some()
+    }
+
     pub fn is_enrolled(&self, user: &str) -> bool {
         self.store.get(user).is_some()
     }
