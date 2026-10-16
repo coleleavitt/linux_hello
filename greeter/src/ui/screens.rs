@@ -10,11 +10,29 @@ use crate::assets::Assets;
 use crate::state::{Face, State};
 use crate::users::Account;
 
-/// Placeholder status strings (Windows' own come with docs/windows-hello-ui.md).
+/// Windows' texts (FaceCredentialProvider.dll.mui ids, credprovhost 109, winlogon;
+/// docs/windows-hello-ui.md §1.4, §2).
+pub const GETTING_READY: &str = "Getting ready...";
 pub const LOOKING_FOR_YOU: &str = "Looking for you...";
+pub const MAKING_SURE: &str = "Making sure it's you...";
 pub const WELCOME: &str = "Welcome";
-pub const SIGNING_IN: &str = "Signing in...";
-pub const USE_PASSWORD: &str = "Sign in with your password";
+/// 113: on the lock screen, when a key press is still needed (`dismiss_lock_screen` off).
+pub const DISMISS_TO_SIGN_IN: &str = "Hello, {}! Dismiss the lock screen to sign in.";
+/// 157 and 124: camera errors hide the eye (state 7).
+pub const CAMERA_IN_USE: &str = "Camera is in use. Please sign in with your password.";
+pub const CAMERA_NOT_AVAILABLE: &str = "Camera not available. Please sign in with your password.";
+
+/// The label under the eye for a failed check: the module's reason, Windows' camera texts for
+/// the module's "not available" lines, nothing when face sign-in was not there at all. `false`
+/// hides the eye (state 7).
+fn failure_text(reason: Option<&str>) -> (String, bool) {
+    match reason {
+        None => (String::new(), false),
+        Some("Face login not available: another program is using the camera") => (CAMERA_IN_USE.into(), false),
+        Some("Face login not available: the lid is closed") => (CAMERA_NOT_AVAILABLE.into(), false),
+        Some(reason) => (reason.to_string(), true),
+    }
+}
 
 pub const CSS: &str = r#"
 * { font-family: "Segoe UI Variable", "Segoe UI", sans-serif; }
@@ -22,6 +40,7 @@ window { background: transparent; }
 label { color: white; }
 .clock { font-size: 96px; font-weight: 300; font-variation-settings: "opsz" 36; }
 .date { font-size: 28px; font-weight: 400; }
+.greeting { font-size: 34px; font-weight: 600; }
 .user-name { font-size: 28px; font-weight: 350; margin-top: 12px; }
 .status { font-size: 15px; }
 .notice { font-size: 13px; color: rgba(255,255,255,0.8); }
@@ -43,7 +62,7 @@ pub struct LockScreen {
 }
 
 impl LockScreen {
-    pub fn new() -> LockScreen {
+    pub fn new(display_name: &str) -> LockScreen {
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.set_halign(gtk::Align::Start);
         widget.set_valign(gtk::Align::End);
@@ -55,8 +74,8 @@ impl LockScreen {
         let date = gtk::Label::new(None);
         date.add_css_class("date");
         date.set_xalign(0.0);
-        let welcome = gtk::Label::new(Some(WELCOME));
-        welcome.add_css_class("date");
+        let welcome = gtk::Label::new(Some(&DISMISS_TO_SIGN_IN.replace("{}", display_name)));
+        welcome.add_css_class("greeting");
         welcome.set_xalign(0.0);
         welcome.set_margin_top(24);
         welcome.set_visible(false);
@@ -151,10 +170,12 @@ pub struct SignIn {
     notices: gtk::Label,
     password_error: gtk::Label,
     options: gtk::Revealer,
+    display_name: String,
 }
 
 impl SignIn {
     pub fn new(account: &Account, assets: &Assets) -> SignIn {
+        let display_name = account.display_name.clone();
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 8);
         widget.set_halign(gtk::Align::Center);
         widget.set_valign(gtk::Align::Center);
@@ -236,25 +257,28 @@ impl SignIn {
             notices,
             password_error,
             options,
+            display_name,
         }
     }
 
     pub fn render(&self, state: &State) {
-        let text = if let Some(error) = &state.backend_error {
-            error.clone()
+        let (text, eye) = if let Some(error) = &state.backend_error {
+            (error.clone(), false)
         } else if state.signing_in {
-            SIGNING_IN.to_string()
+            (WELCOME.to_string(), false)
         } else {
             match &state.face {
-                Face::Idle => String::new(),
-                Face::Looking => LOOKING_FOR_YOU.to_string(),
-                Face::Welcome => WELCOME.to_string(),
-                Face::Failed(Some(reason)) => reason.clone(),
-                Face::Failed(None) => USE_PASSWORD.to_string(),
+                Face::Idle => (String::new(), false),
+                Face::Starting => (GETTING_READY.to_string(), true),
+                Face::Looking => (LOOKING_FOR_YOU.to_string(), true),
+                Face::Verifying => (MAKING_SURE.to_string(), true),
+                Face::Welcome => (format!("Hello {}", self.display_name), true),
+                Face::Failed(reason) => failure_text(reason.as_deref()),
             }
         };
         self.status.set_text(&text);
         self.status_row.set_visible(!text.is_empty());
+        self.hello.widget.set_visible(eye);
         self.hello.set_face(&state.face);
         self.notices.set_text(&state.notices.join("\n"));
         self.notices.set_visible(!state.notices.is_empty());

@@ -57,7 +57,8 @@ fn wrong_password_ends_the_attempt() {
     let (tx, rx) = async_channel::unbounded();
     let attempt = greetd::start(&socket, "cole", tx);
     assert_eq!(next(&rx), AuthEvent::Info("Looking for your face...".into()));
-    assert_eq!(next(&rx), AuthEvent::Info("Face not recognized".into()));
+    assert_eq!(next(&rx), AuthEvent::Info("Making sure it's you...".into()));
+    assert_eq!(next(&rx), AuthEvent::Info("Couldn't recognize you. Please sign in with your password.".into()));
     assert!(matches!(next(&rx), AuthEvent::Prompt { secret: true, .. }));
     attempt.answer(Some("wrong".into()));
     assert_eq!(next(&rx), AuthEvent::Failure("Authentication failure".into()));

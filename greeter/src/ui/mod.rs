@@ -203,7 +203,7 @@ impl App {
 
     fn build_main(self: &Rc<Self>, window: &gtk::Window) {
         let background = Background::new(self.options.assets.background.as_deref());
-        let lock_screen = LockScreen::new();
+        let lock_screen = LockScreen::new(&self.options.account.display_name);
         let sign_in = SignIn::new(&self.options.account, &self.options.assets);
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::SlideUp);

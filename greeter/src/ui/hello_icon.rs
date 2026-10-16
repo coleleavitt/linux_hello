@@ -69,7 +69,7 @@ impl HelloIcon {
         shared.playing = None;
         // Windows' GIF plays once and ends on the smile: looped while looking, once when
         // recognised.
-        let animate = matches!(face, Face::Looking | Face::Welcome);
+        let animate = matches!(face, Face::Starting | Face::Looking | Face::Verifying | Face::Welcome);
         if animate {
             shared.playing = shared.animation.as_ref().map(|a| a.iter(Some(std::time::SystemTime::now())));
         }
@@ -141,7 +141,7 @@ fn draw_vector(cr: &gtk::cairo::Context, width: f64, height: f64, face: &Face, e
     cr.set_line_width(0.17);
     cr.set_line_cap(gtk::cairo::LineCap::Round);
 
-    let glance = if *face == Face::Looking { 0.1 * (elapsed * 1.6).sin() } else { 0.0 };
+    let glance = if matches!(face, Face::Looking | Face::Verifying) { 0.1 * (elapsed * 1.6).sin() } else { 0.0 };
     for x in [-0.42, 0.42] {
         if *face == Face::Welcome {
             cr.arc(x, -0.3, 0.16, 1.15 * std::f64::consts::PI, 1.85 * std::f64::consts::PI);

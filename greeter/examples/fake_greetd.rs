@@ -40,7 +40,10 @@ impl Scenario {
         let (steps, face_match) = match name {
             "match" => (vec![looking], true),
             "noface" => (vec![looking, "No face seen by the camera"], false),
-            "nomatch" => (vec![looking, "Face not recognized"], false),
+            "nomatch" => (
+                vec![looking, "Making sure it's you...", "Couldn't recognize you. Please sign in with your password."],
+                false,
+            ),
             "notlive" => (vec![looking, "Face not accepted as live"], false),
             "busy" => (vec![looking, "Face login not available: another program is using the camera"], false),
             _ => return None,
