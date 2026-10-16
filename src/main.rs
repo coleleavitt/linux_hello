@@ -25,21 +25,15 @@ struct Cli {
     #[arg(short, long, default_value = "info", global = true)]
     verbose: String,
 
-    /// IR camera used for recognition
-    #[arg(short, long, default_value = "/dev/video2", global = true)]
-    device: String,
+    /// IR camera by USB id (vid:pid, e.g. 30c9:00f3); default: the first known IR camera present.
+    /// Its video, metadata and RGB nodes are looked up in sysfs at every request
+    #[arg(short, long, global = true)]
+    camera: Option<String>,
 
-    /// uvcvideo metadata node of the IR camera (per-frame emitter flag)
-    #[arg(long, default_value = "/dev/video3", global = true)]
-    ir_metadata: String,
-
-    /// Tell lit from ambient IR frames by brightness instead of the metadata node
+    /// Tell lit from ambient IR frames by brightness instead of the camera's metadata node
+    /// (per-frame emitter flag)
     #[arg(long, global = true)]
     no_ir_metadata: bool,
-
-    /// RGB camera for the liveness check
-    #[arg(long, default_value = "/dev/video0", global = true)]
-    liveness_device: String,
 
     /// Skip the RGB anti-spoofing veto (the IR lighting gate still applies)
     #[arg(long, global = true)]
@@ -123,15 +117,15 @@ fn main() -> Result<()> {
     let store = cli.store.clone().unwrap_or_else(default_store);
     let detector = format!("{models}/det_10g.onnx");
     let embedder = format!("{models}/w600k_r50.onnx");
-    // Similarity → FAR table for this IR camera (USB vid:pid), or the default one (F51, F60).
-    let calibration = calibration::load(format!("{models}/calibration.json"), sysfs::usb_id(&cli.device).as_deref())?;
-
     let cameras = CameraSetup {
-        device: cli.device.clone(),
-        ir_metadata: (!cli.no_ir_metadata).then(|| cli.ir_metadata.clone()),
-        liveness_device: (!cli.no_liveness).then(|| cli.liveness_device.clone()),
+        camera: cli.camera.clone(),
+        ir_metadata: !cli.no_ir_metadata,
+        liveness: !cli.no_liveness,
         rotation: cli.rotate,
     };
+    // Similarity → FAR table for this IR camera (USB vid:pid), or the default one (F51, F60).
+    let camera_id = cli.camera.clone().or_else(|| cameras.nodes().ok().and_then(|n| sysfs::usb_id(&n.ir)));
+    let calibration = calibration::load(format!("{models}/calibration.json"), camera_id.as_deref())?;
     // Fails closed: if the liveness models are wanted but do not load, nothing runs.
     let liveness = || -> Result<Vec<AntiSpoof>> {
         if cli.no_liveness {
@@ -224,7 +218,9 @@ fn main() -> Result<()> {
         }
 
         Commands::Camera => {
-            let capture = OpenCameras::open(&cameras)?.capture()?;
+            let nodes = cameras.nodes()?;
+            println!("IR {} (metadata {:?}), RGB {:?}", nodes.ir, nodes.ir_metadata, nodes.rgb);
+            let capture = OpenCameras::open(&nodes, cameras.rotation)?.capture()?;
             save_capture(&capture, &PathBuf::from("/tmp"), "linux_hello")?;
             println!("Saved /tmp/linux_hello_{{lit,ambient,diff,rgb}}.png (pair {:?} apart)", capture.pair.gap());
         }
@@ -239,7 +235,7 @@ fn main() -> Result<()> {
             let mut pipeline = pipeline(liveness()?)?;
             std::fs::create_dir_all(&out)?;
             let mut log = std::fs::File::create(out.join("log.jsonl"))?;
-            let mut cams = OpenCameras::open(&cameras)?;
+            let mut cams = OpenCameras::open(&cameras.nodes()?, cameras.rotation)?;
             let mut session = Session::default();
             let start = Instant::now();
             let mut n = 0;

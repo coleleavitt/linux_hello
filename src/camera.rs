@@ -561,18 +561,106 @@ fn metadata_items(buf: &[u8]) -> Vec<(u32, &[u8])> {
     items
 }
 
-/// Find IR camera on the system
-pub fn find_ir_camera() -> Result<String> {
-    let candidates = ["/dev/video2", "/dev/video3", "/dev/video4"];
+/// IR cameras known to work, by USB `vid:pid`, as Windows' sensor allow-list
+/// (`SensorAllowListManager`, F4): without `--camera`, the first one present is used.
+pub const KNOWN_IR_CAMERAS: &[&str] = &[
+    // Realtek IR camera of the ThinkPad P16 Gen 3 (helloface.inf `30C9:00F3 MI_02`, F4)
+    "30c9:00f3",
+];
 
-    for path in candidates {
-        if let Ok(device) = Device::with_path(path) {
+/// Device paths of one IR camera and its companions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraNodes {
+    pub ir: String,
+    /// uvcvideo metadata node of the IR camera (per-frame illumination flag), if it has one
+    pub ir_metadata: Option<String>,
+    /// RGB camera of the same USB device, if any
+    pub rgb: Option<String>,
+}
+
+/// What a V4L2 node is for, by its device capabilities and pixel formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeKind {
+    /// Video capture offering the 8-bit greyscale format: an IR sensor
+    Ir,
+    /// Video capture in colour formats only
+    Rgb,
+    /// `V4L2_CAP_META_CAPTURE`
+    Meta,
+}
+
+struct Node {
+    path: String,
+    kind: NodeKind,
+    usb_id: Option<String>,
+    interface: Option<std::path::PathBuf>,
+}
+
+/// The nodes of the IR camera with USB id `id`, or of the first [`KNOWN_IR_CAMERAS`] present
+/// when `id` is `None`, looked up in sysfs now so that a camera renumbered or re-plugged since
+/// the last request is still found: the IR node is the greyscale capture node of that USB
+/// device, its metadata node the `META_CAPTURE` node on the same USB interface, the RGB camera
+/// the colour capture node of the same device. Without such a device the IR camera is probed by
+/// name ([`find_ir_camera`], with a warning) and its companions found the same way.
+pub fn find_cameras(id: Option<&str>) -> Result<CameraNodes> {
+    let nodes: Vec<Node> = crate::sysfs::video_nodes().into_iter().filter_map(classify).collect();
+    let by_id = |id: &str| nodes.iter().find(|n| n.kind == NodeKind::Ir && n.usb_id.as_deref() == Some(id));
+    let ir = match id {
+        Some(id) => by_id(id),
+        None => KNOWN_IR_CAMERAS.iter().find_map(|id| by_id(id)),
+    };
+    let ir = match ir {
+        Some(ir) => ir,
+        None => {
+            warn!(?id, "no IR camera with this USB id in sysfs; probing by name");
+            let path = find_ir_camera()?;
+            nodes.iter().find(|n| n.path == path).with_context(|| format!("{path} has no sysfs entry"))?
+        }
+    };
+    let ir_metadata =
+        nodes.iter().find(|n| n.kind == NodeKind::Meta && n.interface.is_some() && n.interface == ir.interface);
+    let rgb = nodes.iter().find(|n| n.kind == NodeKind::Rgb && n.usb_id.is_some() && n.usb_id == ir.usb_id);
+    let found = CameraNodes {
+        ir: ir.path.clone(),
+        ir_metadata: ir_metadata.map(|n| n.path.clone()),
+        rgb: rgb.map(|n| n.path.clone()),
+    };
+    debug!(usb_id = ?ir.usb_id, ?found, "cameras");
+    Ok(found)
+}
+
+/// What `path` is for; `None` for a node that cannot be opened or is neither capture nor
+/// metadata (an output or a touch device).
+fn classify(path: String) -> Option<Node> {
+    let device = Device::with_path(&path).ok()?;
+    let caps = device.query_caps().ok()?.capabilities;
+    let kind = if caps.contains(v4l::capability::Flags::META_CAPTURE) {
+        NodeKind::Meta
+    } else if caps.contains(v4l::capability::Flags::VIDEO_CAPTURE) {
+        let grey = device.enum_formats().ok()?.iter().any(|f| f.fourcc == FourCC::new(b"GREY"));
+        if grey {
+            NodeKind::Ir
+        } else {
+            NodeKind::Rgb
+        }
+    } else {
+        return None;
+    };
+    let usb_id = crate::sysfs::usb_id(&path);
+    let interface = crate::sysfs::usb_interface(&path);
+    Some(Node { path, kind, usb_id, interface })
+}
+
+/// The first video node whose card name says IR or infrared.
+pub fn find_ir_camera() -> Result<String> {
+    for path in crate::sysfs::video_nodes() {
+        if let Ok(device) = Device::with_path(&path) {
             let caps = device.query_caps().ok();
             let name = caps.as_ref().map(|c| c.card.as_str()).unwrap_or("");
 
             if name.to_lowercase().contains("ir") || name.to_lowercase().contains("infrared") {
                 info!(path, name, "found IR camera");
-                return Ok(path.to_string());
+                return Ok(path);
             }
         }
     }

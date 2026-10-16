@@ -25,8 +25,23 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
 
 ### 1. Lit/ambient pairs (F10, F12, F13, F15, L1–L3)
 
+**Which nodes (F4).** Windows finds the IR sensor through its INF (`30C9:00F3 MI_02` is a
+`KSCATEGORY_SENSOR_CAMERA`, F4) and the WinBio sensor allow-list. linux_hello takes the IR camera's
+USB id (`--camera vid:pid`, default the first of `camera::KNOWN_IR_CAMERAS` present: `30c9:00f3`)
+and, at every request (`CameraSetup::nodes` → `camera::find_cameras`), reads
+`/sys/class/video4linux/video*` and asks each node `VIDIOC_QUERYCAP` and `VIDIOC_ENUM_FMT`: the IR
+node is the video-capture node of that USB device offering the 8-bit greyscale format `GREY`, its
+metadata node the `META_CAPTURE` node on the same USB interface (sysfs `device` link), and the RGB
+camera the colour-only capture node of the same device. On this ThinkPad that is `/dev/video2`
+(interface 1.2, `GREY` only), `/dev/video3` (interface 1.2, metadata) and `/dev/video0` (interface
+1.0, `MJPG`/`YUYV`). Looking up at every request follows a renumbering or a re-plug between
+requests; it costs four `open`+`ioctl` pairs. An id with no such device falls back to the card-name
+probe (`find_ir_camera`, "ir"/"infrared" in the name) with a warning; on this machine the names are
+truncated (`Integrated Camera: Integrated I`), so the probe finds nothing and the request fails
+with `no IR camera found`.
+
 The IR emitter lights every other frame by itself (L1). The camera's uvcvideo metadata node
-(`/dev/video3`, `--ir-metadata`) carries Microsoft's `MetadataId_FrameIllumination` item for every
+(`/dev/video3` here) carries Microsoft's `MetadataId_FrameIllumination` item for every
 frame (L2, L3); this is the same signal Windows reads as `InfraredMediaFrame.IsIlluminated` (F10).
 
 - `linux_hello` sets the node's format to `UVCM` (`V4L2_META_FMT_UVC_MSXU_1_5`) before streaming;

@@ -74,10 +74,12 @@ linux_hello watch --seconds 30   # logs every frame pair's scores, saves frames 
 linux_hello camera               # saves one pair to /tmp/linux_hello_{lit,ambient,diff,rgb}.png
 ```
 
-Flags: `--device` (IR, default `/dev/video2`), `--ir-metadata` (default `/dev/video3`),
-`--no-ir-metadata` (tell lit frames by brightness), `--liveness-device` (default `/dev/video0`),
-`--no-liveness` (no RGB veto; the lighting status still votes), `--rotate 0|90|180|270` (turn the
-frames of a sideways or upside-down camera upright, counter-clockwise), `--store`.
+Flags: `--camera vid:pid` (the IR camera by USB id; default: the first known IR camera present,
+`30c9:00f3` on this ThinkPad; its IR, metadata and RGB nodes are looked up in sysfs at every
+request, so renumbering or re-plugging is followed; see [docs/capture-and-liveness.md](docs/capture-and-liveness.md#1-litambient-pairs-f10-f12-f13-f15-l1l3)),
+`--no-ir-metadata` (tell lit frames by brightness), `--no-liveness` (no RGB veto; the lighting
+status still votes), `--rotate 0|90|180|270` (turn the frames of a sideways or upside-down camera
+upright, counter-clockwise), `--store`.
 The face store is `/var/lib/linux_hello/faces.json` as root, `~/.local/share/linux_hello/faces.json`
 otherwise; it is written atomically with mode 0600.
 

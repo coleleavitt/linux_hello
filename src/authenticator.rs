@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::camera::{self, Rotation};
+use crate::camera::{self, CameraNodes, Rotation};
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::pipeline::{Analysis, FaceCheck};
@@ -42,15 +42,28 @@ fn brightness(image: &RgbImage) -> f32 {
 }
 
 pub struct CameraSetup {
-    /// IR camera used for recognition
-    pub device: String,
-    /// uvcvideo metadata node of the IR camera, for the per-frame illumination flag. Without it,
-    /// the brighter of two consecutive frames is taken as the lit one.
-    pub ir_metadata: Option<String>,
-    /// RGB camera for the liveness models (they only work on visible light)
-    pub liveness_device: Option<String>,
+    /// USB `vid:pid` of the IR camera, `None` for the first of [`camera::KNOWN_IR_CAMERAS`] present
+    pub camera: Option<String>,
+    /// Read the IR camera's uvcvideo metadata node for the per-frame illumination flag. Without
+    /// it, the brighter of two consecutive frames is taken as the lit one.
+    pub ir_metadata: bool,
+    /// Use the RGB camera for the liveness models (they only work on visible light)
+    pub liveness: bool,
     /// Rotation that turns both cameras' frames upright (F10)
     pub rotation: Rotation,
+}
+
+impl CameraSetup {
+    /// The device nodes to open now ([`camera::find_cameras`]: looked up at every call, so a
+    /// camera renumbered or re-plugged between requests is followed), less the ones not wanted.
+    pub fn nodes(&self) -> Result<CameraNodes> {
+        let nodes = camera::find_cameras(self.camera.as_deref())?;
+        Ok(CameraNodes {
+            ir_metadata: nodes.ir_metadata.filter(|_| self.ir_metadata),
+            rgb: nodes.rgb.filter(|_| self.liveness),
+            ..nodes
+        })
+    }
 }
 
 /// One IR frame pair and, if configured, the RGB frame captured right after it.
@@ -68,14 +81,13 @@ pub struct OpenCameras {
 }
 
 impl OpenCameras {
-    pub fn open(setup: &CameraSetup) -> Result<Self> {
+    pub fn open(nodes: &CameraNodes, rotation: Rotation) -> Result<Self> {
         // IR first: alone, its stream delivers the first frame in ≈ 90 ms. The RGB stream's
         // first frame takes ≈ 245 ms when it starts first and ≈ 50 ms after the IR stream
         // (docs/capture-and-liveness.md §1).
-        let mut ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
-        ir.rotate(setup.rotation);
-        let liveness =
-            setup.liveness_device.as_deref().map(|d| Self::open_rgb(d, setup.rotation)).transpose()?.flatten();
+        let mut ir = IrCamera::open(&nodes.ir, nodes.ir_metadata.as_deref())?;
+        ir.rotate(rotation);
+        let liveness = nodes.rgb.as_deref().map(|d| Self::open_rgb(d, rotation)).transpose()?.flatten();
         Ok(Self { ir, liveness, rgb_level: None })
     }
 
@@ -537,13 +549,14 @@ impl Authenticator {
     }
 
     fn run(&mut self, user: &str, deadline: Option<Instant>) -> Result<Outcome> {
-        if lid::lid_closed() && lid::built_in(&self.cameras.device) {
+        let nodes = self.cameras.nodes()?;
+        if lid::lid_closed() && lid::built_in(&nodes.ir) {
             return Ok(Verdict::LidClosed.into());
         }
         if !self.pipeline.is_enrolled(user) {
             return Ok(Verdict::NotEnrolled.into());
         }
-        let mut cams = OpenCameras::open(&self.cameras)?;
+        let mut cams = OpenCameras::open(&nodes, self.cameras.rotation)?;
         let (verdict, session) = loop {
             let mut session = Session::default();
             let verdict = loop {
@@ -613,7 +626,8 @@ impl Authenticator {
         };
         let existing = collected.len();
         let mut skipped: BTreeMap<&'static str, u32> = BTreeMap::new();
-        let mut ir = IrCamera::open(&self.cameras.device, self.cameras.ir_metadata.as_deref())?;
+        let nodes = self.cameras.nodes()?;
+        let mut ir = IrCamera::open(&nodes.ir, nodes.ir_metadata.as_deref())?;
         ir.rotate(self.cameras.rotation);
         self.pipeline.set_enrolling(true);
         let start = Instant::now();
