@@ -10,7 +10,7 @@ use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::{
     Camera, CameraType, Embedding, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
-    LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote, MATCH_THRESHOLD,
+    LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote,
 };
 
 const LIVENESS_BUFFERS: u32 = 2;
@@ -153,13 +153,13 @@ impl Session {
 }
 
 /// The unlock decision for one tracked face (`MakeDecisions`, F47, F48): the user is recognised
-/// once the face has [`MIN_PRINTS`] prints and the best one matches; liveness votes count from
-/// that frame on; 2 live votes accept, 3 spoof votes reject.
+/// once the face has [`MIN_PRINTS`] prints and the best one matches (estimated FAR under the
+/// target, F27); liveness votes count from that frame on; 2 live votes accept, 3 spoof votes reject.
 #[derive(Default)]
 pub struct Attempt {
     prints: u32,
-    /// Best similarity over the face's prints
-    best: Option<f32>,
+    /// Best match over the face's prints
+    best: Option<PrintMatch>,
     recognised: bool,
     session: LivenessSession,
     /// Every vote of the face, also before recognition: whether a face that is never recognised
@@ -176,7 +176,9 @@ impl Attempt {
         if let Some(print) = &check.analysis.print {
             self.prints += 1;
             if let Some(m) = check.best {
-                self.best = Some(self.best.map_or(m.similarity, |s| s.max(m.similarity)));
+                if self.best.is_none_or(|b| m.similarity > b.similarity) {
+                    self.best = Some(m);
+                }
                 let better = self.live_best.as_ref().is_none_or(|(_, b)| m.similarity > b.similarity);
                 if check.vote == Vote::Live && better {
                     self.live_best = Some((print.clone(), m));
@@ -185,11 +187,11 @@ impl Attempt {
         }
         self.votes.add(check.vote);
         if !self.recognised {
-            self.recognised = self.prints >= MIN_PRINTS && self.best.is_some_and(|s| s > MATCH_THRESHOLD);
+            self.recognised = self.prints >= MIN_PRINTS && self.best.is_some_and(|m| m.recognised());
         }
         let state = if self.recognised { self.session.add(check.vote) } else { LivenessState::Pending };
         match state {
-            LivenessState::Live => Some(Verdict::Match { similarity: self.best.expect("recognised") }),
+            LivenessState::Live => Some(Verdict::Match { similarity: self.best.expect("recognised").similarity }),
             LivenessState::Spoof => Some(Verdict::NotLive),
             LivenessState::Pending => None,
         }
@@ -224,7 +226,7 @@ impl Attempt {
             return Verdict::NotLive;
         }
         if self.prints >= MIN_PRINTS {
-            return self.best.map_or(Verdict::NotEnrolled, |similarity| Verdict::NoMatch { similarity });
+            return self.best.map_or(Verdict::NotEnrolled, |m| Verdict::NoMatch { similarity: m.similarity });
         }
         let problem = problems.iter().max_by_key(|(_, n)| **n).map_or(FaceProblem::NoFace, |(p, _)| *p);
         Verdict::NoFace { problem }
@@ -232,7 +234,7 @@ impl Attempt {
 }
 
 /// One line per frame pair: face brightness lit/ambient, emitter gain, lighting status or
-/// rejection reason, RGB P(real), vote, similarity.
+/// rejection reason, RGB P(real), vote, similarity and its estimated FAR.
 pub fn describe(check: &FrameCheck) -> String {
     let num = |v: Option<f32>, digits: usize| v.map_or("-".to_string(), |v| format!("{v:.digits$}"));
     let a = &check.analysis;
@@ -243,7 +245,7 @@ pub fn describe(check: &FrameCheck) -> String {
         (None, None) => "-".to_string(),
     };
     format!(
-        "lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={}",
+        "lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={} far={}",
         num(l.map(|l| l.lit), 1),
         num(l.map(|l| l.ambient), 1),
         num(l.map(|l| l.gain()), 1),
@@ -251,6 +253,7 @@ pub fn describe(check: &FrameCheck) -> String {
         check.windows.as_ref().map_or("-".to_string(), |w| w.total.to_string()),
         check.vote,
         num(check.best.map(|b| b.similarity), 3),
+        check.best.map_or("-".to_string(), |b| format!("{:.1e}", b.far)),
     )
 }
 
@@ -311,6 +314,7 @@ impl Authenticator {
                 user,
                 added,
                 similarity = matched.similarity,
+                far = format!("{:.1e}", matched.far),
                 generation = matched.generation + 1,
                 "template augmentation"
             );
@@ -366,9 +370,10 @@ mod tests {
     }
 
     /// A usable pair of the face at `bbox` with good (`live`) or weak lighting, matching at
-    /// `similarity`.
+    /// `similarity` (FAR from the shipped table: 0.50 ↔ 1e-5).
     fn usable_at(bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
         let ambient = if vote == Vote::Abstain { 60.0 } else { 5.0 };
+        let far = crate::calibration::lfw_gray().far(similarity);
         FrameCheck {
             analysis: Analysis {
                 face: face(bbox),
@@ -380,7 +385,7 @@ mod tests {
             liveness: None,
             windows: None,
             vote,
-            best: Some(PrintMatch { similarity, generation: 1 }),
+            best: Some(PrintMatch { similarity, far, generation: 1 }),
         }
     }
 
@@ -531,7 +536,8 @@ mod tests {
             s.add(&usable(Vote::Live, similarity));
             s
         };
-        assert!(session(0.52).attempt().augmentation().is_some());
+        // FAR in [5e-6, 1e-5): similarity in (0.50, 0.52) with the shipped table.
+        assert!(session(0.51).attempt().augmentation().is_some());
         assert!(session(0.60).attempt().augmentation().is_none());
         assert!(session(0.45).attempt().augmentation().is_none());
     }

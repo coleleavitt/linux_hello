@@ -1,22 +1,14 @@
-//! Face templates: several prints per user, matched by the closest print (F28), and updated
-//! after successful unlocks and, opt-in, after a failed face attempt confirmed by the password
-//! (F31).
+//! Face templates: several prints per user, matched by the closest print (F28) and recognised by
+//! its estimated FAR (F27, F51), and updated after successful unlocks and, opt-in, after a failed
+//! face attempt confirmed by the password (F31).
 
 use serde::{Deserialize, Serialize};
 
+use crate::calibration::{CalibrationTable, TARGET_FAR};
 use crate::Embedding;
 
-/// Cosine similarity a probe must exceed to match a print. Calibrated on grayscale LFW (see
-/// docs/calibration.md): one comparison FAR ≈ 4e-8 (tail fit), simulated per-attempt FAR ≈ 1.8e-6
-/// for 15 prints × 16 frames (target 1e-5, as Windows' F27); FRR 0.23% per probe frame against
-/// 15 prints.
-pub const MATCH_THRESHOLD: f32 = 0.50;
 /// A user is recognised once the session has this many prints and the best one matches (F48, F54).
 pub const MIN_PRINTS: u32 = 4;
-/// Augment only borderline matches: similarity in (MATCH_THRESHOLD, MATCH_THRESHOLD + this].
-/// Windows augments when the estimated FAR is in [FAR/2, FAR] (F53); with a raw cosine
-/// threshold, a fixed band above it stands in for that.
-pub const AUGMENT_MARGIN: f32 = 0.05;
 /// Highest generation of an augmented print: an augmented print may itself seed another one,
 /// at most this many times in a row (F31).
 pub const MAX_GENERATION: u8 = 3;
@@ -25,11 +17,11 @@ pub const MAX_AUGMENTED: usize = 10;
 /// Enroll-on-failure (F31, `EnrollOnFailureRelaxedThresholdToMatch`): a print from a failed face
 /// attempt that the user then confirmed with the password is added only if it is at least this
 /// similar to the user's enrolled and augmented prints. Windows' value is policy data passed in at
-/// runtime and not in the engine binary; 0.40 is the per-attempt FAR ≈ 1e-5 point of
-/// docs/calibration.md (simulated 9.1e-6 for 15 prints × 16 frames on grayscale LFW), Windows'
-/// own unlock target (F27). So someone who knows the password gets their face added about as
-/// rarely as Windows would accept a stranger's face, while the owner's hard cases (0.40–0.50:
-/// glasses, sunlight) are kept.
+/// runtime and not in the engine binary; 0.40 is the simulated per-attempt FAR ≈ 1e-5 point of
+/// docs/calibration.md (9.1e-6 for 15 prints × 16 frames on grayscale LFW), Windows' own unlock
+/// target (F27); the union bound that [`TARGET_FAR`] is checked against gives 0.50. So someone
+/// who knows the password gets their face added about as rarely as Windows would accept a
+/// stranger's face, while the owner's hard cases (0.40–0.50: glasses, sunlight) are kept.
 pub const ENROLL_ON_FAILURE_THRESHOLD: f32 = 0.40;
 /// Enroll-on-failure prints kept per user; the oldest is dropped first.
 pub const MAX_ON_FAILURE: usize = 5;
@@ -57,13 +49,21 @@ pub struct Print {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrintMatch {
     pub similarity: f32,
+    /// Estimated FAR of an attempt whose best comparison is this one ([`CalibrationTable::far`])
+    pub far: f64,
     pub generation: u8,
 }
 
 impl PrintMatch {
-    /// A match just above the threshold: the only kind that is added to the template (F53).
+    /// Windows recognises a face whose estimated FAR is below the target (F27).
+    pub fn recognised(&self) -> bool {
+        self.far < TARGET_FAR
+    }
+
+    /// A match just under the target, FAR in [target/2, target): the only kind that is added to
+    /// the template (F53).
     pub fn is_borderline(&self) -> bool {
-        self.similarity > MATCH_THRESHOLD && self.similarity <= MATCH_THRESHOLD + AUGMENT_MARGIN
+        self.far >= TARGET_FAR / 2.0 && self.recognised()
     }
 }
 
@@ -83,18 +83,25 @@ impl Template {
         Self { prints }
     }
 
-    /// The highest cosine similarity over all prints (the minimum distance, F28).
-    pub fn best_match(&self, probe: &Embedding) -> Option<PrintMatch> {
-        self.best_match_where(probe, |_| true)
+    /// The highest cosine similarity over all prints (the minimum distance, F28), with its FAR
+    /// from `table`.
+    pub fn best_match(&self, probe: &Embedding, table: &CalibrationTable) -> Option<PrintMatch> {
+        self.best_match_where(probe, table, |_| true)
     }
 
     /// The highest cosine similarity over the prints that `keep` selects.
-    pub fn best_match_where(&self, probe: &Embedding, keep: impl Fn(&Print) -> bool) -> Option<PrintMatch> {
+    pub fn best_match_where(
+        &self,
+        probe: &Embedding,
+        table: &CalibrationTable,
+        keep: impl Fn(&Print) -> bool,
+    ) -> Option<PrintMatch> {
         self.prints
             .iter()
             .filter(|p| keep(p))
-            .map(|p| PrintMatch { similarity: crate::cosine(&p.features, &probe.features), generation: p.generation })
-            .max_by(|a, b| a.similarity.total_cmp(&b.similarity))
+            .map(|p| (crate::cosine(&p.features, &probe.features), p.generation))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(similarity, generation)| PrintMatch { similarity, far: table.far(similarity), generation })
     }
 
     /// Add `probe`, a live frame that matched a print of generation `matched.generation`
@@ -133,13 +140,29 @@ mod tests {
         Embedding { features: features.to_vec() }
     }
 
+    fn matched(similarity: f32, generation: u8) -> PrintMatch {
+        PrintMatch { similarity, far: crate::calibration::lfw_gray().far(similarity), generation }
+    }
+
+    #[test]
+    fn recognised_and_borderline_follow_the_far() {
+        // The shipped table: 0.50 ↔ FAR 1e-5, FAR 5e-6 at about 0.52.
+        assert!(!matched(0.5, 0).recognised());
+        assert!(matched(0.51, 0).recognised() && matched(0.51, 0).is_borderline());
+        assert!(matched(0.53, 0).recognised() && !matched(0.53, 0).is_borderline());
+        assert!(matched(0.9, 0).recognised() && !matched(0.9, 0).is_borderline());
+        assert!(!matched(0.45, 0).is_borderline());
+    }
+
     #[test]
     fn best_match_is_the_max_over_prints() {
+        let table = crate::calibration::lfw_gray();
         let template = Template::enrolled([emb(&[1.0, 0.0]), emb(&[0.0, 1.0]), emb(&[0.6, 0.8])]);
-        let m = template.best_match(&emb(&[0.0, 1.0])).unwrap();
+        let m = template.best_match(&emb(&[0.0, 1.0]), &table).unwrap();
         assert!((m.similarity - 1.0).abs() < 1e-6);
+        assert_eq!(m.far, table.far(m.similarity));
         assert_eq!(m.generation, 0);
-        assert!(Template::default().best_match(&emb(&[1.0, 0.0])).is_none());
+        assert!(Template::default().best_match(&emb(&[1.0, 0.0]), &table).is_none());
     }
 
     #[test]
@@ -147,10 +170,10 @@ mod tests {
         let mut template = Template::enrolled([emb(&[1.0, 0.0])]);
         let probe = emb(&[0.8, 0.6]);
         for generation in 0..MAX_GENERATION {
-            assert!(template.augment(&probe, PrintMatch { similarity: 0.9, generation }));
+            assert!(template.augment(&probe, matched(0.9, generation)));
             assert_eq!(template.prints.last().unwrap().generation, generation + 1);
         }
-        assert!(!template.augment(&probe, PrintMatch { similarity: 0.9, generation: MAX_GENERATION }));
+        assert!(!template.augment(&probe, matched(0.9, MAX_GENERATION)));
         assert_eq!(template.prints.len(), 1 + MAX_GENERATION as usize);
     }
 
@@ -158,7 +181,7 @@ mod tests {
     fn augmentation_evicts_the_oldest_augmented_print() {
         let mut template = Template::enrolled([emb(&[1.0, 0.0]), emb(&[0.0, 1.0])]);
         for i in 0..MAX_AUGMENTED + 2 {
-            assert!(template.augment(&emb(&[i as f32, 0.0]), PrintMatch { similarity: 0.9, generation: 0 }));
+            assert!(template.augment(&emb(&[i as f32, 0.0]), matched(0.9, 0)));
         }
         let augmented: Vec<f32> =
             template.prints.iter().filter(|p| p.source == PrintSource::Augment).map(|p| p.features[0]).collect();
@@ -176,10 +199,11 @@ mod tests {
         let kept: Vec<f32> =
             template.prints.iter().filter(|p| p.source == PrintSource::OnFailure).map(|p| p.features[1]).collect();
         assert_eq!(kept, (1..=MAX_ON_FAILURE).map(|i| i as f32).collect::<Vec<_>>());
-        let matched = template.best_match(&emb(&[0.0, 1.0])).unwrap();
-        assert!(!template.augment(&emb(&[0.0, 1.0]), matched));
+        let table = crate::calibration::lfw_gray();
+        let best = template.best_match(&emb(&[0.0, 1.0]), &table).unwrap();
+        assert!(!template.augment(&emb(&[0.0, 1.0]), best));
         // The relaxed check can leave them out.
-        let enrolled = template.best_match_where(&emb(&[0.0, 1.0]), |p| p.source != PrintSource::OnFailure);
+        let enrolled = template.best_match_where(&emb(&[0.0, 1.0]), &table, |p| p.source != PrintSource::OnFailure);
         assert_eq!(enrolled.unwrap().similarity, 0.0);
     }
 }
