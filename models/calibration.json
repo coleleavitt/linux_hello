@@ -1,0 +1,31 @@
+{
+ "_comment": "Face-match calibration tables (FPR, TAR, cosine similarity) for ArcFace w600k_r50, as Windows Hello's per-hardware-model tables (F51, F60). FPR is the false-accept rate of one print comparison; linux_hello multiplies it by the comparisons of one attempt and accepts below 1e-5. Keys of `cameras` are the USB VID:PID of the IR camera; `default` names the table for unknown cameras. See docs/calibration.md.",
+ "default": "lfw_gray",
+ "cameras": {
+  "30c9:00f3": "lfw_gray"
+ },
+ "tables": {
+  "lfw_gray": {
+   "source": "grayscale LFW, label noise removed (scripts/calibrate.py, 87,079,562 impostor and 242,125 genuine pairs); FPR measured up to 0.400, tail fit from 0.425 on, 0.500 = per-attempt bound 1e-5 / 240",
+   "rows": [
+    [0.0016904, 0.99911, 0.2],
+    [0.00064312, 0.99906, 0.225],
+    [0.00025053, 0.999, 0.25],
+    [0.00010457, 0.99888, 0.275],
+    [4.7141e-05, 0.99873, 0.3],
+    [2.1647e-05, 0.99855, 0.325],
+    [8.498e-06, 0.99822, 0.35],
+    [2.6987e-06, 0.99775, 0.375],
+    [1.0335e-06, 0.99685, 0.4],
+    [5.2852e-07, 0.99517, 0.425],
+    [2.1771e-07, 0.99249, 0.45],
+    [8.9676e-08, 0.98771, 0.475],
+    [4.166666666666667e-08, 0.97942, 0.5],
+    [1.5216e-08, 0.96534, 0.525],
+    [6.2676e-09, 0.94236, 0.55],
+    [2.5817e-09, 0.90516, 0.575],
+    [1.0635e-09, 0.84848, 0.6]
+   ]
+  }
+ }
+}
