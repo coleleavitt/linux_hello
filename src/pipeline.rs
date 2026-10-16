@@ -448,10 +448,12 @@ pub struct ColorRegistration {
 }
 
 impl ColorRegistration {
-    /// ThinkPad P16 Gen 3, IR 640×360 to RGB 640×480: the least-squares fit of the box corners
-    /// over 148 saved pairs of the owner (x' = 0.912·x + 22.7, σ 3.3 px; y' = 0.896·y + 69.7,
-    /// σ 4.4 px). The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes.
-    pub const P16_GEN3: Self = Self { scale: [0.91, 0.90], offset: [23.0, 70.0] };
+    /// ThinkPad P16 Gen 3, IR 640×360 to RGB 640×360: the least-squares fit of the box corners
+    /// over 148 saved pairs of the owner at RGB 640×480 (x' = 0.912·x + 22.7, σ 3.3 px;
+    /// y' = 0.896·y + 69.7, σ 4.4 px), less the 60 rows the 640×360 mode crops at the top
+    /// (`camera::RGB_HEIGHT`; the crop offset measured on one frame of each mode, within 1 px).
+    /// The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes.
+    pub const P16_GEN3: Self = Self { scale: [0.91, 0.90], offset: [23.0, 10.0] };
 
     /// The IR box in RGB coordinates, grown by 7.5 % of its size on every side as Windows'
     /// `registeredRect` (`Registration::GetAreaOfOverlap`).
@@ -556,9 +558,10 @@ mod tests {
 
     #[test]
     fn registration_maps_the_ir_box_onto_the_rgb_box() {
-        // watch_0014: SCRFD boxes of the IR and RGB frames (`examples/color_pairs`).
+        // watch_0014: SCRFD boxes of the IR and RGB frames (`examples/color_pairs`), the RGB one
+        // moved from the 640×480 frame it was found in to the 640×360 crop (60 rows up).
         let ir = face([331.0, 165.0, 437.0, 305.0], 40.0);
-        let rgb = [328.0, 228.0, 422.0, 346.0];
+        let rgb = [328.0, 168.0, 422.0, 286.0];
         let mapped = ColorRegistration::P16_GEN3.map(&ir.bbox);
         assert!(overlap(&mapped, &rgb) > 0.95, "{mapped:?}");
         // Grown by 7.5 % of the mapped size per side.

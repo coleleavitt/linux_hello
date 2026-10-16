@@ -15,7 +15,7 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
      good ─▶ embed lit − min(lit, warped ambient) ─▶ live vote unless the RGB models veto
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
-/dev/video0 (RGB) ─▶ SCRFD faces ─▶ the one overlapping the registered IR box (none: colour net skipped) ─▶ colour net veto
+/dev/video0 (RGB 640x360) ─▶ whole, not dark ─▶ SCRFD faces ─▶ the one overlapping the registered IR box (none: colour net skipped) ─▶ colour net veto
                                         (without the Windows models: FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5)
   track: every analysed face followed by box overlap and print similarity; a new face starts a new attempt
   attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50), no other face
@@ -75,6 +75,22 @@ disturb the exposure (measured over 40 re-sets). The driver default (`(0,0)/640x
 written when the camera opens, in case an earlier run died, and when it closes. A camera without
 the controls logs once (debug) and meters the whole frame; a camera that rejects a rectangle
 logs once (warn) and keeps whatever it has.
+
+**RGB capture.** The RGB camera streams YUYV 640×360, the IR frame's size and a centre crop of its
+4:3 sensor frame (the 640×480 frame less 60 rows at the top and at the bottom: the two modes
+differ by 1.4 grey levels per pixel at that offset, 4.7 if the 480-row frame is scaled instead).
+640×480 does not work next to the IR stream on this laptop's USB 2.0 link (both cameras hang off
+one 480 Mb/s port): alone it delivers whole frames, but with the IR stream running every frame
+arrives truncated at 155–173 KB of 614 400 and flagged `V4L2_BUF_FLAG_ERROR`, at 30 fps as at
+8 fps (`v4l2-ctl --stream-mmap --verbose`, 2026-10-16; 640×360 YUYV and MJPEG 640×480 arrive
+whole). The mapped buffer comes back whole whatever `bytesused` says, so such a frame showed as
+the top 133 rows of the picture over a green block (YUYV zeros), and SCRFD found no face in it:
+74 of 74 frames in two `watch` runs that morning, when `rgb_real=-` hid that the colour net never
+ran. `Camera::capture_rgb` now drops a frame the driver flags as broken or that is shorter than
+the format; `OpenCameras::capture_liveness` reads past at most `MAX_RGB_SKIPS` = 4 broken or
+dark frames per pair, then the pair has no RGB frame and the colour net is skipped (`color=no_rgb`,
+no vote; without the Windows Hello models the open RGB models veto, as for a dropped camera).
+The IR-to-RGB registration (§5) is the 640×480 fit moved up by the 60 cropped rows.
 
 **Start-up (L7).** `OpenCameras::open` opens the IR camera first (its first frame comes after
 ≈ 90 ms alone), drops `WARMUP_FRAMES = 4` frames, then opens the RGB camera (first frame after
@@ -276,10 +292,13 @@ has no colour face and the colour net is skipped with status 7, no vote, as any 
 missing input (F25). linux_hello does the same with a fixed registration
 (`pipeline::ColorRegistration::P16_GEN3`, `corresponding`): the cameras are built in side by side,
 so the IR SCRFD box maps to the RGB SCRFD box by a scale and offset per axis, x' = 0.91·x + 23,
-y' = 0.90·y + 70, the least-squares fit of the box corners over 148 saved pairs of the owner
-(`examples/color_pairs` on `validation_frames/watch_*` and a `watch` output; residual σ 3.3 px in
-x, 4.4 px in y, max 16.5 px; the face's IR box spanned x 277–361, y 98–166, so the fit is only
-checked in that area). The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes of the
+y' = 0.90·y + 10. That is the least-squares fit of the box corners over 148 saved pairs of the
+owner at RGB 640×480 (y' = 0.90·y + 70; `examples/color_pairs` on `validation_frames/watch_*` and
+a `watch` output; residual σ 3.3 px in x, 4.4 px in y, max 16.5 px; the face's IR box spanned
+x 277–361, y 98–166, so the fit is only checked in that area), less the 60 rows the 640×360
+capture crops at the top (§1). On 26 live pairs at 640×360 (owner lying down, IR box x 325–425,
+y 122–254) the mapped box is within 4 px (x) and 9 px (y) of the RGB box and every pair overlaps
+fully. The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes of the
 same face; the mapping is box to box, which is what the overlap needs. With it every saved pair
 overlaps fully (the grown box contains the RGB box); the RGB face has to sit ≈ 50 px (x) or
 ≈ 70 px (y) away from where the IR face says, half a face, before the overlap falls under 0.55.

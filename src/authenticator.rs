@@ -23,7 +23,8 @@ const LIVENESS_BUFFERS: u32 = 2;
 /// session goes on without RGB, so the colour net is skipped as Windows skips a classifier whose
 /// input is missing (F25 status 6/7).
 const RGB_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
-const MAX_DARK_SKIPS: usize = 4;
+/// Broken or underexposed RGB frames read past for one pair before it goes without.
+const MAX_RGB_SKIPS: usize = 4;
 const DARK_RATIO: f32 = 0.5;
 /// Prints one enrollment collects (F54: 16 per enrolment in the v5 parameter block).
 pub const ENROLL_PRINTS: usize = 16;
@@ -113,33 +114,35 @@ impl OpenCameras {
         }
     }
 
-    /// The RGB camera underexposes 2-3 frames about every 5 s, and the liveness models reject
-    /// those. Skip frames much darker than the recent average (up to a few in a row).
-    /// A camera that stops delivering frames ([`RGB_FRAME_TIMEOUT`]) is dropped for the session.
+    /// The RGB frame for this pair: the next frame that is whole ([`Camera::capture_rgb`]) and
+    /// not much darker than the recent average (the camera underexposes 2-3 frames about every
+    /// 5 s, and the liveness models reject those). Up to [`MAX_RGB_SKIPS`] frames are skipped;
+    /// after that the pair has no RGB frame and the colour net is skipped (no veto). A camera
+    /// that stops delivering frames ([`RGB_FRAME_TIMEOUT`]) is dropped for the session.
     fn capture_liveness(&mut self) -> Result<Option<RgbImage>> {
         let Some(cam) = self.liveness.as_mut() else { return Ok(None) };
         let frame = (|| {
-            let mut frame = cam.capture_rgb()?;
-            for _ in 0..MAX_DARK_SKIPS {
+            for _ in 0..=MAX_RGB_SKIPS {
+                let Some(frame) = cam.capture_rgb()? else { continue };
                 let level = brightness(&frame);
                 match self.rgb_level {
-                    Some(avg) if level < DARK_RATIO * avg => {
-                        debug!(level, avg, "skipping underexposed RGB frame");
-                        frame = cam.capture_rgb()?;
-                    }
+                    Some(avg) if level < DARK_RATIO * avg => debug!(level, avg, "skipping underexposed RGB frame"),
                     _ => {
                         self.rgb_level = Some(self.rgb_level.map_or(level, |avg| 0.8 * avg + 0.2 * level));
-                        break;
+                        return Ok(Some(frame));
                     }
                 }
             }
-            Ok(frame)
+            debug!("no usable RGB frame for this pair");
+            Ok(None)
         })();
-        let frame = without_rgb_on_timeout(frame, "RGB frame stalled")?;
-        if frame.is_none() {
-            self.liveness = None;
+        match without_rgb_on_timeout(frame, "RGB frame stalled")? {
+            Some(frame) => Ok(frame),
+            None => {
+                self.liveness = None;
+                Ok(None)
+            }
         }
-        Ok(frame)
     }
 }
 
