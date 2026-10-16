@@ -122,7 +122,8 @@ A face gives no print and no vote if:
 The occlusion model is the converted Windows Hello one (`models/windows_hello/converted/occlusion`,
 docs/winhello-models/cefa.md). Its input is the face box resampled to 128×128, as in Windows; the box
 is the Windows IR detector's (on the owner's frontal frames p(none) is 0.991–0.999 with it, 0.961–0.998
-with SCRFD's box).
+with SCRFD's box). It is the only occlusion detector of Windows' stock path: the eye and mouth/nose
+detectors run only with `IsFaceOcclusionDetectorEnabled` off, the legacy path (F65), and are not ported.
 
 The frontal check uses the pose Windows uses: the 6-DoF output of its IR RetinaFace-style detector
 (`models/windows_hello/converted/ldmf/ort/MODEL_FILES_110.ort`, `RetinaEngine::ComputeOrientation`,
