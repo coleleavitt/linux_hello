@@ -15,7 +15,8 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
      good ─▶ embed lit − min(lit, warped ambient) ─▶ live vote unless the RGB models veto
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
-/dev/video0 (RGB) ─▶ SCRFD faces ─▶ nearest to the IR face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
+/dev/video0 (RGB) ─▶ SCRFD faces ─▶ the one overlapping the registered IR box (none: colour net skipped) ─▶ colour net veto
+                                        (without the Windows models: FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5)
   track: every analysed face followed by box overlap and print similarity; a new face starts a new attempt
   attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50), no other face
            of the pair with a lower FAR → recognised; from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
@@ -229,12 +230,32 @@ For a good frame:
 |---|---|
 | IR: without the Windows Hello models, the good lighting status (reflects the emitter like a nearby face, little ambient IR) | +1 |
 | IR: with the Windows Hello models, their frame total (F25), see below | −3…+1 |
-| RGB, only without the Windows Hello models: FaceNox + MiniFASNetV2 mean P(real) < 0.5, or no face in the RGB frame | −2 |
+| RGB, only without the Windows Hello models: FaceNox + MiniFASNetV2 mean P(real) < 0.5, or no RGB face corresponding to the IR face (below) | −2 |
 
-The RGB face of an IR face is the SCRFD face of the RGB frame whose box centre, normalised by the
-frame size, is nearest to the IR face's: the two cameras sit side by side with a similar field of
-view and the frames are not registered (`EvaluateColorFaceQuality` is not ported). With one face
-in each frame this is the largest face as before.
+**Colour face of an IR face (F66).** Windows pairs the IR face with the colour face that overlaps
+the IR box mapped into the colour frame by a per-registration affine, learnt at run time from
+observed pairs; the mapped box is grown by 7.5 % per side and the overlap must be at least 0.55 of
+the smaller box, else the pair is "low overlapping" and, with exactly one face in each frame, the
+two are paired anyway (the rule Windows applies before it has a registration); otherwise the face
+has no colour face and the colour net is skipped with status 7, no vote, as any classifier with
+missing input (F25). linux_hello does the same with a fixed registration
+(`pipeline::ColorRegistration::P16_GEN3`, `corresponding`): the cameras are built in side by side,
+so the IR SCRFD box maps to the RGB SCRFD box by a scale and offset per axis, x' = 0.91·x + 23,
+y' = 0.90·y + 70, the least-squares fit of the box corners over 148 saved pairs of the owner
+(`examples/color_pairs` on `validation_frames/watch_*` and a `watch` output; residual σ 3.3 px in
+x, 4.4 px in y, max 16.5 px; the face's IR box spanned x 277–361, y 98–166, so the fit is only
+checked in that area). The scale includes SCRFD drawing its RGB boxes ≈ 0.9× its IR boxes of the
+same face; the mapping is box to box, which is what the overlap needs. With it every saved pair
+overlaps fully (the grown box contains the RGB box); the RGB face has to sit ≈ 50 px (x) or
+≈ 70 px (y) away from where the IR face says, half a face, before the overlap falls under 0.55.
+Several faces in the RGB frame: the one overlapping most, as Windows (before: the nearest box
+centre). The fallback keeps the colour net running on a camera pair the constant does not fit;
+on this laptop it only matters when a single RGB face is far from the single IR face.
+
+Windows also computes four colour quality flags on the paired face (`EvaluateColorFaceQuality`,
+F66: exposure status of the colour face, low alignment confidence, both opposite edges cut = too
+close, too far) but only counts them in telemetry; they stop nothing, so linux_hello does not
+compute them.
 
 Frame total > 0 is a live vote, < 0 a spoof vote. Weak and rejected frames do not vote (and the
 liveness models are not run for them), so with the Windows Hello models a frame is live only when
