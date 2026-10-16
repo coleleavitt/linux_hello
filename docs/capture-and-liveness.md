@@ -195,7 +195,15 @@ The first word is unchanged from earlier versions, so older PAM modules keep wor
 | `NOMATCH 0.310` | auth error | Face not recognized |
 | `NOTLIVE` | auth error | Face not accepted as live |
 | `NOFACE too_dark` / `too_bright` / `too_far` / `edge` / `no_face` | auth error | Face too dark: move closer… / Face too bright: move back… / Face too small: move closer… / Face at the edge… / No face seen… |
+| `UNAVAILABLE lid_closed` | ignore | Face login not available: the lid is closed |
 | `NOTENROLLED`, `ERROR …` | ignore | — |
+
+`UNAVAILABLE lid_closed` (`IsLidClosedScenario`): the daemon answers it before opening a camera
+when `/proc/acpi/button/lid/*/state` says `closed` and the IR camera is built in. Built in means the
+USB device above `/sys/class/video4linux/<videoN>/device` has `removable` = `fixed` (this
+laptop's `/dev/video2`, USB 3-4, reports `fixed`); `removable` = `removable` is an external camera,
+which is still used with the lid closed, and anything else counts as built in. A PAM module from
+before this reply treats the unknown first word as "not available" too.
 
 ## Store format
 

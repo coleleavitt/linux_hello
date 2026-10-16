@@ -6,6 +6,7 @@ use image::RgbImage;
 use std::collections::HashMap;
 use tracing::{debug, info};
 
+use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::{
     Camera, CameraType, Embedding, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
@@ -237,9 +238,13 @@ pub struct Authenticator {
 }
 
 impl Authenticator {
-    /// Read frame pairs until the [`Session`] decides. On a match, add the best live frame of the
+    /// Refuse when the lid is closed over a built-in camera. Otherwise read frame pairs until the
+    /// [`Session`] decides. On a match, add the best live frame of the
     /// matched face to the template if it was a borderline match (F53) and save the store.
     pub fn verify(&mut self, user: &str) -> Result<Verdict> {
+        if lid::lid_closed() && lid::built_in(&self.cameras.device) {
+            return Ok(Verdict::LidClosed);
+        }
         if !self.pipeline.is_enrolled(user) {
             return Ok(Verdict::NotEnrolled);
         }

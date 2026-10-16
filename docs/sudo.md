@@ -37,6 +37,7 @@ service in `/tmp`). The system-wide install (`contrib/install.sh`) needs root on
 | Owner at the laptop | `PAM_SUCCESS` (similarity 0.82–0.89, liveness 0.84–0.96) | 2.1 s |
 | Daemon not running | `PAM_IGNORE` → password | 0 s |
 | User not enrolled | `PAM_IGNORE` → password | 0 s |
+| Lid closed, built-in IR camera (`UNAVAILABLE lid_closed`) | `PAM_IGNORE` → password, message "Face login not available: the lid is closed" (libpam test with a stub daemon) | 0 s |
 | `SSH_CONNECTION` / `SSH_TTY` / `PAM_RHOST` set | `PAM_IGNORE` → password | 0 s |
 | Nobody / someone else at the camera | `PAM_AUTH_ERR` → password | up to ~2–3 s |
 

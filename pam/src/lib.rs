@@ -8,7 +8,7 @@
 //! Return codes are chosen for `auth sufficient pam_linux_hello.so` placed before the password
 //! modules: a match returns PAM_SUCCESS; a face that is wrong, spoofed or missing returns
 //! PAM_AUTH_ERR and prints a short reason (`NOFACE too_dark` → "Face too dark: ..."); anything that means "face login is not available" (daemon down, user not
-//! enrolled, bad reply) returns PAM_IGNORE. Either way the stack falls through to the password.
+//! enrolled, lid closed over a built-in camera, bad reply) returns PAM_IGNORE. Either way the stack falls through to the password.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::{BufRead, BufReader, Write};
@@ -103,16 +103,20 @@ fn authenticate(pamh: *mut PamHandle, args: Args) -> c_int {
     })()
     .unwrap_or_default();
 
-    let code = match reply.split_whitespace().next() {
-        Some("MATCH") => PAM_SUCCESS,
-        Some("NOMATCH" | "NOTLIVE" | "NOFACE") => PAM_AUTH_ERR,
-        _ => PAM_IGNORE,
-    };
     log(pamh, &format!("pam_linux_hello: user={user} reply={reply:?}"));
-    if code == PAM_AUTH_ERR {
-        message(pamh, failure_message(&reply));
+    match reply.split_whitespace().next() {
+        Some("MATCH") => PAM_SUCCESS,
+        Some("NOMATCH" | "NOTLIVE" | "NOFACE") => {
+            message(pamh, failure_message(&reply));
+            PAM_AUTH_ERR
+        }
+        // `UNAVAILABLE lid_closed`: the only reason so far.
+        Some("UNAVAILABLE") => {
+            message(pamh, c"Face login not available: the lid is closed");
+            PAM_IGNORE
+        }
+        _ => PAM_IGNORE,
     }
-    code
 }
 
 /// A short hint for a failed face check. The daemon's reply is the verdict word, then for

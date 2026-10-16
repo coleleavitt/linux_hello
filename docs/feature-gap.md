@@ -107,7 +107,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | WinBio presence monitor, capture every 125 ms, no service timeout; UI ends the session (F2, F55, F57) | Different: daemon on demand per PAM request, up to 16 frame pairs, PAM timeout 10 s | Optional: time-based budget |
 | Auto-logon confirmation after 120 s on the lock screen; switch timeout 10 s (F56) | N/A (sudo only; screen lock on hold per docs/README.md) | Relevant once a screen locker is supported |
 | Remote-session suppression | Done: PAM ignores `SSH_CONNECTION`/`SSH_TTY`/`PAM_RHOST` | — |
-| Lid-closed / external-camera suppression (`IsLidClosedScenario`, `ShouldForbidExternalCameras`) | Missing | Check lid switch (`/proc/acpi/button/lid/*/state`) and refuse |
+| Lid-closed / external-camera suppression (`IsLidClosedScenario`, `ShouldForbidExternalCameras`) | **Done**: `verify` first refuses with `UNAVAILABLE lid_closed` (PAM: ignore, password) when an ACPI lid reports closed and the IR camera is built in (its USB device's sysfs `removable` is `fixed`; unknown counts as built in). `/dev/video2` here: `fixed` | — |
 | Daemon down → password (PAM_IGNORE) | Done | — |
 
 ## User feedback & telemetry

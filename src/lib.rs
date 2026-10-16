@@ -34,7 +34,6 @@ pub use liveness::{LivenessSession, LivenessState, Vote};
 pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
 pub use pipeline::{FacePipeline, FrameCheck};
 pub use store::FaceStore;
-pub use lid::{get_lid_state, should_suppress_auth, LidState};
 pub use tracker::FaceTracker;
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{OcclusionDetector, OcclusionType, OcclusionResult};
@@ -149,7 +148,9 @@ impl FaceProblem {
 
 /// Outcome of checking one user's face. The daemon sends it to the PAM module as one line whose
 /// first word is the verdict: `MATCH 0.850`, `NOMATCH 0.310`, `NOTLIVE`, `NOFACE too_dark`,
-/// `NOTENROLLED`.
+/// `NOTENROLLED`, `UNAVAILABLE lid_closed`. `NOTENROLLED` and `UNAVAILABLE` mean "face login is
+/// not available" (PAM falls through to the password silently); an older PAM module treats the
+/// unknown word `UNAVAILABLE` the same way.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
     Match { similarity: f32 },
@@ -158,6 +159,8 @@ pub enum Verdict {
     /// No usable face; the most frequent reason over the session
     NoFace { problem: FaceProblem },
     NotEnrolled,
+    /// The lid is closed and the IR camera is built in (`IsLidClosedScenario`)
+    LidClosed,
 }
 
 impl std::fmt::Display for Verdict {
@@ -168,6 +171,7 @@ impl std::fmt::Display for Verdict {
             Verdict::NotLive => f.write_str("NOTLIVE"),
             Verdict::NoFace { problem } => write!(f, "NOFACE {}", problem.as_str()),
             Verdict::NotEnrolled => f.write_str("NOTENROLLED"),
+            Verdict::LidClosed => f.write_str("UNAVAILABLE lid_closed"),
         }
     }
 }

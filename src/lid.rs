@@ -1,124 +1,33 @@
-//! Laptop lid state detection.
-//!
-//! Detects whether the laptop lid is open or closed by reading from
-//! `/proc/acpi/button/lid/*/state`. Used to suppress face authentication
-//! when the lid is closed (internal camera is covered).
+//! Lid-closed suppression (`IsLidClosedScenario`, `ShouldForbidExternalCameras`): with the lid
+//! closed, a built-in camera sees the keyboard, not the user, so face login is not offered.
 
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-use tracing::debug;
 
-/// How long to cache the lid state before re-reading.
-const CACHE_TTL: Duration = Duration::from_secs(1);
-
-/// Lid state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LidState {
-    Open,
-    Closed,
-    /// No lid switch found (desktop, or unsupported hardware).
-    Unknown,
+/// Whether an ACPI lid switch reports "closed". `false` without a lid switch (desktops).
+pub fn lid_closed() -> bool {
+    let Ok(lids) = fs::read_dir("/proc/acpi/button/lid") else { return false };
+    lids.flatten().any(|lid| fs::read_to_string(lid.path().join("state")).is_ok_and(|s| state_closed(&s)))
 }
 
-/// Cached lid state with timestamp.
-struct CachedState {
-    state: LidState,
-    checked_at: Instant,
+/// `state:      closed` → true.
+fn state_closed(content: &str) -> bool {
+    content.split_whitespace().last() == Some("closed")
 }
 
-static CACHE: Mutex<Option<CachedState>> = Mutex::new(None);
-
-/// Get the current lid state, using a 1-second cache.
-pub fn get_lid_state() -> LidState {
-    let now = Instant::now();
-
-    // Check cache first
-    {
-        let cache = CACHE.lock().unwrap();
-        if let Some(ref cached) = *cache {
-            if now.duration_since(cached.checked_at) < CACHE_TTL {
-                return cached.state;
-            }
-        }
-    }
-
-    // Read fresh state
-    let state = read_lid_state();
-    debug!(?state, "lid state");
-
-    // Update cache
-    {
-        let mut cache = CACHE.lock().unwrap();
-        *cache = Some(CachedState {
-            state,
-            checked_at: now,
-        });
-    }
-
-    state
+/// Whether the V4L2 `device` (e.g. `/dev/video2`) is built into the machine: its USB device's
+/// sysfs `removable` attribute is `fixed`. Unknown (`unknown`, no USB parent, no sysfs entry)
+/// counts as built in, so a closed lid suppresses face login when in doubt.
+pub fn built_in(device: &str) -> bool {
+    let name = Path::new(device).file_name().unwrap_or_default();
+    removable(&Path::new("/sys/class/video4linux").join(name).join("device")).as_deref() != Some("removable")
 }
 
-/// Read the lid state from procfs.
-fn read_lid_state() -> LidState {
-    // Try common lid switch paths
-    let candidates = [
-        "/proc/acpi/button/lid/LID/state",
-        "/proc/acpi/button/lid/LID0/state",
-        "/proc/acpi/button/lid/LID1/state",
-    ];
-
-    for path in candidates {
-        if let Some(state) = read_lid_file(path) {
-            return state;
-        }
-    }
-
-    // Also try globbing the lid directory
-    if let Ok(entries) = fs::read_dir("/proc/acpi/button/lid") {
-        for entry in entries.flatten() {
-            let state_path = entry.path().join("state");
-            if let Some(state) = read_lid_file(&state_path) {
-                return state;
-            }
-        }
-    }
-
-    LidState::Unknown
-}
-
-/// Read and parse a single lid state file.
-fn read_lid_file(path: impl AsRef<Path>) -> Option<LidState> {
-    let content = fs::read_to_string(path.as_ref()).ok()?;
-    parse_lid_state(&content)
-}
-
-/// Parse the lid state from the file content.
-///
-/// Format: `state:      open` or `state:      closed` (with variable whitespace).
-fn parse_lid_state(content: &str) -> Option<LidState> {
-    let content = content.trim().to_lowercase();
-
-    if content.contains("open") {
-        Some(LidState::Open)
-    } else if content.contains("closed") {
-        Some(LidState::Closed)
-    } else {
-        None
-    }
-}
-
-/// Check if authentication should be suppressed due to lid being closed.
-///
-/// Returns `true` if the lid is closed and the camera is internal.
-/// External cameras can still be used with the lid closed.
-pub fn should_suppress_auth(camera_is_internal: bool) -> bool {
-    if !camera_is_internal {
-        return false;
-    }
-
-    matches!(get_lid_state(), LidState::Closed)
+/// The `removable` attribute of the first ancestor of the sysfs `device` link that has one: the
+/// link points at the USB interface, its parent is the USB device.
+fn removable(device: &Path) -> Option<String> {
+    let path = fs::canonicalize(device).ok()?;
+    path.ancestors().find_map(|dir| fs::read_to_string(dir.join("removable")).ok()).map(|s| s.trim().to_string())
 }
 
 #[cfg(test)]
@@ -126,17 +35,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_lid_state() {
-        assert_eq!(parse_lid_state("state:      open"), Some(LidState::Open));
-        assert_eq!(parse_lid_state("state:      closed"), Some(LidState::Closed));
-        assert_eq!(parse_lid_state("state: open\n"), Some(LidState::Open));
-        assert_eq!(parse_lid_state("STATE: CLOSED"), Some(LidState::Closed));
-        assert_eq!(parse_lid_state("garbage"), None);
+    fn lid_state() {
+        assert!(state_closed("state:      closed\n"));
+        assert!(!state_closed("state:      open\n"));
+        assert!(!state_closed(""));
     }
 
     #[test]
-    fn test_should_suppress_auth() {
-        // External camera: never suppress
-        assert!(!should_suppress_auth(false));
+    fn removable_comes_from_the_usb_device() {
+        let root = std::env::temp_dir().join(format!("linux_hello_lid_{}", std::process::id()));
+        let interface = root.join("usb3/3-4/3-4:1.2");
+        fs::create_dir_all(&interface).unwrap();
+        fs::write(root.join("usb3/removable"), "unknown\n").unwrap();
+        fs::write(root.join("usb3/3-4/removable"), "fixed\n").unwrap();
+        let link = root.join("device");
+        std::os::unix::fs::symlink(&interface, &link).unwrap();
+        assert_eq!(removable(&link).as_deref(), Some("fixed"));
+        assert_eq!(removable(&root.join("missing")), None);
+        fs::remove_dir_all(root).unwrap();
     }
 }
