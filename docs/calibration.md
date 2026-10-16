@@ -215,8 +215,12 @@ when the result is below 1e-5. `linux_hello` does the same from `models/calibrat
 - Estimated FAR of one comparison (`CalibrationTable::pair_far`, as `sub_1800397B4` with distance = 1 − similarity):
   linear interpolation of the FPR between the bracketing rows, extrapolated linearly below the first row;
   above the last row `FPR_top · exp((d − d_top) / |d_top|)`.
-- Estimated FAR of an attempt (`far`) = pair FAR × 240, the comparisons an attempt can make (15 prints × 16
-  frame pairs, the union bound above), capped at 1. This stands in for Windows' comparison multiplier.
+- Estimated FAR of an attempt (`far`) = pair FAR × the comparisons the attempt can make: the number of prints
+  in the template being matched × 16 frame pairs (the union bound above), capped at 1. This stands in for
+  Windows' comparison multiplier and follows the real template size: the 15 × 16 = 240 of the tables below is
+  the case of 15 prints; a 16-print template (one Windows-style enrollment) gives 256, a 31-print one (16
+  enrolled + 10 augmented + 5 on-failure) 496, and 100 prints (the per-user maximum, F54) 1,600. The
+  duplicate-enrollment check (`FaceStore::duplicate`) uses the same estimate against each other user's template.
 - Recognised when `far < 1e-5` (`TARGET_FAR`); augmentation candidate when `far ∈ [5e-6, 1e-5)` (F53).
 
 ### Rows (`lfw_gray`)
@@ -246,15 +250,19 @@ and label errors. TAR = 1 − FRR over all genuine pairs.
 | 0.575 | 2.58e-09 | 0.90516 | fit | 6.2e-07 |
 | 0.600 | 1.06e-09 | 0.84848 | fit | 2.6e-07 |
 
-The 0.500 row carries the per-attempt bound exactly (the fit gives 3.7e-8 there and reaches 4.17e-8 at 0.497),
-so the decision is the old one: a best similarity above 0.50 is recognised, 0.50 itself is not. Between rows the
-linear interpolation overestimates the FAR of an exponential tail by up to about 1.6× (the measured points of
-the first table above: 1e-5 at 0.346 reads 1.06e-5, 1e-6 at 0.401 reads 1.02e-6). The augmentation band
-[5e-6, 1e-5) is similarity 0.50–0.52 (it was a fixed 0.50–0.55 before).
+The 0.500 row carries the per-attempt bound for 15 prints exactly (the fit gives 3.7e-8 there and reaches
+4.17e-8 at 0.497), so for a 15-print template the decision is the old one: a best similarity above 0.50 is
+recognised, 0.50 itself is not. Between rows the linear interpolation overestimates the FAR of an exponential
+tail by up to about 1.6× (the measured points of the first table above: 1e-5 at 0.346 reads 1.06e-5, 1e-6 at
+0.401 reads 1.02e-6). The augmentation band [5e-6, 1e-5) is similarity 0.50–0.52 for 15 prints (it was a fixed
+0.50–0.55 before).
 
-The per-attempt scaling by 240 assumes 15 prints; with enroll-on-failure prints a template can hold 20
-(5 enrolled + 10 augmented + 5 on-failure), for which the bound would be 320 × pair FAR, i.e. 1.2e-5 at 0.50.
-The simulation above (1.8e-6 per attempt at 0.50) says the bound is loose by far more than that.
+Since the comparison count follows the template, the recognition point moves with its size (`cargo test`
+checks these): a 16-print template needs a similarity above 0.503, a 31-print one above 0.525, and a single
+print only 0.43 (16 comparisons). A bigger template is both more likely to contain a close print of the
+owner and to be matched by a stranger by chance; the honest bound charges for the second. The simulation
+above (1.8e-6 per attempt at 0.50 with 15 prints) says the union bound is loose by a good margin, so the
+shift is conservative.
 
 Above the last row (0.60) the Windows extrapolation decays slowly (e-fold per 0.4 of similarity), so the
 reported FAR of a strong match is a floor of about 1e-7 per attempt, not a measurement.
@@ -287,9 +295,10 @@ default for an unlisted camera.
   in the region of interest, so its numbers are good to about a factor of 2–3.
 - **Liveness is separate.** These numbers are for zero-effort impostors (a stranger's real face). They say
   nothing about photos, screens or masks; that is the anti-spoof stage.
-- **Enrollment model.** This assumes up to 15 prints per user and max-over-prints matching, as the parent
-  change plans. `main` at `baea697` stores one mean template per user. With one template the union bound is 16 × pair FAR,
-  which gives about 0.42 (gray) / 0.40 (rgb) with the same tail fit.
+- **Enrollment model.** The tables assume up to 15 prints per user and max-over-prints matching; the code
+  now scales the bound by the real print count (above), so a Windows-style 16-print enrollment plus added,
+  augmented and on-failure prints is charged for. `main` at `baea697` stored one mean template per user; with
+  one print the union bound is 16 × pair FAR, which gives about 0.42 (gray) / 0.40 (rgb) with the same tail fit.
 
 ## Reproduce
 

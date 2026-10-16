@@ -236,14 +236,16 @@ user being authenticated (1:1).
 As Windows (F27, F51, F60), the similarity is not thresholded directly. A calibration table for the
 IR camera (`models/calibration.json`, keyed by the camera's USB `vid:pid`, with a default; this
 laptop's `30c9:00f3`) maps the best similarity to the estimated false-accept rate of one comparison
-by linear interpolation between its (FPR, TAR, similarity) rows; times 240, the comparisons one
-attempt can make (15 prints × 16 pairs), that is the attempt's FAR (`PrintMatch::far`). The face is
-recognised when it is below `TARGET_FAR` = 1e-5. The shipped table comes from grayscale LFW
-([calibration.md](calibration.md), "Calibration table"); its 0.50 row is the 1e-5 point, so this is
-the former `MATCH_THRESHOLD` 0.50 (one comparison FAR ≈ 4e-8, simulated per-attempt FAR ≈ 1.8e-6,
-FRR 0.23% per probe frame against 15 prints). Every per-frame log line and `watch`'s `log.jsonl`
-carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the daemon reply keeps the
-similarity only.
+by linear interpolation between its (FPR, TAR, similarity) rows; times the comparisons one attempt
+can make, the prints in the template × 16 pairs, that is the attempt's FAR (`PrintMatch::far`,
+`CalibrationTable::far`). The face is recognised when it is below `TARGET_FAR` = 1e-5. The shipped
+table comes from grayscale LFW ([calibration.md](calibration.md), "Calibration table"); its 0.50 row
+is the 1e-5 point for 15 prints (240 comparisons), the former `MATCH_THRESHOLD` 0.50 (one comparison
+FAR ≈ 4e-8, simulated per-attempt FAR ≈ 1.8e-6, FRR 0.23% per probe frame against 15 prints). With
+the 16 prints of one enrollment the point is 0.503, with 31 (16 enrolled + 10 augmented + 5
+on-failure) 0.525, so the bound stays honest as the template grows. Every per-frame log line and
+`watch`'s `log.jsonl` carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the
+daemon reply keeps the similarity only.
 
 ### 7. Decision (F25, F47, F48)
 
@@ -257,7 +259,8 @@ never count for it. Pairs without a face keep the current track. The 16-pair lim
 whole session (twice, after a re-attempt, below).
 
 1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the estimated FAR of
-   the best similarity over them is < 1e-5 (similarity > 0.50 with the shipped table).
+   the best similarity over them is < 1e-5 (similarity > 0.50 with the shipped table and 15
+   stored prints, 0.503 with 16).
 2. **Liveness:** votes count only from the recognising frame on. ≥ 2 live votes → `MATCH <best
    similarity>`; else ≥ 3 spoof votes → `NOTLIVE`.
 3. **Give up** after 16 frame pairs (Windows: 48 frames or a counter > 16; one pair is two frames):
@@ -380,19 +383,44 @@ Stores from before this format (one averaged `features` vector per user) are ref
 error that asks to re-enroll: `linux_hello enroll <user>` replaces the template. A sealed old store
 must be re-enrolled the same way.
 
-## Enrollment
+## Enrollment (F54, F28)
 
-`linux_hello enroll <user> [--frames 5]` reads frame pairs from the IR camera until it has
-`--frames` pairs that pass every frame gate with good lighting (at most 4 pairs per print), and
-stores one print per pair.
+`linux_hello enroll <user> [--frames 16] [--add] [--force]` tells the user once to look at the
+camera and move the head a little, as when talking to someone, then reads frame pairs from the IR
+camera and keeps one print per pair that passes every frame gate (§2, with the enrollment
+occlusion threshold) with good lighting (§3), until it has `--frames` prints — 16 by default, the
+per-enrolment count of Windows' v5 parameter block (F54) — or 10 s have passed
+(`ENROLL_PRINTS`, `ENROLL_TIMEOUT`). The terminal shows `7/16` as prints come in. A print whose
+cosine similarity to a print already collected is above 0.98 (`DUPLICATE_PRINT`) is the same view
+of the face and does not count, so 16 frames of a face held still do not make 16 prints; on this
+camera consecutive lit frames of a still sitter score 0.96–0.99 to each other and frames seconds
+apart 0.96–0.98 (`validation_frames`), so the rule drops only near-identical frames and small
+natural movement gives new prints. At the end the command reports what it collected and why
+frames were skipped (`near_duplicate 12, too_dark 3, weak_lighting 2`). A new template is stored
+when at least 4 prints were collected (`MIN_PRINTS`, the count a session needs to recognise); with
+fewer the command fails and says so. There is no pose guidance beyond the prompt: Windows' multi-pose
+enrolment is approximated by the natural movement and the near-duplicate rule.
 
-Before storing, it compares every new print with the templates of the other enrolled users, as
-Windows' `CheckForDuplicateEnrollment`. If one matches (estimated FAR < 1e-5, similarity > 0.50 with
-the shipped table), enrollment fails and names the closest such user: `this face matches enrolled user
-alice (similarity 0.641, FAR 2.3e-7); use --force to enroll it anyway`. `--force` stores the prints anyway (twins, or one person with two
-accounts). Re-enrolling a user compares only with the others. Checked on saved frames: the owner's
-lit frames from one sitting against a template from another sitting match at 0.641; the six
-faces of the stranger photo score −0.05…0.03 against the owner and are not refused.
+`--add` is Windows' "improve recognition": the new prints are appended to the user's existing
+template (e.g. with glasses on, or in different light) instead of replacing it, as `enroll`
+prints of generation 0. A template holds at most 100 prints of all kinds (`MAX_PRINTS`, F54);
+`--add` collects at most the room left and refuses a full template. Near-duplicates of the prints
+already in the template do not count either, so adding in the same conditions adds little.
+`--add` needs at least one new print.
+
+Before storing, both modes compare every new print with the templates of the other enrolled users,
+as Windows' `CheckForDuplicateEnrollment`, with the same FAR estimate as a recognition (§6, so
+against the other user's print count). If one matches (estimated FAR < 1e-5), enrollment fails and
+names the closest such user: `this face matches enrolled user alice (similarity 0.641, FAR
+2.3e-7); use --force to enroll it anyway`. `--force` stores the prints anyway (twins, or one
+person with two accounts). Re-enrolling a user compares only with the others. Checked on saved
+frames (library API): a template from two frontal owner frames matches the other two at 0.965 and
+0.983 (FAR 1.4e-8, 1.3e-8); enrolling those two as another user is refused naming the owner;
+`--add` appends them (4 prints, the FAR of a perfect match then reads 2.5e-8, from 1.3e-8 with 2
+prints); the six faces of the stranger photo score −0.05…0.03 against the owner and are not refused.
+
+`contrib/install.sh` runs `enroll` the same way (16 prints, 10 s), with the prompt and progress on
+the terminal of the `sudo` call.
 
 ## Inspecting
 

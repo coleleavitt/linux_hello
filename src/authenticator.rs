@@ -3,11 +3,13 @@
 
 use anyhow::{bail, Result};
 use image::RgbImage;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
+use crate::pipeline::Analysis;
 use crate::{
     Camera, CameraType, Embedding, Face, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
     LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote,
@@ -16,8 +18,14 @@ use crate::{
 const LIVENESS_BUFFERS: u32 = 2;
 const MAX_DARK_SKIPS: usize = 4;
 const DARK_RATIO: f32 = 0.5;
-/// Enrollment reads at most this many frame pairs per print it needs.
-const ENROLL_PAIRS_PER_PRINT: usize = 4;
+/// Prints one enrollment collects (F54: 16 per enrolment in the v5 parameter block).
+pub const ENROLL_PRINTS: usize = 16;
+/// Enrollment stops collecting after this long and keeps what it has.
+pub const ENROLL_TIMEOUT: Duration = Duration::from_secs(10);
+/// A print this similar (cosine) to one already collected is the same view of the face and does
+/// not count, so 16 frames of a face held still do not make 16 prints. Consecutive lit frames of
+/// a still sitter score 0.96–0.99 on this camera (`validation_frames`).
+pub const DUPLICATE_PRINT: f32 = 0.98;
 
 /// Mean pixel value over a sparse sample of the image.
 fn brightness(image: &RgbImage) -> f32 {
@@ -445,43 +453,115 @@ impl Authenticator {
         Ok(Outcome { verdict, failed_print })
     }
 
-    /// Enroll `frames` prints from frame pairs that pass every frame gate with good lighting.
-    /// Unless `force`, refuse a face that matches another enrolled user.
-    pub fn enroll(&mut self, user: &str, frames: usize, force: bool) -> Result<()> {
+    /// Enroll up to `wanted` prints from frame pairs that pass every frame gate with good lighting,
+    /// collected over a few seconds while the user looks at the camera and moves naturally (F54:
+    /// Windows takes 16 prints per enrolment). A print within [`DUPLICATE_PRINT`] of one already
+    /// collected does not count. Collection stops at `wanted` or after [`ENROLL_TIMEOUT`]; a new
+    /// template needs at least [`MIN_PRINTS`] prints, `add` (Windows' "improve recognition") at
+    /// least one, on top of the existing template up to [`crate::matcher::MAX_PRINTS`]. Unless
+    /// `force`, refuse a face that matches another enrolled user. `progress` is called with
+    /// (collected, wanted) after every new print.
+    pub fn enroll(
+        &mut self,
+        user: &str,
+        wanted: usize,
+        force: bool,
+        add: bool,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Enrolled> {
+        let (mut collected, wanted, needed) = if add {
+            let Some(template) = self.pipeline.template(user) else {
+                bail!("{user} is not enrolled; enroll without --add first")
+            };
+            if template.room() == 0 {
+                bail!("{user}'s template already holds {} prints; enroll again without --add", template.prints.len());
+            }
+            let existing: Vec<Embedding> =
+                template.prints.iter().map(|p| Embedding { features: p.features.clone() }).collect();
+            (existing, wanted.min(template.room()), 1)
+        } else {
+            (Vec::new(), wanted, MIN_PRINTS as usize)
+        };
+        let existing = collected.len();
+        let mut skipped: BTreeMap<&'static str, u32> = BTreeMap::new();
         let mut ir = IrCamera::open(&self.cameras.device, self.cameras.ir_metadata.as_deref())?;
         self.pipeline.set_enrolling(true);
-        let mut prints = Vec::new();
-        for _ in 0..frames * ENROLL_PAIRS_PER_PRINT {
-            if prints.len() == frames {
-                break;
-            }
+        let start = Instant::now();
+        while collected.len() - existing < wanted && start.elapsed() < ENROLL_TIMEOUT {
             let analysis = self.pipeline.analyze(&ir.capture_pair()?)?;
             if let Some(face) = &analysis.face {
                 ir.expose_on(face.bbox);
             }
-            match (analysis.status(), analysis.print) {
-                (Some(LightingStatus::Good), Some(print)) => prints.push(print),
-                _ => info!(problem = ?analysis.problem, lighting = ?analysis.lighting, "enrollment frame skipped"),
+            let lighting = analysis.lighting;
+            match take_print(&mut collected, analysis) {
+                None => progress(collected.len() - existing, wanted),
+                Some(reason) => {
+                    debug!(reason, ?lighting, "enrollment frame skipped");
+                    *skipped.entry(reason).or_default() += 1;
+                }
             }
         }
+        let elapsed = start.elapsed();
         drop(ir);
         self.pipeline.set_enrolling(false);
-        if prints.len() < frames {
+        let prints: Vec<Embedding> = collected.drain(existing..).collect();
+        if prints.len() < needed {
             bail!(
-                "only {} of {frames} frame pairs showed a usable face with good IR lighting \
-                 (face ≥ 72 px, away from the edges, not covered, lit 35–205, lit − ambient ≥ 45, ambient ≤ 25)",
-                prints.len()
+                "only {} of {wanted} prints collected in {:.1} s (need {needed}); skipped frames: {} \
+                 (a usable face is ≥ 72 px, away from the edges, not covered, frontal, lit 35–205, \
+                 lit − ambient ≥ 45, ambient ≤ 25; move your head a little between prints)",
+                prints.len(),
+                elapsed.as_secs_f32(),
+                describe_skipped(&skipped),
             );
         }
-        self.pipeline.enroll(user, prints, force)
+        let (stored, total) = self.pipeline.enroll(user, prints, force, add)?;
+        Ok(Enrolled { stored, wanted, total, skipped, elapsed })
     }
+}
+
+/// Add the print of one enrollment frame to `collected`, if the frame has good lighting and
+/// shows a view of the face not yet collected ([`DUPLICATE_PRINT`]); otherwise the reason it was
+/// skipped.
+fn take_print(collected: &mut Vec<Embedding>, analysis: Analysis) -> Option<&'static str> {
+    match (analysis.status(), analysis.print) {
+        (Some(LightingStatus::Good), Some(print)) => {
+            if collected.iter().any(|p| p.similarity(&print) > DUPLICATE_PRINT) {
+                return Some("near_duplicate");
+            }
+            collected.push(print);
+            None
+        }
+        (_, Some(_)) => Some("weak_lighting"),
+        (_, None) => Some(analysis.problem.map_or("no_face", FaceProblem::as_str)),
+    }
+}
+
+/// What one `enroll` run did.
+pub struct Enrolled {
+    /// Prints stored by this run
+    pub stored: usize,
+    pub wanted: usize,
+    /// Prints in the template afterwards
+    pub total: usize,
+    /// Frames that gave no print, by reason: `near_duplicate`, `weak_lighting` or a
+    /// [`FaceProblem`] word
+    pub skipped: BTreeMap<&'static str, u32>,
+    pub elapsed: Duration,
+}
+
+/// `near_duplicate 12, too_dark 3`, or `none`.
+pub fn describe_skipped(skipped: &BTreeMap<&'static str, u32>) -> String {
+    if skipped.is_empty() {
+        return "none".to_string();
+    }
+    skipped.iter().map(|(reason, n)| format!("{reason} {n}")).collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lighting::Lighting;
-    use crate::pipeline::Analysis;
     use crate::Face;
 
     const FRAME: [u32; 2] = [640, 360];
@@ -493,10 +573,10 @@ mod tests {
     }
 
     /// A usable pair of the face at `bbox` with good (`live`) or weak lighting, matching at
-    /// `similarity` (FAR from the shipped table: 0.50 ↔ 1e-5).
+    /// `similarity` against a 15-print template (FAR from the shipped table: 0.50 ↔ 1e-5).
     fn usable_at(bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
         let ambient = if vote == Vote::Abstain { 60.0 } else { 5.0 };
-        let far = crate::calibration::lfw_gray().far(similarity);
+        let far = crate::calibration::lfw_gray().far(similarity, 15);
         FrameCheck {
             analysis: Analysis {
                 frame: FRAME,
@@ -675,6 +755,27 @@ mod tests {
         let last = dark.add(&rejected_at(shifted(160.0), FaceProblem::TooDark));
         assert_eq!(last, Some(Verdict::NoFace { problem: FaceProblem::TooDark }));
         assert!(!dark.reattempted());
+    }
+
+    #[test]
+    fn enrollment_takes_good_frames_with_a_new_view_only() {
+        let good = |features: &[f32]| {
+            let mut check = usable(Vote::Live, 0.3);
+            check.analysis.print = Some(Embedding { features: features.to_vec() });
+            check.analysis
+        };
+        let mut collected = Vec::new();
+        assert_eq!(take_print(&mut collected, good(&[1.0, 0.0])), None);
+        // Cosine 0.99 to the first print: the same view again.
+        assert_eq!(take_print(&mut collected, good(&[0.99, 0.141])), Some("near_duplicate"));
+        // Cosine 0.97: a new view.
+        assert_eq!(take_print(&mut collected, good(&[0.97, 0.243])), None);
+        assert_eq!(collected.len(), 2);
+        // Weak lighting has a print but is not enrolled from; rejected frames name their reason.
+        assert_eq!(take_print(&mut collected, usable(Vote::Abstain, 0.3).analysis), Some("weak_lighting"));
+        assert_eq!(take_print(&mut collected, rejected(FaceProblem::TooDark).analysis), Some("too_dark"));
+        assert_eq!(take_print(&mut collected, rejected(FaceProblem::NoFace).analysis), Some("no_face"));
+        assert_eq!(collected.len(), 2);
     }
 
     #[test]
