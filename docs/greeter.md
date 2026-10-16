@@ -60,13 +60,13 @@ reaches the tally line, an empty answer does not.
 The state machine (`greeter/src/state.rs`, unit-tested) and what the screens show
 (`BioFeedbackState`, windows-hello-ui.md §1.2–1.4; resource ids of FaceCredentialProvider.dll.mui):
 
-| Event | `Face` | Eye (§1.3 sequences) | Label |
+| Event | `Face` | Windows 11 eye (§1.3 markers) / Windows 10 glyph sequences | Label |
 |---|---|---|---|
-| attempt started, module silent yet | `Starting` | 2 entrance, hold | "Getting ready..." (105) |
-| `Looking for your face...` | `Looking` | 2, hold | "Looking for you..." (104) |
-| `Making sure it's you...` (the daemon's `NOTICE recognized`, pam.md) | `Verifying` | 3 blink, then the look-around loop 8…18 with the 320–410 ms holds | "Making sure it's you..." (123) |
-| `Success` | `Welcome` | 4 eye→smile, 7 wiggle | "Hello <name>" (101); greetd starts the session at once |
-| a reason, then the prompt | `Failed(reason)` | 1 pupil hollows, 1↔19 ring blink | the module's line: "Couldn't recognize you. Please sign in with your password." (125) for `NOMATCH`, its hints otherwise |
+| attempt started, module silent yet | `Starting` | Face 0–59 once, held / 2 entrance, hold | "Getting ready..." (105) |
+| `Looking for your face...` | `Looking` | same | "Looking for you..." (104) |
+| `Making sure it's you...` (the daemon's `NOTICE recognized`, pam.md) | `Verifying` | FaceLoop 60–290 looped / 3 blink, then the look-around loop 8…18 with the 320–410 ms holds | "Making sure it's you..." (123) |
+| `Success` | `Welcome` | FaceSuccess 291–408 once (wink, check mark, Windows logo) / 4 eye→smile, 7 wiggle | "Hello <name>" (101); greetd starts the session at once |
+| a reason, then the prompt | `Failed(reason)` | FaceFail 409–477 once (the smile flattens) / 1 pupil hollows, 1↔19 ring blink | the module's line: "Couldn't recognize you. Please sign in with your password." (125) for `NOMATCH`, its hints otherwise |
 | "Face login not available: …" | `Failed(reason)` | hidden (state 7) | "Camera is in use…" (157) / "Camera not available…" (124) |
 | a prompt without any face line | `Failed(None)` | hidden | — |
 | wrong password | — | — | "The password is incorrect. Try again." (INFERRED) under the box; the face runs again |
@@ -113,7 +113,8 @@ by `scripts/extract_windows_hello_assets.py` — inventory in
 | `fonts/*.ttf` | `Windows/Fonts/SegUIVar.ttf` (Segoe UI Variable), `segoeui*.ttf`, `SegoeIcons.ttf`, `segmdl2.ttf` | added to fontconfig at start (`FcConfigAppFontAddDir`, before GTK builds its font map); the CSS asks for "Segoe UI Variable" (fontconfig lists its Display/Text/Small instances as styles of that one family; the clock sets `opsz` 36, the Display instance) then "Segoe UI" | the system sans (here Noto Sans) |
 | `screen/img100.jpg` (`background` in the config) | `Windows/Web/Screen/` | the lock-screen background, blurred and dimmed on the sign-in screen | a solid dark blue |
 | `user-pictures/user-192.png` | `ProgramData/Microsoft/User Account Pictures/` | the user tile when the user has no `~/.face`, `~/.face.icon` or AccountsService icon | a grey disc with the initials |
-| `hello/eye/animation.json`, `hello/eye/seqNN/FFF.png` | `FontGlyphAnimator.dll` + `NUIMDL2.ttf`: the Windows 10 glyph eye, frame-exact (§1.3) | the Hello eye (`ui/eye.rs`): the transition table drives it per state |
+| `hello/eye/solid.json` | `Windows.UI.Logon.dll`: the Windows 11 eye, the `HelloSolidAnimations` composition as data (§6.2, `tools/winhello_ui/lottie_extract.py`) | the Hello eye (`ui/eye_vector.rs`): the 64×64 composition played with Cairo at 60 fps, the state's marker segment looped or held as `UpdateMarker` does; `cargo run -p hello-greeter --example eye_solid -- solid.json out/` renders the frames |
+| `hello/eye/animation.json`, `hello/eye/seqNN/FFF.png` | `FontGlyphAnimator.dll` + `NUIMDL2.ttf`: the Windows 10 glyph eye, frame-exact (§1.3) | the fallback eye without `solid.json` (`ui/eye.rs`): the transition table drives it per state |
 | `hello/hello-face.png` | the provider's logo (RT_HTML 1101 SVG, rendered) | the 24 px logo in the "Sign-in options" button |
 | `fonts/SegoeIcons.ttf` | Segoe Fluent Icons | submit arrow U+E72A, key U+E192, power U+E7E8, default tile U+EA8C | without `hello/eye/`: a glyph of the icon font (`hello_glyph`, hex code point, when `SegoeIcons.ttf`/`segmdl2.ttf` is in `fonts/`), else the greeter's own Cairo face shaped like `hello-face.svg` (eyes glance while looking, smile when recognised) |
 
@@ -209,6 +210,7 @@ and without them (`*-fallback.png`):
 | sign-in, looking (eye entrance held) | `docs/img/greeter-looking.png`, `greeter-looking-fallback.png` |
 | sign-in, making sure it's you (look-around loop) | `docs/img/greeter-verifying.png` |
 | sign-in, couldn't recognize you (ring-pupil blink) | `docs/img/greeter-failed.png` |
+| the same two states with the Windows 11 eye (`solid.json`; 942×1022 nested output) | `docs/img/greeter-verifying-win11.png`, `greeter-failed-win11.png`; every segment: `docs/img/eye-solid-contact-sheet.png` |
 | wrong password | `docs/img/greeter-wrong-password.png` |
 | sign-in options row | `docs/img/greeter-sign-in-options.png` |
 
@@ -219,7 +221,7 @@ and without them (`*-fallback.png`):
 | Lock screen: image + 20 % mask, clock block at 15 %, adaptive sizes; any key/click → sign-in | same (two of the five size steps: ≥ 1920 and below) |
 | Sign-in: tile, name, eye + label, field with underline and submit arrow, "Sign-in options", provider buttons, system bar | same elements and numbers (§3.2); system bar = power only (no accessibility, IME, language, network); no user list / "Other user" |
 | Strings per state (105, 104, 123, 101, 125, 157, 124, 113) | the same texts, "PIN" → "password"; "Welcome" page: not shown under greetd (the session starts at once) |
-| The Hello eye | Windows 10's font-glyph animation, frame-exact (sequences and transition table from `FontGlyphAnimator.dll`); the Windows 11 Lottie version (`HelloSolidAnimations`, 64×64, 60 fps) is **not reconstructed** |
+| The Hello eye | **Done**: Windows 11's `HelloSolidAnimations` composition (64×64, 2270 frames at 60 fps, the compiled LottieGen object graph extracted to `solid.json`, windows-hello-ui.md §6.2) played frame-exact with Cairo; segments per `UpdateMarker` (FaceLoop/TooFar/TooClose/Spinner loop, the rest play once and hold); the frame-59 face overlays `hello-face.svg` within 1.1 units of 64 (same proportions, IoU 0.88). Without `solid.json`: Windows 10's font-glyph animation (`FontGlyphAnimator.dll`), also frame-exact |
 | Face runs on the lock screen; "dismiss the lock screen" setting; 120 s confirmation window | `dismiss_lock_screen`, `lock_face_seconds` = 120, attempts of `timeout=10` each |
 | TooFar/TooClose eye states (5/6), "Adjusting brightness" (133), brightness override | not produced (the module's hints are text only) |
 | Acrylic backdrop behind the sign-in screen | GSK blur + a darker mask (the tint is UNKNOWN on Windows too) |

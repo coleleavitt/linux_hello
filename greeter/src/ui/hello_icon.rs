@@ -1,6 +1,6 @@
-//! The Hello icon under the user's name: Windows' eye animation when the assets have it
-//! ([`super::eye`]), a glyph of its icon font, or our Cairo face (the shape of
-//! `hello-face.svg`: two eyes and a smile).
+//! The Hello icon under the user's name: Windows 11's eye when the assets have it
+//! ([`super::eye_vector`]), else Windows 10's glyph animation ([`super::eye`]), a glyph of its
+//! icon font, or our Cairo face (the shape of `hello-face.svg`: two eyes and a smile).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,6 +10,7 @@ use gtk::{glib, pango};
 use tracing::warn;
 
 use super::eye::Eye;
+use super::eye_vector::SolidEye;
 use crate::assets::Hello;
 use crate::state::Face;
 
@@ -22,6 +23,7 @@ pub struct HelloIcon {
 }
 
 enum Kind {
+    Solid(SolidEye),
     Eye(Eye),
     Glyph,
     Vector(Rc<RefCell<VectorState>>),
@@ -35,14 +37,22 @@ struct VectorState {
 
 impl HelloIcon {
     pub fn new(source: &Hello) -> HelloIcon {
+        let glyph_eye = |dir: &std::path::Path| match Eye::new(dir, SIZE) {
+            Ok(eye) => (eye.widget.clone().upcast(), Kind::Eye(eye)),
+            Err(e) => {
+                warn!("Windows eye animation in {}: {e:#}; using the built-in icon", dir.display());
+                vector()
+            }
+        };
         let (widget, kind): (gtk::Widget, Kind) = match source {
-            Hello::Eye(dir) => match Eye::new(dir, SIZE) {
-                Ok(eye) => (eye.widget.clone().upcast(), Kind::Eye(eye)),
+            Hello::Solid(file) => match SolidEye::new(file, SIZE) {
+                Ok(eye) => (eye.widget.clone().upcast(), Kind::Solid(eye)),
                 Err(e) => {
-                    warn!("Windows eye animation in {}: {e:#}; using the built-in icon", dir.display());
-                    vector()
+                    warn!("Windows 11 eye {}: {e:#}; using the glyph animation", file.display());
+                    glyph_eye(file.parent().unwrap_or(file))
                 }
             },
+            Hello::Eye(dir) => glyph_eye(dir),
             Hello::Glyph { family, ch } => {
                 let label = gtk::Label::new(Some(&ch.to_string()));
                 let attrs = pango::AttrList::new();
@@ -60,6 +70,7 @@ impl HelloIcon {
 
     pub fn set_face(&self, face: &Face) {
         match &self.kind {
+            Kind::Solid(eye) => eye.set_face(face),
             Kind::Eye(eye) => eye.set_face(face),
             Kind::Glyph => self.widget.set_opacity(if matches!(face, Face::Failed(_)) { 0.55 } else { 1.0 }),
             Kind::Vector(state) => {

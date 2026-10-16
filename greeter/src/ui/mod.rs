@@ -19,6 +19,7 @@ use crate::users::Account;
 
 mod background;
 mod eye;
+pub mod eye_vector;
 mod hello_icon;
 mod screens;
 

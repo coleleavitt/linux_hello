@@ -107,7 +107,8 @@ credential; the PAM stack grants. Details, flow, what each application shows and
 
 `hello-greeter` replaces the tty login and swaylock with Windows' sign-in flow: the lock screen
 looks for your face on its own and signs you in, a key press shows the sign-in screen with the
-Hello icon, the reason when the face failed, and the password box. It runs under greetd
+Hello icon (Windows 11's own eye animation, rebuilt from the compiled composition in
+`Windows.UI.Logon.dll`), the reason when the face failed, and the password box. It runs under greetd
 (`emerge gui-libs/greetd`, then `sudo contrib/install-greeter.sh`, greetd on VT 7, reversible
 with `contrib/uninstall-greeter.sh`) and as `hello-greeter --lock` inside the session. The real
 Windows fonts, background, user picture and Hello icon are used when
