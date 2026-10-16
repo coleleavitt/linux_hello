@@ -12,10 +12,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::calibration::CalibrationTable;
 use crate::matcher::ENROLL_ON_FAILURE_THRESHOLD;
 #[cfg(feature = "tpm")]
 use crate::tpm::{DataKey, SealedFile};
-use crate::{Embedding, PrintSource, Template, MATCH_THRESHOLD};
+use crate::{Embedding, PrintMatch, PrintSource, Template};
 
 /// Result of [`FaceStore::add_on_failure`]; the daemon sends it to the PAM module.
 #[derive(Debug, Clone, PartialEq)]
@@ -203,34 +204,36 @@ impl FaceStore {
         self.faces.get_mut(user_id)
     }
 
-    /// The other enrolled user that one of `prints` matches (similarity above [`MATCH_THRESHOLD`]),
-    /// with the similarity; the closest one if several do (`CheckForDuplicateEnrollment`).
-    pub fn duplicate(&self, user: &str, prints: &[Embedding]) -> Option<(&str, f32)> {
+    /// The other enrolled user that one of `prints` matches (FAR under the target, as a
+    /// recognition), with the match; the closest one if several do (`CheckForDuplicateEnrollment`).
+    pub fn duplicate(&self, user: &str, prints: &[Embedding], table: &CalibrationTable) -> Option<(&str, PrintMatch)> {
         self.faces
             .iter()
             .filter(|(other, _)| *other != user)
             .filter_map(|(other, template)| {
-                let best =
-                    prints.iter().filter_map(|p| template.best_match(p)).map(|m| m.similarity).reduce(f32::max)?;
+                let best = prints
+                    .iter()
+                    .filter_map(|p| template.best_match(p, table))
+                    .max_by(|a, b| a.similarity.total_cmp(&b.similarity))?;
                 Some((other.as_str(), best))
             })
-            .filter(|(_, similarity)| *similarity > MATCH_THRESHOLD)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .filter(|(_, m)| m.recognised())
+            .max_by(|a, b| a.1.similarity.total_cmp(&b.1.similarity))
     }
 
     /// Enroll-on-failure (F31): add `print`, from a failed face attempt of `user` that the
     /// password then confirmed, if it is at least [`ENROLL_ON_FAILURE_THRESHOLD`] similar to the
     /// user's enrolled and augmented prints and matches no other user. Does not save.
-    pub fn add_on_failure(&mut self, user: &str, print: &Embedding) -> OnFailure {
+    pub fn add_on_failure(&mut self, user: &str, print: &Embedding, table: &CalibrationTable) -> OnFailure {
         let Some(template) = self.faces.get(user) else { return OnFailure::NotEnrolled };
         let similarity = template
-            .best_match_where(print, |p| p.source != PrintSource::OnFailure)
+            .best_match_where(print, table, |p| p.source != PrintSource::OnFailure)
             .map_or(f32::NEG_INFINITY, |m| m.similarity);
         if similarity < ENROLL_ON_FAILURE_THRESHOLD {
             return OnFailure::TooFar { similarity };
         }
-        if let Some((other, similarity)) = self.duplicate(user, std::slice::from_ref(print)) {
-            return OnFailure::OtherUser { user: other.to_string(), similarity };
+        if let Some((other, m)) = self.duplicate(user, std::slice::from_ref(print), table) {
+            return OnFailure::OtherUser { user: other.to_string(), similarity: m.similarity };
         }
         self.faces.get_mut(user).expect("checked above").add_on_failure(print);
         OnFailure::Added { similarity }
@@ -281,12 +284,15 @@ mod tests {
         store.add("bob".into(), Template::enrolled([emb(&[0.6, 0.8, 0.0])]));
         // Similarity 0.8 to alice, 0.96 to bob.
         let probe = [emb(&[0.0, 0.0, 1.0]), emb(&[0.8, 0.6, 0.0])];
-        let rounded = |d: Option<(&str, f32)>| d.map(|(user, s)| (user.to_string(), (s * 100.0).round() as i32));
-        assert_eq!(rounded(store.duplicate("carol", &probe)), Some(("bob".into(), 96)));
+        let table = crate::calibration::lfw_gray();
+        let rounded = |d: Option<(&str, PrintMatch)>| {
+            d.map(|(user, m)| (user.to_string(), (m.similarity * 100.0).round() as i32))
+        };
+        assert_eq!(rounded(store.duplicate("carol", &probe, &table)), Some(("bob".into(), 96)));
         // Re-enrolling bob only compares with the others.
-        assert_eq!(rounded(store.duplicate("bob", &probe)), Some(("alice".into(), 80)));
-        // At or below the threshold is not a duplicate.
-        assert_eq!(store.duplicate("carol", &[emb(&[0.5, 0.0, 0.866])]), None);
+        assert_eq!(rounded(store.duplicate("bob", &probe, &table)), Some(("alice".into(), 80)));
+        // At FAR 1e-5 (similarity 0.50) or above it is not a duplicate.
+        assert_eq!(store.duplicate("carol", &[emb(&[0.5, 0.0, 0.866])], &table), None);
     }
 
     #[test]
@@ -296,21 +302,23 @@ mod tests {
         store.add("alice".into(), Template::enrolled([emb(&[1.0, 0.0, 0.0])]));
         store.add("bob".into(), Template::enrolled([emb(&[0.0, 1.0, 0.0])]));
         let prints = |store: &FaceStore| store.get("alice").unwrap().prints.len();
+        let t = crate::calibration::lfw_gray();
 
-        assert_eq!(store.add_on_failure("carol", &emb(&[1.0, 0.0, 0.0])), OnFailure::NotEnrolled);
+        assert_eq!(store.add_on_failure("carol", &emb(&[1.0, 0.0, 0.0]), &t), OnFailure::NotEnrolled);
         // 0.30 to alice: too far.
-        assert!(matches!(store.add_on_failure("alice", &emb(&[0.3, 0.0, 0.954])), OnFailure::TooFar { .. }));
+        assert!(matches!(store.add_on_failure("alice", &emb(&[0.3, 0.0, 0.954]), &t), OnFailure::TooFar { .. }));
         // 0.45 to alice but 0.6 to bob: matches another user.
         let near_bob = emb(&[0.45, 0.6, 0.66]);
-        assert!(matches!(store.add_on_failure("alice", &near_bob), OnFailure::OtherUser { user, .. } if user == "bob"));
+        let other = store.add_on_failure("alice", &near_bob, &t);
+        assert!(matches!(other, OnFailure::OtherUser { user, .. } if user == "bob"));
         assert_eq!(prints(&store), 1);
         // 0.45 to alice, 0.2 to bob: added.
         let relaxed = emb(&[0.45, 0.2, 0.87]);
-        assert!(matches!(store.add_on_failure("alice", &relaxed), OnFailure::Added { .. }));
+        assert!(matches!(store.add_on_failure("alice", &relaxed, &t), OnFailure::Added { .. }));
         assert_eq!(prints(&store), 2);
         // The added print does not count for the relaxed check: a probe 0.99 to it but 0.35 to the
         // enrolled print is refused, so prints cannot drift away from the enrolled face.
-        assert!(matches!(store.add_on_failure("alice", &emb(&[0.35, 0.2, 0.915])), OnFailure::TooFar { .. }));
+        assert!(matches!(store.add_on_failure("alice", &emb(&[0.35, 0.2, 0.915]), &t), OnFailure::TooFar { .. }));
     }
 
     #[test]

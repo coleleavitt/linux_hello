@@ -6,6 +6,7 @@ use image::{GrayImage, RgbImage};
 use std::path::Path;
 use tracing::{debug, info};
 
+use crate::calibration::CalibrationTable;
 use crate::lighting::{subtract_ambient, Lighting, LightingStatus};
 use crate::{
     gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
@@ -47,7 +48,7 @@ pub struct FrameCheck {
     /// Windows Hello anti-spoofing frame vote; only for good-lighting frames
     pub windows: Option<MsFrame>,
     pub vote: Vote,
-    /// Closest print of the user's template
+    /// Closest print of the user's template, with its estimated FAR
     pub best: Option<PrintMatch>,
 }
 
@@ -57,6 +58,8 @@ pub struct FacePipeline {
     liveness: Vec<AntiSpoof>,
     windows: Option<WindowsHelloModels>,
     store: FaceStore,
+    /// Similarity → FAR for this camera (F51)
+    calibration: CalibrationTable,
 }
 
 impl FacePipeline {
@@ -66,12 +69,13 @@ impl FacePipeline {
         embedder_path: impl AsRef<Path>,
         liveness: Vec<AntiSpoof>,
         store_path: impl AsRef<Path>,
+        calibration: CalibrationTable,
     ) -> Result<Self> {
         info!("initializing face pipeline");
         let detector = FaceDetector::load(detector_path)?;
         let embedder = FaceEmbedder::load(embedder_path)?;
         let store = FaceStore::load(store_path)?;
-        Ok(Self { detector, embedder, liveness, windows: None, store })
+        Ok(Self { detector, embedder, liveness, windows: None, store, calibration })
     }
 
     /// Add the Windows Hello anti-spoofing vote and the occlusion and frontal gates.
@@ -141,7 +145,7 @@ impl FacePipeline {
         let (Some(print), Some(face)) = (&analysis.print, &analysis.face) else {
             return Ok(FrameCheck { analysis, liveness: None, windows: None, vote: Vote::Abstain, best: None });
         };
-        let best = self.store.get(user).and_then(|t| t.best_match(print));
+        let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration));
         if analysis.status() != Some(LightingStatus::Good) {
             let vote = Vote::from_evidence(false, None, None);
             return Ok(FrameCheck { analysis, liveness: None, windows: None, vote, best });
@@ -181,9 +185,11 @@ impl FacePipeline {
         if prints.is_empty() {
             bail!("no enrollment prints");
         }
-        if let (false, Some((other, similarity))) = (force, self.store.duplicate(user_id, &prints)) {
+        if let (false, Some((other, m))) = (force, self.store.duplicate(user_id, &prints, &self.calibration)) {
             bail!(
-                "this face matches enrolled user {other} (similarity {similarity:.3}); use --force to enroll it anyway"
+                "this face matches enrolled user {other} (similarity {:.3}, FAR {:.1e}); use --force to enroll it anyway",
+                m.similarity,
+                m.far
             );
         }
         let count = prints.len();
@@ -207,7 +213,7 @@ impl FacePipeline {
     /// Enroll-on-failure (F31): add `print` to the user's template if [`FaceStore::add_on_failure`]
     /// accepts it, and save the store.
     pub fn add_on_failure(&mut self, user_id: &str, print: &Embedding) -> Result<OnFailure> {
-        let result = self.store.add_on_failure(user_id, print);
+        let result = self.store.add_on_failure(user_id, print, &self.calibration);
         if let OnFailure::Added { .. } = result {
             self.store.save().context("saving face store")?;
         }

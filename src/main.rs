@@ -11,8 +11,8 @@ use tracing_subscriber::EnvFilter;
 use linux_hello::authenticator::describe;
 use linux_hello::lighting::subtract_ambient;
 use linux_hello::{
-    daemon, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras, Session, Verdict,
-    WindowsHelloModels,
+    calibration, daemon, sysfs, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras,
+    Session, Verdict, WindowsHelloModels,
 };
 
 #[derive(Parser)]
@@ -115,6 +115,8 @@ fn main() -> Result<()> {
     let store = cli.store.clone().unwrap_or_else(default_store);
     let detector = format!("{models}/det_10g.onnx");
     let embedder = format!("{models}/w600k_r50.onnx");
+    // Similarity → FAR table for this IR camera (USB vid:pid), or the default one (F51, F60).
+    let calibration = calibration::load(format!("{models}/calibration.json"), sysfs::usb_id(&cli.device).as_deref())?;
 
     let cameras = CameraSetup {
         device: cli.device.clone(),
@@ -134,7 +136,7 @@ fn main() -> Result<()> {
     // The converted Windows Hello models are git-ignored (docs/winhello-models/) and used when
     // present. If they are present but do not load, nothing runs.
     let pipeline = |liveness: Vec<AntiSpoof>| -> Result<FacePipeline> {
-        let pipeline = FacePipeline::new(&detector, &embedder, liveness, &store)?;
+        let pipeline = FacePipeline::new(&detector, &embedder, liveness, &store, calibration.clone())?;
         let dir = PathBuf::from(format!("{models}/windows_hello/converted"));
         if cli.no_windows_hello || !dir.exists() {
             return Ok(pipeline);
@@ -162,7 +164,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Remove { user } => {
-            let mut pipeline = FacePipeline::new(&detector, &embedder, Vec::new(), &store)?;
+            let mut pipeline = FacePipeline::new(&detector, &embedder, Vec::new(), &store, calibration)?;
             println!(
                 "{}",
                 if pipeline.unenroll(&user)? { format!("Removed {user}") } else { format!("{user} is not enrolled") }
@@ -170,7 +172,7 @@ fn main() -> Result<()> {
         }
 
         Commands::List => {
-            let pipeline = FacePipeline::new(&detector, &embedder, Vec::new(), &store)?;
+            let pipeline = FacePipeline::new(&detector, &embedder, Vec::new(), &store, calibration)?;
             for user in pipeline.list_enrolled() {
                 println!("{user}");
             }
@@ -239,7 +241,8 @@ fn main() -> Result<()> {
                             "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
                             "border": w.scores.border, "hh": w.scores.hh,
                         })),
-                        "similarity": check.best.map(|b| b.similarity), "track": track,
+                        "similarity": check.best.map(|b| b.similarity), "far": check.best.map(|b| b.far),
+                        "track": track,
                         "recognised": recognised, "liveness": format!("{liveness:?}"),
                         "verdict": verdict.map(|v| v.to_string()),
                     })

@@ -70,7 +70,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Embedding CNN on 128×128×1 IR crop, ~256-d (F30) | Done differently: ArcFace R50/MBF 112×112 RGB-replicated IR, 512-d | — (Windows models are proprietary) |
 | Distance 1 − cos, clamped ≤ 1 (F50) | Done (cosine similarity) | — |
 | Min distance over all stored prints (+coupled mean/pair prints) (F28) | **Done** (max cosine over prints); coupled prints Missing | Coupled prints optional |
-| Distance → FAR via per-hardware calibration table, × 1…4 correction; accept FAR < 1e-5 (F27, F51) | Partial: fixed cosine `MATCH_THRESHOLD` 0.50 from `docs/calibration.md` (FAR ≤ 1e-5 per attempt on LFW) | Store a (FAR, distance) table per camera/model and threshold on FAR; collect IR genuine/impostor data on this camera |
+| Distance → FAR via per-hardware calibration table, × 1…4 correction; accept FAR < 1e-5 (F27, F51) | **Done** (same structure, LFW data): `models/calibration.json` holds (FPR, TAR, similarity) rows per camera (USB `vid:pid`) with a default; `CalibrationTable::pair_far` interpolates as `sub_1800397B4` (linear, exponential past the best row), × 240 comparisons per attempt (15 prints × 16 pairs) stands in for Windows' × 1…4; recognised when `far < 1e-5` (`TARGET_FAR`), the former 0.50. Logs print `far=` next to `similarity=` | Collect IR genuine/impostor data on this camera for an IR-calibrated table (`docs/calibration.md`, "Calibration table") |
 | ≥ 4 prints on the track before deciding (F48, F54) | **Done** per track: a new track starts a new `Attempt` (prints, best similarity, votes) within the 16-pair session | — |
 | 1:N with "closer to another tracked/enrolled user" check (F48) | N/A by design: 1:1 for the PAM user | Could add: reject if another enrolled user scores higher |
 | Recognise first, then liveness on the same track (F47, F48) | **Done** (`Attempt`) | — |
@@ -80,14 +80,14 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Multi-pose enrolment, 16 prints, quality-gated frames, registration per hardware model (F54, Q5) | Partial: 5 individual prints, each from a gated good-lighting frame; no pose guidance | Guide the user through slight poses; more prints |
-| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | **Done**: `enroll` refuses when a new print matches another user's template above `MATCH_THRESHOLD` (0.50) and names that user; `--force` overrides | — |
-| Per-hardware-model registrations (`Registration`, `HardwareModelContainer`) (F51) | N/A (single camera) | Store camera id with prints if a second camera is used |
+| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | **Done**: `enroll` refuses when a new print matches another user's template (estimated FAR < 1e-5, i.e. similarity > 0.50) and names that user; `--force` overrides | — |
+| Per-hardware-model registrations (`Registration`, `HardwareModelContainer`) (F51) | N/A (single camera); the calibration table is per camera (above), the prints are not | Store camera id with prints if a second camera is used |
 
 ## Template update
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Enroll-on-success: after a live success, borderline match (GFP in [FAR/2, FAR]), once per session, generation < 3, FIFO eviction (F31, F53) | **Done**: best live print with similarity in (0.50, 0.55], once per session, generation ≤ 3, ≤ 10 augmented (FIFO) | — |
+| Enroll-on-success: after a live success, borderline match (GFP in [FAR/2, FAR]), once per session, generation < 3, FIFO eviction (F31, F53) | **Done**: best live print with estimated FAR in [5e-6, 1e-5) (similarity 0.50–0.52 with the shipped table), once per session, generation ≤ 3, ≤ 10 augmented (FIFO) | — |
 | Enroll-on-failure: add print after face fail + password success, relaxed threshold, must not match others (F31, `EnrollOnFailure*Threshold`) | **Done**, opt-in (`daemon --enroll-on-failure`): after `NOMATCH` of one real (≥ 2 live votes), unrecognised face, the best live print waits ≤ 60 s in the daemon; `pam_sm_setcred` after the password success of the same PAM transaction (token) commits it if similarity to the enrolled/augmented prints ≥ 0.40 and no other user matches; ≤ 5 such prints (FIFO); root only (`SO_PEERCRED`). Windows' threshold values are runtime policy data, not recovered | — |
 | Print categories (normal, on-failure, on-success, flags) used as verification conditions (F28) | Partial: prints are tagged `enroll`, `augment`, `on_failure`; all are matched alike; on-failure prints are left out of the enroll-on-failure check and never seed augmentation | Per-category thresholds if needed |
 
@@ -124,7 +124,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 |---|---|---|
 | Multiple tracked faces, multiple enrolled users, best-user assignment (F47, F48) | N/A by design (1:1 for the requested user); largest face only | Optionally reject if a second face is present (shoulder-surfer case) |
 | Sensor allow-list, device watcher, camera re-selection (`SensorAllowListManager`, `SensorEnumeration`) | Partial: fixed device paths / CLI | udev-based discovery |
-| Per-hardware calibration tables (F51, F60) | Missing | One table per camera model in the store or config |
+| Per-hardware calibration tables (F51, F60) | **Done** (structure): `models/calibration.json` maps the IR camera's USB `vid:pid` (sysfs `idVendor:idProduct`, `sysfs::usb_id`; here `30c9:00f3`) to a named table, with a default for unlisted cameras; the only table is the LFW one | An IR-calibrated table per camera; Windows' hardware-model ids are not mapped to cameras (cefa.md §7) |
 
 ## Anything else
 

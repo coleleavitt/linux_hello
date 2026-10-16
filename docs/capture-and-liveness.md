@@ -16,7 +16,7 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
 /dev/video0 (RGB) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
   track: largest face followed by box overlap; a new face starts a new attempt
-  attempt: ≥ 4 prints and best similarity > threshold → recognised;
+  attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50) → recognised;
            from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
   session: 16 pairs over all attempts → give up
   after MATCH: add the best live print if it was a borderline match
@@ -150,11 +150,17 @@ not an average. The similarity of a probe is the maximum cosine similarity over 
 i.e. the minimum distance `1 − cos` (F28, F50). Faces are compared only with the template of the
 user being authenticated (1:1).
 
-`MATCH_THRESHOLD` is 0.50, calibrated on grayscale LFW ([calibration.md](calibration.md)): one
-comparison FAR ≈ 4e-8 (tail fit), simulated per-attempt FAR ≈ 1.8e-6 for 15 prints × 16 frames,
-FRR 0.23% per probe frame against 15 prints. Windows instead converts the distance into an
-estimated FAR with a calibration table and accepts below 1e-5 (F27, F51); `linux_hello` uses one
-fixed cosine threshold chosen for the same 1e-5 target per attempt.
+As Windows (F27, F51, F60), the similarity is not thresholded directly. A calibration table for the
+IR camera (`models/calibration.json`, keyed by the camera's USB `vid:pid`, with a default; this
+laptop's `30c9:00f3`) maps the best similarity to the estimated false-accept rate of one comparison
+by linear interpolation between its (FPR, TAR, similarity) rows; times 240, the comparisons one
+attempt can make (15 prints × 16 pairs), that is the attempt's FAR (`PrintMatch::far`). The face is
+recognised when it is below `TARGET_FAR` = 1e-5. The shipped table comes from grayscale LFW
+([calibration.md](calibration.md), "Calibration table"); its 0.50 row is the 1e-5 point, so this is
+the former `MATCH_THRESHOLD` 0.50 (one comparison FAR ≈ 4e-8, simulated per-attempt FAR ≈ 1.8e-6,
+FRR 0.23% per probe frame against 15 prints). Every per-frame log line and `watch`'s `log.jsonl`
+carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the daemon reply keeps the
+similarity only.
 
 ### 7. Decision (F25, F47, F48)
 
@@ -167,8 +173,8 @@ from zero. So the owner's prints never recognise a photo held up next, and the o
 never count for it. Pairs without a face keep the current track. The 16-pair limit counts the
 whole session.
 
-1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the best similarity
-   over them is > 0.50.
+1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the estimated FAR of
+   the best similarity over them is < 1e-5 (similarity > 0.50 with the shipped table).
 2. **Liveness:** votes count only from the recognising frame on. ≥ 2 live votes → `MATCH <best
    similarity>`; else ≥ 3 spoof votes → `NOTLIVE`.
 3. **Give up** after 16 frame pairs (Windows: 48 frames or a counter > 16; one pair is two frames):
@@ -189,9 +195,8 @@ exposure change (F49) and the "closer to another user" check (1:1 by design).
 After a `MATCH`, the best-matching print of a live-voting frame is added to the template, once
 per session, if:
 
-- it is a borderline match: similarity in (0.50, 0.55] (`AUGMENT_MARGIN` 0.05). Windows augments
-  only when the estimated FAR is in [FAR/2, FAR]; a fixed band above the cosine threshold stands
-  in for that;
+- it is a borderline match, as in Windows: estimated FAR in [5e-6, 1e-5) (`PrintMatch::is_borderline`,
+  F53); with the shipped table that is similarity 0.50–0.52;
 - generation of the stored print it matched + 1 ≤ 3 (enrolled prints are 0).
 
 New prints get `source: "augment"`; at most 10 augmented prints per user, the oldest augmented
@@ -222,7 +227,7 @@ print from a failed face attempt after the user signs in another way. Here:
      values are not in the binaries. 0.40 is the per-attempt FAR ≈ 1e-5 point of
      [calibration.md](calibration.md) (simulated 9.1e-6 for 15 prints × 16 frames), the FAR Windows
      targets for unlocking (F27);
-   - no other enrolled user matches it above `MATCH_THRESHOLD`.
+   - no other enrolled user matches it (estimated FAR < 1e-5, as a recognition).
 
    It replies `ADDED 0.432` or `REFUSED no_pending | not_enrolled | too_far <s> | other_user <user> <s>`;
    the PAM module only logs the reply.
@@ -279,9 +284,9 @@ must be re-enrolled the same way.
 stores one print per pair.
 
 Before storing, it compares every new print with the templates of the other enrolled users, as
-Windows' `CheckForDuplicateEnrollment`. If one matches above `MATCH_THRESHOLD` (0.50), enrollment
-fails and names the closest such user: `this face matches enrolled user alice (similarity 0.641);
-use --force to enroll it anyway`. `--force` stores the prints anyway (twins, or one person with two
+Windows' `CheckForDuplicateEnrollment`. If one matches (estimated FAR < 1e-5, similarity > 0.50 with
+the shipped table), enrollment fails and names the closest such user: `this face matches enrolled user
+alice (similarity 0.641, FAR 2.3e-7); use --force to enroll it anyway`. `--force` stores the prints anyway (twins, or one person with two
 accounts). Re-enrolling a user compares only with the others. Checked on saved frames: the owner's
 lit frames from one sitting against a template from another sitting match at 0.641; the six
 faces of the stranger photo score −0.05…0.03 against the owner and are not refused.
@@ -289,7 +294,7 @@ faces of the stranger photo score −0.05…0.03 against the owner and are not r
 ## Inspecting
 
 `linux_hello watch [--seconds 30]` prints one line per pair: face brightness lit/ambient, `d`,
-status or rejection reason, RGB P(real), vote, similarity, the face track, whether the track's
-face is recognised and its liveness state. It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
+status or rejection reason, RGB P(real), vote, similarity and its estimated FAR per attempt, the
+face track, whether the track's face is recognised and its liveness state. It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
 `/tmp/linux_hello_watch`). When a session reaches a verdict it prints it and starts a new one.
 `watch` does not augment the template.
