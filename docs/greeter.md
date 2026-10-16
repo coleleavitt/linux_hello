@@ -13,10 +13,10 @@ same binary does both jobs:
 
 Status (2026-10-16): built and verified in a nested niri with the fake greetd and with the real
 `pam_linux_hello.so` through `pam_start_confdir` (screenshots below); the install script is
-written but has not run on this machine yet (greetd is not installed; needs root). The layout
-and strings are placeholders until [windows-hello-ui.md](windows-hello-ui.md) (the sibling's
-spec of LogonUI) lands; the code keeps them in one place each (`greeter/src/ui/screens.rs`,
-`greeter/src/state.rs`).
+written but has not run on this machine yet (greetd is not installed; needs root). The strings,
+the eye animation and the layout follow [windows-hello-ui.md](windows-hello-ui.md) (LogonUI's
+decompiled XAML and string tables); one place each (`greeter/src/ui/screens.rs`,
+`greeter/src/ui/eye.rs`, `greeter/src/state.rs`).
 
 ## Toolkit
 
@@ -57,25 +57,47 @@ runs this through real libpam (`pam_start_confdir`) with the real module, a stub
 without a prompt, the password reaches `pam_exec` without a second prompt, a wrong password
 reaches the tally line, an empty answer does not.
 
-The state machine (`greeter/src/state.rs`, unit-tested):
+The state machine (`greeter/src/state.rs`, unit-tested) and what the screens show
+(`BioFeedbackState`, windows-hello-ui.md §1.2–1.4; resource ids of FaceCredentialProvider.dll.mui):
+
+| Event | `Face` | Eye (§1.3 sequences) | Label |
+|---|---|---|---|
+| attempt started, module silent yet | `Starting` | 2 entrance, hold | "Getting ready..." (105) |
+| `Looking for your face...` | `Looking` | 2, hold | "Looking for you..." (104) |
+| `Making sure it's you...` (the daemon's `NOTICE recognized`, pam.md) | `Verifying` | 3 blink, then the look-around loop 8…18 with the 320–410 ms holds | "Making sure it's you..." (123) |
+| `Success` | `Welcome` | 4 eye→smile, 7 wiggle | "Hello <name>" (101); greetd starts the session at once |
+| a reason, then the prompt | `Failed(reason)` | 1 pupil hollows, 1↔19 ring blink | the module's line: "Couldn't recognize you. Please sign in with your password." (125) for `NOMATCH`, its hints otherwise |
+| "Face login not available: …" | `Failed(reason)` | hidden (state 7) | "Camera is in use…" (157) / "Camera not available…" (124) |
+| a prompt without any face line | `Failed(None)` | hidden | — |
+| wrong password | — | — | "The password is incorrect. Try again." (INFERRED) under the box; the face runs again |
+| lock screen, recognised, `dismiss_lock_screen = false` | `Welcome` | — | "Hello, <name>! Dismiss the lock screen to sign in." (113), 34 px at the top |
 
 - **Lock screen** (clock): attempts follow each other while the looking window is open
   (`lock_face_seconds`, default 120 s after the screen appeared or the last key press, F56);
   each is the module's presence wait (`timeout=10`) plus the session at the deadline. A match
   signs in / unlocks at once (`dismiss_lock_screen = true`, Windows' "automatically dismiss the
-  lock screen if we recognize your face"); with it off the screen says "Welcome" and waits for a
-  key. After the window the last attempt's prompt stays pending and the cameras are left alone.
+  lock screen if we recognize your face"); with it off the greeting above waits for a key. After
+  the window the last attempt's prompt stays pending and the cameras are left alone.
 - **Key or click** → sign-in screen (the background blurs and dims, the stack slides up). The
   running attempt continues; a pending prompt is ended and a fresh attempt starts.
-- **Sign-in screen**: the reason of a failed check is the status text next to the Hello icon,
-  the password box is focused and the prompt stays pending (no camera use) until the password
-  is typed or "Sign-in options → face" starts another attempt. A password typed while the
-  module is still looking is queued and answers the prompt when it comes (at most the wait,
-  10 s, less when a face is seen). A wrong password shows "The password is incorrect. Try
-  again." and the next attempt starts (the face runs first again: on Windows the password tile
-  would stay selected; here the stack decides the order).
-- Typing anywhere goes to the password box. The greeter exits after greetd accepted
-  `start_session`; in lock mode it unlocks and exits on `Success`.
+- **Sign-in screen**: the password box is focused and the prompt stays pending (no camera use)
+  until the password is typed or "Sign-in options → face" starts another attempt; the selected
+  provider button carries the 2 px border. A password typed while the module is still looking
+  is queued and answers the prompt when it comes (at most the wait, 10 s, less when a face is
+  seen). Typing anywhere goes to the password box; "Caps Lock is on" appears under it.
+- The greeter exits after greetd accepted `start_session`; in lock mode it unlocks and exits on
+  `Success`. The power button (bottom right) runs `loginctl suspend|poweroff|reboot`.
+
+Layout (§3, XAML device-independent pixels at scale 1): lock screen = image + 20 % black, the
+clock block's top at 15 % of the height, centred (Segoe UI Variable SemiBold, tabular: 136/28 px
+from 1920 logical px wide, 98/20 below), greeting 34 px SemiBold 40 px from the top. Sign-in =
+the same image blurred and darker; a 404×530 box centred 35 px above the middle with the content
+pinned 72 px from its top: 192 px tile (the picture, or Windows' default tile: Segoe Fluent Icons
+U+EA8C at 100 px on a 6 % white disc), name 28 px SemiBold (+12), eye 64 px (+8) over the 24 px
+SemiBold label (+6), the 296 px field (+20; 6 % black, 4 px radius, underline, accent when
+focused; the box 14 px, submit U+E72A 12 px in 28×24), "Sign-in options" 14 px, the 44×44
+provider buttons (margin 10,0, 2 px #808080 when selected, logos 24 px) 32 px below; the power
+button bottom right (U+E7E8 16 px, 40 px high). Without the assets the glyphs are themed icons.
 
 ## Assets
 
@@ -91,7 +113,9 @@ by `scripts/extract_windows_hello_assets.py` — inventory in
 | `fonts/*.ttf` | `Windows/Fonts/SegUIVar.ttf` (Segoe UI Variable), `segoeui*.ttf`, `SegoeIcons.ttf`, `segmdl2.ttf` | added to fontconfig at start (`FcConfigAppFontAddDir`, before GTK builds its font map); the CSS asks for "Segoe UI Variable" (fontconfig lists its Display/Text/Small instances as styles of that one family; the clock sets `opsz` 36, the Display instance) then "Segoe UI" | the system sans (here Noto Sans) |
 | `screen/img100.jpg` (`background` in the config) | `Windows/Web/Screen/` | the lock-screen background, blurred and dimmed on the sign-in screen | a solid dark blue |
 | `user-pictures/user-192.png` | `ProgramData/Microsoft/User Account Pictures/` | the user tile when the user has no `~/.face`, `~/.face.icon` or AccountsService icon | a grey disc with the initials |
-| `hello/hello-face.png`, `hello/HelloFaceAnimation.gif` | the credential provider's tile icon and LogonUI's animation (48 frames, 30 ms) | the Hello face icon; the GIF plays while looking, the still otherwise | a glyph of the icon font (`hello_glyph = "EB68"`-style code point in the config, when `SegoeIcons.ttf`/`segmdl2.ttf` is in `fonts/`), else the greeter's own Cairo face (eyes glance while looking, smiles when recognised) |
+| `hello/eye/animation.json`, `hello/eye/seqNN/FFF.png` | `FontGlyphAnimator.dll` + `NUIMDL2.ttf`: the Windows 10 glyph eye, frame-exact (§1.3) | the Hello eye (`ui/eye.rs`): the transition table drives it per state |
+| `hello/hello-face.png` | the provider's logo (RT_HTML 1101 SVG, rendered) | the 24 px logo in the "Sign-in options" button |
+| `fonts/SegoeIcons.ttf` | Segoe Fluent Icons | submit arrow U+E72A, key U+E192, power U+E7E8, default tile U+EA8C | without `hello/eye/`: a glyph of the icon font (`hello_glyph`, hex code point, when `SegoeIcons.ttf`/`segmdl2.ttf` is in `fonts/`), else the greeter's own Cairo face shaped like `hello-face.svg` (eyes glance while looking, smile when recognised) |
 
 The log says what is in use at start (`assets: …; fonts: …; hello: …; background: …`), and the
 `--window` dev window shows the same line in its corner. Verified with the extracted
@@ -174,27 +198,32 @@ session: it would take the keyboard. `grim -o winit` screenshots the nested outp
 `--window` the greeter makes a layer-shell overlay (greetd mode) or locks the compositor it
 runs in (`--lock`), which also works in the nested niri.
 
-Screenshots (nested niri, fake greetd, 1600×1000 at scale 2, 2026-10-16), with the real
-assets (Bloom `img100.jpg`, Segoe UI Variable, the default user picture, the Hello face) and
-without them:
+Screenshots (nested niri, fake greetd, 1600×1000 at scale 2, 2026-10-16), with the real assets
+(Bloom `img100.jpg`, Segoe UI Variable, Segoe Fluent Icons, the default tile, the glyph eye)
+and without them (`*-fallback.png`):
 
-| | |
+| State | File |
 |---|---|
-| lock screen | `docs/img/greeter-lock.png`, fallback `greeter-lock-fallback.png` |
-| sign-in, looking (the GIF plays) | `docs/img/greeter-looking.png`, fallback `greeter-looking-fallback.png` |
-| sign-in, face not recognised, password | `docs/img/greeter-failed.png` |
+| lock screen | `docs/img/greeter-lock.png`, `greeter-lock-fallback.png` |
+| lock screen, recognised, key press required | `docs/img/greeter-lock-greeting.png` |
+| sign-in, looking (eye entrance held) | `docs/img/greeter-looking.png`, `greeter-looking-fallback.png` |
+| sign-in, making sure it's you (look-around loop) | `docs/img/greeter-verifying.png` |
+| sign-in, couldn't recognize you (ring-pupil blink) | `docs/img/greeter-failed.png` |
 | wrong password | `docs/img/greeter-wrong-password.png` |
+| sign-in options row | `docs/img/greeter-sign-in-options.png` |
 
 ## What matches Windows and what does not
 
-| Windows | hello-greeter |
+| Windows (windows-hello-ui.md) | hello-greeter |
 |---|---|
-| Lock screen: background, clock, date; any key/click → sign-in | same (placeholder layout: bottom-left clock) |
-| Sign-in: avatar circle, name, Hello icon + status, password box, "Sign-in options" | same elements; strings are placeholders ("Looking for you...", "Welcome", the module's reasons) |
-| Face runs on the lock screen; "dismiss the lock screen" setting | same (`dismiss_lock_screen`) |
-| 120 s then a confirmation key press (F56); 10 s switch timeout | `lock_face_seconds` = 120, attempts of `timeout=10` each |
-| Acrylic blur behind the sign-in screen | GSK blur + dim of the background image |
-| Segoe UI Variable, Segoe Fluent Icons, Spotlight/`img100.jpg`, the Hello animation | the real files when present in the assets directory; fallbacks otherwise |
+| Lock screen: image + 20 % mask, clock block at 15 %, adaptive sizes; any key/click → sign-in | same (two of the five size steps: ≥ 1920 and below) |
+| Sign-in: tile, name, eye + label, field with underline and submit arrow, "Sign-in options", provider buttons, system bar | same elements and numbers (§3.2); system bar = power only (no accessibility, IME, language, network); no user list / "Other user" |
+| Strings per state (105, 104, 123, 101, 125, 157, 124, 113) | the same texts, "PIN" → "password"; "Welcome" page: not shown under greetd (the session starts at once) |
+| The Hello eye | Windows 10's font-glyph animation, frame-exact (sequences and transition table from `FontGlyphAnimator.dll`); the Windows 11 Lottie version (`HelloSolidAnimations`, 64×64, 60 fps) is **not reconstructed** |
+| Face runs on the lock screen; "dismiss the lock screen" setting; 120 s confirmation window | `dismiss_lock_screen`, `lock_face_seconds` = 120, attempts of `timeout=10` each |
+| TooFar/TooClose eye states (5/6), "Adjusting brightness" (133), brightness override | not produced (the module's hints are text only) |
+| Acrylic backdrop behind the sign-in screen | GSK blur + a darker mask (the tint is UNKNOWN on Windows too) |
 | Password tile stays selected after a wrong password | the face runs first again (the PAM stack's order); the typed password is queued |
-| Other users / "Other user" tile, switch user | one account (`user` in the config) |
-| Accessibility, ease-of-access, power buttons at the bottom right | missing |
+| Lock → sign-in transition (0.5 s reveal, image scale 1→1.02) | slide-up + 250 ms blur; no scale |
+| Caps Lock warning | same |
+| Sounds, toasts, enrolment, PLAP, Cloud PC | none |
