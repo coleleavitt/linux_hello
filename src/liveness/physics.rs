@@ -13,7 +13,7 @@ use crate::{FaceCheck, Vote};
 
 /// The checks, in the order they are logged.
 pub fn all() -> Vec<Box<dyn Check>> {
-    vec![Box::new(Glint)]
+    vec![Box::new(Glint), Box::new(Shape)]
 }
 
 /// Score every check on every face of `check` that has a print, record the scores in
@@ -113,6 +113,105 @@ impl Check for Glint {
     }
 }
 
+/// Mean of the emitter's light over the square of half-side `half` at `centre`, clamped to the
+/// frame; `None` when the square lies outside it.
+fn patch(lit: &GrayImage, ambient: &GrayImage, centre: [f32; 2], half: f32) -> Option<f32> {
+    let (cx, cy, h) = (centre[0].round() as i64, centre[1].round() as i64, (half as i64).max(1));
+    let (x1, x2) = ((cx - h).max(0), (cx + h + 1).min(lit.width() as i64));
+    let (y1, y2) = ((cy - h).max(0), (cy + h + 1).min(lit.height() as i64));
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    let mut sum = 0.0;
+    for y in y1..y2 {
+        for x in x1..x2 {
+            sum += emitter_at(lit, ambient, x, y);
+        }
+    }
+    Some(sum / ((x2 - x1) * (y2 - y1)) as f32)
+}
+
+/// Emitter falloff over the face: the emitter is a point source a few centimetres from the
+/// lens, so a face at 40–70 cm is lit by 1/r² and by Lambert's cosine: the nose, cheeks and
+/// forehead face the emitter and are near, the sides of the face turn away and fall off, and
+/// the emitter sits to one side of the lens, so one cheek is brighter than the other. A flat
+/// print is lit evenly: what shading it shows is printed, and most inks are transparent at
+/// 850 nm, so the print reads nearly flat. Score = the RMS z-distance of the face's profile
+/// from the genuine profile: the mean of the emitter image over nine patches (half-side 0.1·IOD)
+/// at the nose, the cheeks, the forehead, the chin, the temples and the brows, each divided by
+/// their mean, against [`GENUINE_PROFILE`]. Patches outside the frame (chin cut) are left out.
+pub struct Shape;
+
+/// Mean and standard deviation of each patch's share of the profile over 145 frontal frames of
+/// the owner (`lh_lock`, `lh_now`, `lh_view`, `validation_frames`; one person, one camera): nose,
+/// left cheek, right cheek, forehead, chin, left temple, right temple, left brow, right brow.
+pub const GENUINE_PROFILE: [(f32, f32); 9] = [
+    (1.349, 0.034),
+    (1.495, 0.059),
+    (1.242, 0.076),
+    (1.312, 0.054),
+    (1.037, 0.034),
+    (0.461, 0.110),
+    (0.352, 0.067),
+    (0.994, 0.053),
+    (0.758, 0.043),
+];
+
+/// The patch centres in the order of [`GENUINE_PROFILE`], from the five points: along the
+/// eye line (`right`) and its normal (`down`), in units of the inter-ocular distance.
+fn profile_centres(points: &[[f32; 2]; 5]) -> [[f32; 2]; 9] {
+    let [le, re, nose, lm, rm] = *points;
+    let iod = iod(points);
+    let right = [(re[0] - le[0]) / iod, (re[1] - le[1]) / iod];
+    let down = [-right[1], right[0]];
+    let at = |p: [f32; 2], r: f32, d: f32| {
+        [p[0] + (r * right[0] + d * down[0]) * iod, p[1] + (r * right[1] + d * down[1]) * iod]
+    };
+    let eyes = [(le[0] + re[0]) / 2.0, (le[1] + re[1]) / 2.0];
+    let mouth = [(lm[0] + rm[0]) / 2.0, (lm[1] + rm[1]) / 2.0];
+    [
+        nose,
+        [(le[0] + lm[0]) / 2.0, (le[1] + lm[1]) / 2.0],
+        [(re[0] + rm[0]) / 2.0, (re[1] + rm[1]) / 2.0],
+        at(eyes, 0.0, -0.6),
+        at(mouth, 0.0, 0.45),
+        at(le, -0.55, 0.0),
+        at(re, 0.55, 0.0),
+        at(le, 0.0, -0.25),
+        at(re, 0.0, -0.25),
+    ]
+}
+
+/// The emitter image's mean over each patch divided by the mean of the patches present.
+pub fn profile(lit: &GrayImage, ambient: &GrayImage, points: &[[f32; 2]; 5]) -> [Option<f32>; 9] {
+    let half = 0.1 * iod(points);
+    let means = profile_centres(points).map(|c| patch(lit, ambient, c, half));
+    let present: Vec<f32> = means.iter().flatten().copied().collect();
+    let mean = present.iter().sum::<f32>() / present.len().max(1) as f32;
+    means.map(|m| m.filter(|_| mean > 0.0).map(|m| m / mean))
+}
+
+impl Check for Shape {
+    fn name(&self) -> &str {
+        "shape"
+    }
+
+    fn higher_is_live(&self) -> bool {
+        false
+    }
+
+    fn score(&mut self, frame: &Frame, face: usize) -> Result<Option<f32>> {
+        let pair = &frame.current.capture.pair;
+        let profile = profile(&pair.lit, &pair.ambient, &points(frame.face(face)));
+        let z: Vec<f32> =
+            profile.iter().zip(GENUINE_PROFILE).filter_map(|(p, (mu, sd))| Some(((*p)? - mu) / sd)).collect();
+        if z.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((z.iter().map(|z| z * z).sum::<f32>() / z.len() as f32).sqrt()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +239,23 @@ mod tests {
         assert_eq!(spot(&lit, &frame(0, &[([62, 82], 150)]), POINTS[0], radius), 0.0);
         // A dot outside the eye window is not a glint.
         assert_eq!(spot(&frame(100, &[([90, 110], 250)]), &frame(0, &[]), POINTS[0], radius), 0.0);
+    }
+
+    #[test]
+    fn profile_is_flat_on_an_even_print_and_skips_patches_off_the_frame() {
+        let flat = profile(&frame(100, &[]), &frame(0, &[]), &POINTS);
+        assert!(flat.iter().all(|p| (p.unwrap() - 1.0).abs() < 1e-6));
+        // Eyes at the bottom edge: the chin patch (0.45 IOD below the mouth) is off the frame.
+        let low = POINTS.map(|[x, y]| [x, y + 60.0]);
+        let cut = profile(&frame(100, &[]), &frame(0, &[]), &low);
+        assert!(cut[4].is_none() && cut[0].is_some());
+        // Dark temples and a bright nose, as the emitter lights a face: closer to the genuine profile.
+        let lit = GrayImage::from_fn(200, 200, |x, _| image::Luma([if (40..140).contains(&x) { 130 } else { 50 }]));
+        let face = profile(&lit, &frame(0, &[]), &POINTS);
+        let z = |p: &[Option<f32>; 9]| {
+            let z: Vec<f32> = p.iter().zip(GENUINE_PROFILE).map(|(p, (mu, sd))| (p.unwrap() - mu) / sd).collect();
+            (z.iter().map(|z| z * z).sum::<f32>() / 9.0).sqrt()
+        };
+        assert!(z(&face) < z(&flat), "{} < {}", z(&face), z(&flat));
     }
 }

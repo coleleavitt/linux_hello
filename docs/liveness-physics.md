@@ -60,3 +60,49 @@ a single broad patch (which the 9×9 ring subtracts) on glossy prints and screen
 **Role.** Logged; no threshold (the glint hides under the lid when the user looks down). It is
 the "sure" signal of the blink challenge (§7): a session whose frames never reached
 `GLINT_SURE` is the inconclusive case that asks for a blink.
+
+## 2. Emitter falloff / face shape (`shape`)
+
+**Physics.** The emitter is a point source a few centimetres from the lens. A face at 40–70 cm is
+lit by 1/r² and by Lambert's cosine: the nose, cheeks and forehead face the emitter and are
+nearest, the temples turn away and fall off to a third, and the emitter sits to one side of the
+lens, so one cheek is brighter than the other. A flat print is lit evenly: what shading it shows
+is printed, and most inks are transparent at 850 nm, so a print reads nearly flat in the emitter
+image.
+
+**Measure.** On the emitter image, the mean over nine patches (squares of half-side 0.1·IOD):
+nose tip, left and right cheek (between eye and mouth corner), forehead (0.6 IOD above the eye
+line), chin (0.45 IOD below the mouth), left and right temple (0.55 IOD outside each eye), left
+and right brow (0.25 IOD above each eye), each divided by their mean, so exposure and distance
+cancel. Patches off the frame (a chin cut at the edge) are left out. Score = RMS z-distance from
+the genuine profile `GENUINE_PROFILE`, the mean and standard deviation per patch over 145 frontal
+frames of the owner on this camera (fitted on the four genuine sets together; one person):
+
+| patch | nose | l cheek | r cheek | forehead | chin | l temple | r temple | l brow | r brow |
+|---|---|---|---|---|---|---|---|---|---|
+| mean | 1.35 | 1.50 | 1.24 | 1.31 | 1.04 | 0.46 | 0.35 | 0.99 | 0.76 |
+| σ | 0.03 | 0.06 | 0.08 | 0.05 | 0.03 | 0.11 | 0.07 | 0.05 | 0.04 |
+
+The left/right asymmetry (l cheek 1.50 vs r cheek 1.24, temples 0.46 vs 0.35) is the emitter's
+position beside the lens, the same on every frame.
+
+**Genuine.** The profile is stable within a sitting and drifts with distance and pose:
+
+| Set | frames | min | p10 | p50 | p90 | max | session max (min / median) |
+|---|---|---|---|---|---|---|---|
+| lh_lock | 59 | 0.36 | 0.52 | 0.69 | 0.96 | 1.09 | 0.66 / 0.99 |
+| lh_now (head turning, within the frontal limits) | 54 | 0.35 | 0.47 | 0.76 | 2.34 | 3.13 | 0.76 / 3.03 |
+| lh_view | 28 | 0.46 | 0.52 | 0.62 | 0.82 | 0.97 | 0.72 / 0.97 |
+| validation_frames (dark room, closer: temples 0.6–0.7) | 4 | 1.80 | — | 1.92 | — | 1.98 | 1.98 |
+
+Within the frontal limits (|yaw| ≤ 20°) a turned head moves one temple into the light and the
+other into shadow, which is the 2–3 of `lh_now`. The dark-room frames (closer, whole-frame
+metering) sit at 1.8–2.0 because the temples fall off less at a shorter distance relative to
+the face size. A perfectly flat profile (every patch 1.0) scores ≈ 7 against this table (the
+nose alone is 10 σ away, the temples 5–10 σ), so the expected margin is wide, but the genuine
+spread across people, distances and cameras is unmeasured: the table is one person's.
+
+**Attack set.** Not recorded yet.
+
+**Role.** Logged; no threshold (a 99 % genuine-frame threshold would be ≈ 3; whether prints sit
+above it is for the attack set).
