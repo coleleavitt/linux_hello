@@ -15,8 +15,10 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / no face ─▶ no print, no vote (reason counted)
 /dev/video0 (RGB) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
-  session: ≥ 4 prints and best similarity > threshold → recognised;
-           from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE; 16 pairs → give up
+  track: largest face followed by box overlap; a new face starts a new attempt
+  attempt: ≥ 4 prints and best similarity > threshold → recognised;
+           from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
+  session: 16 pairs over all attempts → give up
   after MATCH: add the best live print if it was a borderline match
 ```
 
@@ -144,21 +146,30 @@ fixed cosine threshold chosen for the same 1e-5 target per attempt.
 ### 7. Decision (F25, F47, F48)
 
 The order follows Windows' `MakeDecisions`: recognise first, then liveness on the same face.
+"The same face" is the face track (F37, F47): `FaceTracker` follows the largest face of each pair
+from pair to pair while its box overlaps the last one (IoU ≥ 0.3). A face that does not overlap,
+or that comes back after 7 pairs (≈ 1 s, Windows' 1000 ms purge, F37) without a face, starts a new
+track, and a new track starts a new attempt: its prints, best similarity and liveness votes start
+from zero. So the owner's prints never recognise a photo held up next, and the owner's live votes
+never count for it. Pairs without a face keep the current track. The 16-pair limit counts the
+whole session.
 
-1. **Recognise:** once the session has ≥ 4 prints (good or weak frames) and the best similarity
+1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the best similarity
    over them is > 0.50.
 2. **Liveness:** votes count only from the recognising frame on. ≥ 2 live votes → `MATCH <best
    similarity>`; else ≥ 3 spoof votes → `NOTLIVE`.
 3. **Give up** after 16 frame pairs (Windows: 48 frames or a counter > 16; one pair is two frames):
-   recognised → `NOTLIVE`; ≥ 4 prints but no match → `NOMATCH <best>`; fewer than 4 prints →
-   `NOFACE <most frequent rejection reason>`.
+   the current track recognised → `NOTLIVE`; ≥ 4 prints but no match → `NOMATCH <best>`; fewer
+   than 4 prints → `NOFACE <most frequent rejection reason over the session>`.
 
 The earliest possible `MATCH` is therefore at the 5th pair (4 prints, the 4th frame votes live,
 the 5th too), where voting from the first pair allowed a match at the 2nd pair.
 
-Not implemented: face tracking across frames (the largest face of each pair is assumed to be the
-same person), the re-attempt on movement or exposure change (F49), and the "closer to another
-user" check (1:1 by design).
+Checked on saved frames (`validation_frames`): five consecutive lit frames of one sitting keep one
+track (boxes move ≤ 2 px); the owner's frames from another sitting, 110 px higher, and the stranger
+photo each start a new track. Limits: only the largest face is tracked; a photo held exactly where
+the face was (IoU ≥ 0.3) continues the track. Not implemented: the re-attempt on movement or
+exposure change (F49) and the "closer to another user" check (1:1 by design).
 
 ### 8. Template augmentation (F31, F53)
 
@@ -205,7 +216,7 @@ stores one print per pair.
 ## Inspecting
 
 `linux_hello watch [--seconds 30]` prints one line per pair: face brightness lit/ambient, `d`,
-status or rejection reason, RGB P(real), vote, similarity, whether the user is recognised and the
-liveness state. It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
+status or rejection reason, RGB P(real), vote, similarity, the face track, whether the track's
+face is recognised and its liveness state. It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
 `/tmp/linux_hello_watch`). When a session reaches a verdict it prints it and starts a new one.
 `watch` does not augment the template.

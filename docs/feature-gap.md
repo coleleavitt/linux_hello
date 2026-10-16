@@ -37,7 +37,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | Partial: SCRFD per pair on the lit frame, largest face only, no tracking | Track id = IoU match between frames; needed for "same face" across pairing/votes |
+| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | **Done** (largest face only): SCRFD per pair on the lit frame; `FaceTracker` follows the largest face by box IoU ≥ 0.3, dropped after 7 pairs (≈ 1 s, F37) without a face | — |
 | 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | Partial: SCRFD 5 points | Enough for anchors (eyes, mouth); eye-contour box for brightness needs approximation from 5 points |
 | Recognition crop 3× box, ≤ 400 px, 8-bit lit luminance (F38) | Different: ArcFace 112×112 aligned crop from the RGB-converted IR frame | Keep ArcFace alignment; do subtraction on a 3× crop before aligning |
 | Face brightness = mean of 2×2-subsampled cheek/nose box (F43) | **Done** (approximation): box between eyes and mouth corners from SCRFD's 5 points (`lighting::face_brightness`) | — |
@@ -71,7 +71,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Distance 1 − cos, clamped ≤ 1 (F50) | Done (cosine similarity) | — |
 | Min distance over all stored prints (+coupled mean/pair prints) (F28) | **Done** (max cosine over prints); coupled prints Missing | Coupled prints optional |
 | Distance → FAR via per-hardware calibration table, × 1…4 correction; accept FAR < 1e-5 (F27, F51) | Partial: fixed cosine `MATCH_THRESHOLD` 0.50 from `docs/calibration.md` (FAR ≤ 1e-5 per attempt on LFW) | Store a (FAR, distance) table per camera/model and threshold on FAR; collect IR genuine/impostor data on this camera |
-| ≥ 4 prints on the track before deciding (F48, F54) | **Done** per session (no tracker: largest face of each pair) | Tracker, see below |
+| ≥ 4 prints on the track before deciding (F48, F54) | **Done** per track: a new track starts a new `Attempt` (prints, best similarity, votes) within the 16-pair session | — |
 | 1:N with "closer to another tracked/enrolled user" check (F48) | N/A by design: 1:1 for the PAM user | Could add: reject if another enrolled user scores higher |
 | Recognise first, then liveness on the same track (F47, F48) | **Done** (`Attempt`) | — |
 
@@ -130,7 +130,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Face tracker with ids across frames (FaceTrackerInternal) | Missing | IoU tracker (needed by pairing, votes, min-prints) |
+| Face tracker with ids across frames (FaceTrackerInternal) | **Done** for the largest face (`src/tracker.rs`); other faces in the frame are not tracked | — |
 | Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | Missing | `lbf.md` documents a converter (`pose.py`) |
 | Presence / wake-on-approach (WinBio presence monitor, `PresenceLifetimeInSeconds`) (F55) | N/A (no lock-screen integration) | Would need a long-running capture loop; power cost |
 | FaceBootstrapAdapter (virtual sensor `{063436EF-…}` bootstrap) | N/A (Windows WinBio plumbing) | — |
