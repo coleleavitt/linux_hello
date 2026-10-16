@@ -242,3 +242,36 @@ face on this laptop; it is kept as measured and may serve a camera pair with a w
 **Attack set.** Not recorded yet.
 
 **Role.** Logged; no threshold, and none expected here.
+
+## 7. Blink challenge (`blink`, `--blink-challenge`)
+
+**Physics.** An eye closes and opens within ≈ 150 ms. A print cannot; a screen can only replay
+a recording, which the challenge's timing does not fit unless the attacker loops blinks.
+
+**Measure.** On the emitter image, the mean of the two eye patches (squares of half-side
+0.12·IOD at the eye centres) over the mean of the two cheek patches: dark when the eye is open
+(iris, pupil, lashes; 0.5–0.65 on the owner), skin-bright when the lid covers it. Score = that
+ratio in the current pair minus its median over the track's earlier pairs (at least 3). A
+closure is a rise of `BLINK_RISE` = 0.1 or more.
+
+**Genuine.** Over the three café recordings (146 pairs ≈ 20 s): one clear blink (`lh_lock` pair
+29, score 0.215; the eye crops show the lids closed and no glint) and three pairs at 0.10–0.11
+in `lh_now` with the eyes closing while looking down; everything else −0.09…0.06, so the
+threshold has a margin of ≈ 0.04 over a still eye. `lh_view` (28 pairs, 3.7 s) has no blink at
+all. One blink in 20 s is the honest rate seen so far, which is why the challenge is opt-in: a
+user who does not blink within the window is told "Face not accepted as live" and types the
+password.
+
+**Challenge.** With `--blink-challenge` (global option, so `daemon` and `auth`), a session that
+ends in `MATCH` is confirmed by a blink when `needs_blink` holds for the matched track: its
+good-lighting frames had ambient above Windows' 25 (the match leaned on `--max-ambient`, where
+a photo lit by the room passes the emitter-gain rule) and no frame of the track reached
+`GLINT_SURE` = 0.3 on the glint check (every genuine session so far did, §1). The daemon then
+sends `NOTICE blink` (the PAM module shows "Blink once", `hello-greeter` shows it under the
+verifying eye) and reads up to `BLINK_PAIRS` = 24 more pairs (≈ 3 s); a `blink` score of 0.1 on
+the matched track keeps the `MATCH`, otherwise the reply is `NOTLIVE`. In a dark room (ambient
+≤ 25) nothing changes.
+
+**Attack set.** Not recorded yet.
+
+**Role.** Opt-in challenge; log-only otherwise.

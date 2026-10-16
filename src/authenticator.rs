@@ -308,6 +308,11 @@ impl Session {
         self.decided.and_then(|id| self.tracks.get(&id)).map(|t| &t.attempt)
     }
 
+    /// The id of the track that gave the verdict.
+    pub fn decided_track(&self) -> Option<u32> {
+        self.decided
+    }
+
     /// Whether a tracked face has been recognised (its liveness votes are being counted).
     pub fn recognised(&self) -> bool {
         self.tracks.values().any(|t| t.attempt.recognised())
@@ -591,7 +596,14 @@ impl From<Verdict> for Outcome {
 pub struct Authenticator {
     pub pipeline: FacePipeline,
     pub cameras: CameraSetup,
+    /// Confirm a match that leaned on `--max-ambient` without a sure glint by asking for a
+    /// blink (`--blink-challenge`, docs/liveness-physics.md §7)
+    pub blink_challenge: bool,
 }
+
+/// Pairs the blink challenge waits for a closure: ≈ 3 s at 7.5 pairs/s, two or three natural
+/// blinks' worth, and well within the PAM module's timeout after a 16-pair session.
+pub const BLINK_PAIRS: u32 = 24;
 
 impl Authenticator {
     /// Refuse when the lid is closed over a built-in camera. Otherwise read frame pairs until the
@@ -599,7 +611,7 @@ impl Authenticator {
     /// template if it was a borderline match (F53) and save the store. After `NOMATCH`, return
     /// the session's enroll-on-failure candidate.
     pub fn verify(&mut self, user: &str) -> Result<Outcome> {
-        self.run(user, None, &mut || {})
+        self.run(user, None, &mut |_| {})
     }
 
     /// [`Self::verify`] as a presence wait for a lock screen or console login (F55, F57: Windows
@@ -608,22 +620,23 @@ impl Authenticator {
     /// not passed; the session running at the deadline finishes. A wrong or spoofed face ends the
     /// wait as it ends a single check, so a stranger gets no more tries than with `sudo`.
     pub fn verify_within(&mut self, user: &str, deadline: Instant) -> Result<Outcome> {
-        self.run(user, Some(deadline), &mut || {})
+        self.run(user, Some(deadline), &mut |_| {})
     }
 
-    /// [`Self::verify`] (`deadline` `None`) or [`Self::verify_within`], calling `on_recognised`
-    /// once, the moment a face is recognised and the liveness votes begin: Windows' "Making
-    /// sure it's you..." (docs/windows-hello-ui.md state 3).
+    /// [`Self::verify`] (`deadline` `None`) or [`Self::verify_within`], calling `on_event` with
+    /// `recognized` once, the moment a face is recognised and the liveness votes begin
+    /// (Windows' "Making sure it's you...", docs/windows-hello-ui.md state 3), and with `blink`
+    /// when the blink challenge asks the user for one.
     pub fn verify_reporting(
         &mut self,
         user: &str,
         deadline: Option<Instant>,
-        on_recognised: &mut dyn FnMut(),
+        on_event: &mut dyn FnMut(&str),
     ) -> Result<Outcome> {
-        self.run(user, deadline, on_recognised)
+        self.run(user, deadline, on_event)
     }
 
-    fn run(&mut self, user: &str, deadline: Option<Instant>, on_recognised: &mut dyn FnMut()) -> Result<Outcome> {
+    fn run(&mut self, user: &str, deadline: Option<Instant>, on_event: &mut dyn FnMut(&str)) -> Result<Outcome> {
         let nodes = self.cameras.nodes()?;
         if lid::lid_closed() && lid::built_in(&nodes.ir) {
             return Ok(Verdict::LidClosed.into());
@@ -634,7 +647,7 @@ impl Authenticator {
         let mut cams = OpenCameras::open(&nodes, self.cameras.rotation)?;
         let mut reported = false;
         let mut checks = physics::all();
-        let (verdict, session) = loop {
+        let (mut verdict, mut session, mut history) = loop {
             let mut session = Session::default();
             let mut history = Vec::new();
             let verdict = loop {
@@ -645,7 +658,7 @@ impl Authenticator {
                 info!(user, "{}", describe(&check, &session));
                 if !reported && session.recognised() {
                     reported = true;
-                    on_recognised();
+                    on_event("recognized");
                 }
                 if let Some(verdict) = verdict {
                     break verdict;
@@ -653,10 +666,16 @@ impl Authenticator {
             };
             let waiting = deadline.is_some_and(|d| Instant::now() < d);
             if !(waiting && matches!(verdict, Verdict::NoFace { .. })) {
-                break (verdict, session);
+                break (verdict, session, history);
             }
             info!(user, %verdict, "no usable face yet; next session");
         };
+        if let (true, Verdict::Match { .. }, Some(track)) = (self.blink_challenge, verdict, session.decided_track()) {
+            if physics::needs_blink(&history, track) {
+                on_event("blink");
+                verdict = self.await_blink(&mut cams, &mut checks, user, &mut session, &mut history, track, verdict)?;
+            }
+        }
         drop(cams);
         let augmentation = session.decided().and_then(Attempt::augmentation);
         if let (Verdict::Match { .. }, Some((print, matched))) = (verdict, augmentation) {
@@ -675,6 +694,39 @@ impl Authenticator {
             _ => None,
         };
         Ok(Outcome { verdict, failed_print })
+    }
+
+    /// The blink challenge (docs/liveness-physics.md §7): the match of `track` stands only if
+    /// the face blinks within [`BLINK_PAIRS`] more pairs ([`physics::Blink`] scores
+    /// [`physics::BLINK_RISE`] or more); otherwise the session ends `NOTLIVE`.
+    #[allow(clippy::too_many_arguments)]
+    fn await_blink(
+        &mut self,
+        cams: &mut OpenCameras,
+        checks: &mut [Box<dyn Check>],
+        user: &str,
+        session: &mut Session,
+        history: &mut Vec<Observed>,
+        track: u32,
+        matched: Verdict,
+    ) -> Result<Verdict> {
+        info!(user, track, "blink challenge: the match leaned on the ambient limit without a sure glint");
+        for _ in 0..BLINK_PAIRS {
+            let capture = cams.capture()?;
+            let (check, _) = observe(&mut self.pipeline, checks, user, capture, session, history)?;
+            cams.expose_on(check.largest().map(|f| &f.analysis.face));
+            info!(user, "{}", describe(&check, session));
+            let blinked = check.faces.iter().zip(session.attempts()).any(|(f, (id, _))| {
+                id == track
+                    && f.physics.iter().any(|(n, s)| n == "blink" && s.is_some_and(|s| s >= physics::BLINK_RISE))
+            });
+            if blinked {
+                info!(user, "blink seen");
+                return Ok(matched);
+            }
+        }
+        info!(user, "no blink within {BLINK_PAIRS} pairs");
+        Ok(Verdict::NotLive)
     }
 
     /// Enroll up to `wanted` prints from frame pairs that pass every frame gate with good lighting,

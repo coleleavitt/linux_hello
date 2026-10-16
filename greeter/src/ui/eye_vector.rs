@@ -33,7 +33,7 @@ fn segment_for(face: &Face) -> Option<(&'static str, bool)> {
     match face {
         Face::Idle => None,
         Face::Starting | Face::Looking => Some(("Face", false)),
-        Face::Verifying => Some(("FaceLoop", true)),
+        Face::Verifying | Face::Blink => Some(("FaceLoop", true)),
         Face::Welcome => Some(("FaceSuccess", false)),
         Face::Failed(_) => Some(("FaceFail", false)),
     }

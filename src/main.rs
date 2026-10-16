@@ -55,6 +55,12 @@ struct Cli {
     #[arg(long, default_value_t = linux_hello::lighting::MAX_AMBIENT, global = true)]
     max_ambient: f32,
 
+    /// Confirm a match that leaned on --max-ambient (ambient above 25) without a sure eye glint
+    /// by asking the user to blink ("Blink once"; docs/liveness-physics.md §7). Opt-in: the
+    /// genuine blink rate is measured on few recordings yet
+    #[arg(long, global = true)]
+    blink_challenge: bool,
+
     /// Face store (default: /var/lib/linux_hello/faces.json as root, else ~/.local/share/linux_hello/faces.json)
     #[arg(long, env = "LINUX_HELLO_STORE", global = true)]
     store: Option<PathBuf>,
@@ -164,7 +170,8 @@ fn main() -> Result<()> {
             let user = user.unwrap_or_else(current_user);
             let pipeline = pipeline(liveness()?)?;
             let start = Instant::now();
-            let verdict = Authenticator { pipeline, cameras }.verify(&user)?.verdict;
+            let verdict =
+                Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge }.verify(&user)?.verdict;
             println!("{user}: {verdict} ({:.2} s)", start.elapsed().as_secs_f32());
             if !matches!(verdict, Verdict::Match { .. }) {
                 std::process::exit(1);
@@ -173,7 +180,7 @@ fn main() -> Result<()> {
 
         Commands::Enroll { user, frames, force, add } => {
             let pipeline = pipeline(Vec::new())?;
-            let mut auth = Authenticator { pipeline, cameras };
+            let mut auth = Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge };
             println!(
                 "Look at the camera and move your head a little, as when talking to someone: \
                  {frames} prints are taken over a few seconds."
@@ -238,7 +245,11 @@ fn main() -> Result<()> {
 
         Commands::Daemon { socket, enroll_on_failure } => {
             let pipeline = pipeline(liveness()?)?;
-            daemon::serve(&mut Authenticator { pipeline, cameras }, &socket, enroll_on_failure)?;
+            daemon::serve(
+                &mut Authenticator { pipeline, cameras, blink_challenge: cli.blink_challenge },
+                &socket,
+                enroll_on_failure,
+            )?;
         }
 
         Commands::Watch { user, seconds, out } => {

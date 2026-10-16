@@ -30,7 +30,7 @@ pub fn wanted_state(face: &Face) -> u32 {
     match face {
         Face::Idle => NONE,
         Face::Starting | Face::Looking => START,
-        Face::Verifying => LOOP,
+        Face::Verifying | Face::Blink => LOOP,
         Face::Welcome => SUCCESS,
         Face::Failed(_) => FAIL,
     }

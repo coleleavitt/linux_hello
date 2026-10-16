@@ -408,6 +408,7 @@ impl SignIn {
                 Face::Starting => (GETTING_READY.to_string(), true),
                 Face::Looking => (LOOKING_FOR_YOU.to_string(), true),
                 Face::Verifying => (MAKING_SURE.to_string(), true),
+                Face::Blink => (crate::state::BLINK.to_string(), true),
                 Face::Welcome => (format!("Hello {}", self.display_name), true),
                 Face::Failed(reason) => failure_text(reason.as_deref()),
             }
@@ -430,7 +431,8 @@ impl SignIn {
         }
         // The selected credential gets the 2 px border: face while it runs, password once a
         // prompt waits.
-        let face_selected = matches!(state.face, Face::Starting | Face::Looking | Face::Verifying | Face::Welcome);
+        let face_selected =
+            matches!(state.face, Face::Starting | Face::Looking | Face::Verifying | Face::Blink | Face::Welcome);
         for (button, selected) in [(&self.face_option, face_selected), (&self.password_option, !face_selected)] {
             if selected {
                 button.add_css_class("selected");

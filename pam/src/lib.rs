@@ -18,7 +18,8 @@
 //! The daemon's reply may go on with `NOTICE <text>` lines (an enroll-on-failure addition since
 //! the last check, five `NOMATCH` in a row); each is shown as PAM_TEXT_INFO after the verdict's
 //! message. The request carries `progress`, so `NOTICE <event>` lines also come before the
-//! verdict as things happen; `NOTICE recognized` is shown at once as "Making sure it's you..."
+//! verdict as things happen; `NOTICE recognized` is shown at once as "Making sure it's you...",
+//! `NOTICE blink` as "Blink once"
 //! (Windows' text while the liveness votes are counted, docs/windows-hello-ui.md).
 //!
 //! Return codes are chosen for `auth sufficient pam_linux_hello.so` placed before the password
@@ -256,10 +257,12 @@ fn check_face(pamh: *mut PamHandle, args: &Args) -> c_int {
 
 /// Windows' text for the daemon's progress events (`AUTH ... progress`), shown as they arrive:
 /// the face is recognised and the liveness votes are being counted (docs/windows-hello-ui.md
-/// state 3, resource 123).
+/// state 3, resource 123); the blink challenge asks for a blink (`daemon --blink-challenge`,
+/// docs/liveness-physics.md §7; no Windows text, Windows has no such challenge).
 fn progress_message(event: &str) -> Option<&'static CStr> {
     match event {
         "recognized" => Some(c"Making sure it's you..."),
+        "blink" => Some(c"Blink once"),
         _ => None,
     }
 }

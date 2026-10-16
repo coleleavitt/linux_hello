@@ -8,13 +8,21 @@
 use anyhow::Result;
 use image::{GrayImage, RgbImage};
 
-use crate::lighting::block_mean;
+use crate::lighting::{block_mean, LightingStatus, MAX_AMBIENT};
 use crate::liveness::check::{Check, Frame, Observed};
 use crate::{FaceCheck, Vote};
 
 /// The checks, in the order they are logged.
 pub fn all() -> Vec<Box<dyn Check>> {
-    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker), Box::new(Material), Box::new(Motion), Box::new(Parallax)]
+    vec![
+        Box::new(Glint),
+        Box::new(Shape),
+        Box::new(Flicker),
+        Box::new(Material),
+        Box::new(Motion),
+        Box::new(Parallax),
+        Box::new(Blink),
+    ]
 }
 
 /// Score every check on every face of `check` that has a print, record the scores in
@@ -474,6 +482,70 @@ impl Check for Parallax {
     }
 }
 
+/// Blink: the eye closing and opening within ≈ 150 ms, which a print cannot do and a screen
+/// can only replay. The eye patch of the emitter image is dark when open (iris, pupil, lashes)
+/// and skin-bright when the lid covers it, so the ratio of the eye patches to the cheek
+/// patches (squares of half-side 0.12·IOD; ≈ 0.5–0.65 open on the owner) rises by 0.1–0.2
+/// for one or two pairs. Score = that ratio in the current pair minus its median over the
+/// track's earlier pairs (at least [`BLINK_HISTORY`] of them); a blink is a score of
+/// [`BLINK_RISE`] or more. The challenge of `--blink-challenge` ([`needs_blink`],
+/// `Authenticator`) waits for one.
+pub struct Blink;
+
+/// Rise of the lid ratio over its median that counts as a closure: the owner's blinks read
+/// 0.17 (`lh_lock` pair 29) and 0.09–0.1 with the eyes already half down (`lh_now`).
+pub const BLINK_RISE: f32 = 0.1;
+/// Earlier pairs of the track the median needs.
+pub const BLINK_HISTORY: usize = 3;
+/// A session whose frames never reached this glint score is inconclusive and gets the blink
+/// challenge: every genuine 16-pair session so far reached 0.30 (docs/liveness-physics.md §1).
+pub const GLINT_SURE: f32 = 0.3;
+
+/// Mean of the two eye patches over the mean of the two cheek patches of the emitter image.
+fn lid_ratio(lit: &GrayImage, ambient: &GrayImage, points: &[[f32; 2]; 5]) -> Option<f32> {
+    let [le, re, _, lm, rm] = *points;
+    let half = 0.12 * iod(points);
+    let mean = |a: [f32; 2], b: [f32; 2]| Some((patch(lit, ambient, a, half)? + patch(lit, ambient, b, half)?) / 2.0);
+    let eyes = mean(le, re)?;
+    let cheeks = mean([(le[0] + lm[0]) / 2.0, (le[1] + lm[1]) / 2.0], [(re[0] + rm[0]) / 2.0, (re[1] + rm[1]) / 2.0])?;
+    (cheeks > 0.0).then(|| eyes / cheeks)
+}
+
+impl Check for Blink {
+    fn name(&self) -> &str {
+        "blink"
+    }
+
+    fn score(&mut self, frame: &Frame, face: usize) -> Result<Option<f32>> {
+        let ratio = |o: &Observed, i: usize| {
+            lid_ratio(&o.capture.pair.lit, &o.capture.pair.ambient, &points(&o.check.faces[i]))
+        };
+        let mut earlier: Vec<f32> = frame.history(face).filter_map(|(o, i)| ratio(o, i)).collect();
+        if earlier.len() < BLINK_HISTORY {
+            return Ok(None);
+        }
+        earlier.sort_by(f32::total_cmp);
+        let median = earlier[earlier.len() / 2];
+        Ok(ratio(frame.current, face).map(|r| r - median))
+    }
+}
+
+/// Whether a match of `track` should be confirmed by a blink: its good-lighting frames leaned
+/// on `--max-ambient` (ambient above Windows' [`MAX_AMBIENT`], where a photo lit by the room
+/// passes the emitter-gain rule) and none of its frames showed a sure glint ([`GLINT_SURE`]).
+pub fn needs_blink(history: &[Observed], track: u32) -> bool {
+    let faces =
+        history.iter().flat_map(|o| o.tracks.iter().zip(&o.check.faces).filter(|(t, _)| **t == track).map(|(_, f)| f));
+    let (mut ambient, mut sure) = (false, false);
+    for f in faces {
+        let lighting = f.analysis.lighting;
+        ambient |=
+            f.analysis.status() == Some(LightingStatus::Good) && lighting.is_some_and(|l| l.ambient > MAX_AMBIENT);
+        sure |= f.physics.iter().any(|(name, s)| name == "glint" && s.is_some_and(|s| s >= GLINT_SURE));
+    }
+    ambient && !sure
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +630,18 @@ mod tests {
         let mut closer = rgb;
         closer[2][0] -= 3.0;
         assert!((nose_disparity(&POINTS, &closer) + 3.0 / 60.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lid_ratio_rises_when_the_lid_covers_the_eye() {
+        let open = GrayImage::from_fn(200, 200, |x, y| {
+            let eye = |ex: u32| (ex - 6..ex + 6).contains(&x) && (74..86).contains(&y);
+            image::Luma([if eye(60) || eye(120) { 40 } else { 100 }])
+        });
+        let closed = frame(100, &[]);
+        let (open, closed) =
+            (lid_ratio(&open, &frame(0, &[]), &POINTS).unwrap(), lid_ratio(&closed, &frame(0, &[]), &POINTS).unwrap());
+        assert!(open < 0.7 && (closed - 1.0).abs() < 1e-6, "{open} {closed}");
+        assert!(closed - open >= BLINK_RISE);
     }
 }
