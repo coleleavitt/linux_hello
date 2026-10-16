@@ -2,7 +2,7 @@
 //! status, embedding, RGB liveness veto and the liveness vote.
 
 use anyhow::{bail, Context, Result};
-use image::RgbImage;
+use image::{GrayImage, RgbImage};
 use std::path::Path;
 use tracing::{debug, info};
 
@@ -74,7 +74,7 @@ impl FacePipeline {
         Ok(Self { detector, embedder, liveness, windows: None, store })
     }
 
-    /// Add the Windows Hello anti-spoofing vote and occlusion gate.
+    /// Add the Windows Hello anti-spoofing vote and the occlusion and frontal gates.
     pub fn with_windows_hello(mut self, models: WindowsHelloModels) -> Self {
         self.windows = Some(models);
         self
@@ -103,8 +103,9 @@ impl FacePipeline {
         self.store.reload()
     }
 
-    /// Find the face on the lit frame, apply the size and edge gates (F46) and the lighting
-    /// status (F44, F45), and embed the face if the frame is usable.
+    /// Find the face on the lit frame, apply the size and edge gates (F46), the lighting status
+    /// (F44, F45) and, with the Windows Hello models, the occlusion and frontal gates (F46, F59), and
+    /// embed the face if the frame is usable.
     pub fn analyze(&mut self, pair: &IrPair) -> Result<Analysis> {
         let faces = self.detector.detect_gray(&pair.lit)?;
         let Some(face) = faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))) else {
@@ -117,10 +118,7 @@ impl FacePipeline {
             LightingStatus::Good | LightingStatus::Weak => None,
         });
         let problem = match (problem, &mut self.windows) {
-            (None, Some(w)) => {
-                let occlusion = w.occlusion.check(&pair.lit, &face)?;
-                occlusion.is_occluded.then_some(FaceProblem::Occluded)
-            }
+            (None, Some(w)) => windows_problem(w, &pair.lit, &face)?,
             (problem, _) => problem,
         };
         if let Some(problem) = problem {
@@ -228,8 +226,21 @@ fn area(f: &Face) -> f32 {
     (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
 }
 
-/// Size and edge gates of Windows' per-frame check (F46). Occlusion is checked in `analyze` when
-/// the Windows Hello models are loaded. Pose (|yaw| ≤ 20°, |pitch| ≤ 25°) is not checked.
+/// Gates that need the Windows Hello models: occlusion, then the frontal check (F46, F59) with the
+/// pose of the Windows IR detector's face that overlaps the SCRFD face (`RetinaEngine::ComputeOrientation`).
+/// When that detector has no such face, Windows tracks no face and gets no orientation, so the frame is
+/// not frontal either.
+fn windows_problem(w: &mut WindowsHelloModels, lit: &GrayImage, face: &Face) -> Result<Option<FaceProblem>> {
+    if w.occlusion.check(lit, face)?.is_occluded {
+        return Ok(Some(FaceProblem::Occluded));
+    }
+    let orientation = w.retina.matching(lit, face)?.and_then(|(f, _)| f.orientation);
+    debug!(?orientation, "IR detector pose");
+    Ok((!orientation.is_some_and(|o| o.is_frontal())).then_some(FaceProblem::NotFrontal))
+}
+
+/// Size and edge gates of Windows' per-frame check (F46). Occlusion and pose are checked in
+/// `windows_problem` when the Windows Hello models are loaded.
 fn geometry_problem(face: &Face, width: u32, height: u32) -> Option<FaceProblem> {
     let [x1, y1, x2, y2] = face.bbox;
     if x2 - x1 < MIN_FACE_PX.max(MIN_FACE_RATIO * width.min(height) as f32) {

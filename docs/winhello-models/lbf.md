@@ -1,7 +1,8 @@
 # Windows Hello legacy IR landmark aligner (LBF) and head pose — format and converter
 
 Research / interoperability notes. The converted files stay local and git-ignored
-(`models/windows_hello/converted/lbf/`); linux_hello does not ship or use them.
+(`models/windows_hello/converted/lbf/`). linux_hello has a Rust port (see "Rust port") that reads the original
+resources; it is an API and a diagnostic, not a frame gate.
 
 Evidence tags: **OBSERVED** = seen in code (function + address cited, FaceProcessorCore.dll
 10.0.26100.9444 with public PDB unless noted), **INFERRED** = reasoning, **UNKNOWN** = not resolved.
@@ -279,6 +280,27 @@ does not change sign when the frame is mirrored, so it reflects a domain shift (
 geometry; the `ir_*` frames get pitch −26…−30° (chin out of frame). Because the numpy code matches the x64 code
 exactly given the same landmarks, this is what the legacy path would compute on these inputs. Whether Windows
 feeds this path differently (orientation/mirroring, other preprocessing) is UNKNOWN.
+
+## Rust port (`src/ms_models/lbf.rs`, `src/ms_models/pose.rs`)
+
+* `LbfAligner::load(MODEL_FILES_102.cefa)` parses the database as above (to EOF) and
+  `align(lit, [left, top, right, bottom])` runs the detection mode of `Aligner::Predict` → 31 points + classifier
+  score (`Alignment::accepted` = score > 0). Tracking init is not ported (no tracker).
+* `IrFaceOrientation::load(dir)` reads `MODEL_FILES_104..107.bin`; `estimate(lit, points)` returns the
+  `FaceOrientationResult` (pitch, yaw, "roll", the 4 flags, frontal margin). Only the no-prior regression is ported
+  (the prior path needs the same tracked face's estimate from the last 330 ms). `headpose_lda_knn.onnx` is not used.
+* Inputs used in linux_hello: the SCRFD box truncated to integers (`as i32`, like `int()` in the Python tools) on the
+  8-bit lit frame. Exposed in `examples/ms_check` (`pose.legacy`); **not used as a gate**: on this camera it reads
+  +24…26° of yaw on frontal faces (see Validation), so Windows' ±20° limit would reject the owner. The frontal
+  gate uses the RetinaEngine pose instead (`ldmf.md` §11).
+
+Verification: Rust vs `aligner.py` + `pose.py`, same image and same integer rect, on the 9 owner IR frames and the
+6 faces of the stranger photo (converted to gray with PIL and saved as PNG, so both read identical pixels):
+31 points max |Δ| **0.0**, classifier score |Δ| **0.0**, accept flag equal, pitch/yaw equal, roll |Δ| 0.0,
+flags and frontal margin equal on all 15 faces. The values reproduce the Validation table above (e.g.
+watch_0014: score 4.3786, pitch −9 / yaw 26; ir_15: frontal, margin 0.305). Run time 1.3–2.0 ms per face (release).
+The LDA projection is summed in f64 and the centroid distance in f32; both only feed the nearest-centroid choice,
+which was equal everywhere.
 
 ## Verified vs assumed
 

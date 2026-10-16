@@ -10,10 +10,10 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
 ```
 /dev/video3 (UVCM metadata) ─ illumination flag per frame ─┐
 /dev/video2 (IR 640x360 @15) ───────────────────────────────┴─▶ lit/ambient pair (< 300 ms apart)
-  lit frame ─▶ SCRFD face ─▶ size/edge gates ─▶ face brightness + lighting status
+  lit frame ─▶ SCRFD face ─▶ size/edge gates ─▶ face brightness + lighting status ─▶ occlusion, frontal pose
      good ─▶ embed lit − min(lit, ambient) ─▶ live vote unless the RGB models veto
      weak ─▶ embed the lit frame ───────────▶ no vote
-     too dark / too bright / too small / edge / no face ─▶ no print, no vote (reason counted)
+     too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
 /dev/video0 (RGB) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
   track: largest face followed by box overlap; a new face starts a new attempt
   attempt: ≥ 4 prints and best similarity > threshold → recognised;
@@ -55,12 +55,19 @@ The face (largest SCRFD detection) is found on the lit frame. A pair gives no pr
 | `too_bright` | lit face brightness > 205 | F44 status 2 |
 | `too_dark` | lit face brightness < 35 | F44 status 3 |
 | `occluded` | Windows Hello occlusion model: 1 − p(none) > 0.9 (> 0.5 while enrolling); only with the converted models | F46 |
+| `not_frontal` | Windows Hello IR detector's head pose: \|yaw\| > 20° or \|pitch\| > 25°, or that detector has no face overlapping the SCRFD face (IoU ≥ 0.5); only with the converted models | F46, F59 |
 
 The occlusion model is the converted Windows Hello one (`models/windows_hello/converted/occlusion`,
-docs/winhello-models/cefa.md). Its input is the face box resampled to 128×128, as in Windows. Not
-implemented: the frontal-pose check (|yaw| ≤ 20°, |pitch| ≤ 25°, F59). The converted head-pose
-model reads about +25° of yaw on frontal faces from this camera (docs/winhello-models/lbf.md), so
-a pose gate built on it would reject most real frames.
+docs/winhello-models/cefa.md). Its input is the face box resampled to 128×128, as in Windows.
+
+The frontal check uses the pose Windows uses: the 6-DoF output of its IR RetinaFace-style detector
+(`models/windows_hello/converted/ldmf/ort/MODEL_FILES_110.ort`, `RetinaEngine::ComputeOrientation`,
+docs/winhello-models/ldmf.md §7, §11). The detector runs on the whole lit frame (about 3 ms at 640×360) after the
+other gates. If it reports no face where SCRFD found one, the frame is rejected too: Windows tracks faces with
+this detector, so such a face would get no orientation there. The owner's frontal frames read |yaw| ≤ 5° and
+pitch −11…−15°. The legacy Windows estimator (LBF aligner + `IrFaceOrientation`) is ported bit-exact
+(`LbfAligner`, `IrFaceOrientation`, docs/winhello-models/lbf.md) but is not a gate: it reads about +25° of yaw on
+frontal faces from this camera, so it would reject most real frames.
 
 ### 3. Face brightness and lighting status (F14, F43, F44)
 

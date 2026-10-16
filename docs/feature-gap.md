@@ -37,15 +37,15 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | **Done** (largest face only): SCRFD per pair on the lit frame; `FaceTracker` follows the largest face by box IoU ≥ 0.3, dropped after 7 pairs (≈ 1 s, F37) without a face | — |
-| 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | Partial: SCRFD 5 points | Enough for anchors (eyes, mouth); eye-contour box for brightness needs approximation from 5 points |
+| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | **Done** (largest face only): SCRFD per pair on the lit frame; `FaceTracker` follows the largest face by box IoU ≥ 0.3, dropped after 7 pairs (≈ 1 s, F37) without a face. The Windows IR Retina detector (MODEL_FILES_110, `MsRetinaDetector`) runs on the lit frame for the frontal check only; its box and landmarks are not used | — |
+| 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | Partial: SCRFD 5 points in the pipeline; Windows' 31 points are available from `LbfAligner` (bit-exact port) but not used yet | Use `LbfAligner` points for the F43 brightness box and the F13 anchors |
 | Recognition crop 3× box, ≤ 400 px, 8-bit lit luminance (F38) | Different: ArcFace 112×112 aligned crop from the RGB-converted IR frame | Keep ArcFace alignment; do subtraction on a 3× crop before aligning |
 | Face brightness = mean of 2×2-subsampled cheek/nose box (F43) | **Done** (approximation): box between eyes and mouth corners from SCRFD's 5 points (`lighting::face_brightness`) | — |
 | Exposure status: > 205 too bright, < 35 too dark, clipped pixels > 1 % → reject (F44, F45) | **Done** for 205/35 (rejected, no print, no vote); clipped-pixel statuses 6/7 Missing | Add saturated-pixel count (pixel = 255 or equal to ±2 neighbours) |
 | Lit − ambient ≥ 45, ambient ≤ 25 (F14, F44) | **Done**: otherwise status 4 (print kept for matching, no vote, no augmentation) | — |
 | Min face width 72 px and ≥ 0.12 × min(frame w,h) (F46, F54) | **Done** (`too_far`) | — |
 | Edge cut: box ≥ inter-ocular/5 from border (F46) | **Done** (`edge`, frame rejected) | — |
-| Frontal pose: |yaw| ≤ 20°, |pitch| ≤ 25° (F46, F59) | Missing | Estimate from 5 points (eye/nose/mouth geometry) or port IrFaceOrientation (LBP+LDA+KNN, resources 104–107, `lbf.md`) |
+| Frontal pose: \|yaw\| ≤ 20°, \|pitch\| ≤ 25° (F46, F59) | **Done** (with the converted models): `FacePipeline::analyze` takes the pose of the Windows IR Retina detector (MODEL_FILES_110, `RetinaEngine::ComputeOrientation` angle order, F59) for the face overlapping SCRFD's; not frontal or no such face → `NOFACE not_frontal`. All 4 frontal owner frames pass (ldmf.md §11) | — |
 | Occlusion detectors (eyes, mouth/nose, face; ONNX); 4 consecutive occluded frames → give up; occlusion mode after 30 frames ≥ 50 % (F46, F61) | **Partial**: face-level occlusion gate in `FacePipeline::analyze` (converted Windows Hello model, used when `models/windows_hello/converted` exists; 1 − p_none > 0.9, 0.5 while enrolling; face-box input as in `sub_18004B5B8`); occluded frames give no print and the reply `NOFACE occluded`. The 4-frame give-up and occlusion mode are Missing | — |
 | Re-attempt by movement (centre range > 0.01, size ±20 %) or exposure (σ > 12) before rejecting (F49) | Missing (fixed 16 frame pairs) | Keep per-session stats; extend the session once on movement/exposure change |
 | Colour-face correspondence + colour quality (edge cut, too close/far, low-confidence alignment) (`EvaluateColorFaceQuality`) | Partial: largest face on RGB, no geometric correspondence to IR face | Map IR box to RGB with a fixed extrinsic offset; reject if none |
@@ -114,7 +114,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Feedback reasons: too close/far, too bright/dark, too much ambient, backlight, occluded, large pose (F45, F46) | **Done** for too dark/bright/far, edge, occluded, no face, not live, not recognized (`NOFACE <reason>` reply, PAM `PAM_TEXT_INFO`); ambient/pose Missing | — |
+| Feedback reasons: too close/far, too bright/dark, too much ambient, backlight, occluded, large pose (F45, F46) | **Done** for too dark/bright/far, edge, occluded, not frontal, no face, not live, not recognized (`NOFACE <reason>` reply, PAM `PAM_TEXT_INFO`); ambient Missing | — |
 | Notifications: improve recognition, liveness suggestion, get help (days intervals) (F56) | N/A | — |
 | Extensive telemetry (per-frame decisions, GFP, counts) | Partial: `watch` command, tracing logs | Log gate reasons and vote counts per session |
 
@@ -131,7 +131,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Face tracker with ids across frames (FaceTrackerInternal) | **Done** for the largest face (`src/tracker.rs`); other faces in the frame are not tracked | — |
-| Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | Missing | `lbf.md` documents a converter (`pose.py`) |
+| Head-pose estimator (IrFaceOrientation LBP/LDA/KNN) (F58) | **Done** as API, not a gate: `LbfAligner` + `IrFaceOrientation` read resources 102, 104–107 and match the bit-exact Python reference exactly (lbf.md "Rust port"); it reads ~+25° yaw on frontal faces from this camera, so the frontal gate uses the Retina pose | Prior (tracking) path of the KNN regression, now that a tracker exists |
 | Presence / wake-on-approach (WinBio presence monitor, `PresenceLifetimeInSeconds`) (F55) | N/A (no lock-screen integration) | Would need a long-running capture loop; power cost |
 | FaceBootstrapAdapter (virtual sensor `{063436EF-…}` bootstrap) | N/A (Windows WinBio plumbing) | — |
 | Hardware-model selection via OneSettings (`HardwareModelContainer`) (F51) | N/A | — |
