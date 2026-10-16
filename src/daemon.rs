@@ -165,7 +165,12 @@ mod tests {
     fn pending_print_is_taken_once_by_its_user_and_token() {
         let now = Instant::now();
         let pending = |at| {
-            Some(Pending { user: "alice".into(), token: "t1".into(), print: Embedding { features: vec![1.0] }, at })
+            Some(Pending {
+                user: "alice".into(),
+                token: "t1".into(),
+                print: Embedding { features: vec![1.0], windows: None },
+                at,
+            })
         };
         let mut slot = pending(now);
         assert!(Pending::take(&mut slot, "alice", "t1", now + Duration::from_secs(5)).is_some());

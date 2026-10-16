@@ -12,8 +12,9 @@ Developed and tested on a ThinkPad P16 Gen 3 (Realtek camera, USB `30c9:00f3`) r
 IR metadata (/dev/video3) ─ emitter on/off per frame ─┐
 IR camera (/dev/video2) ──────────────────────────────┴▶ lit + ambient frame pair
    lit frame ─▶ SCRFD face ─▶ size/edge/brightness gates ─▶ ArcFace on (lit − ambient) ─▶ best of the user's prints
+                                                        └▶ Microsoft's v5 recogniser on the same image (second opinion, when its model is present)
 RGB camera (/dev/video0) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 (veto if mean P(real) < 0.5)
-   session: 4 prints + estimated FAR < 1e-5 (similarity ≈ 0.50) → recognised; then 2 live votes → MATCH, 3 spoof votes → reject
+   session: 4 prints + estimated FAR < 1e-5 (similarity ≈ 0.50; and Microsoft's FAR < 1e-5, distance < 0.35) → recognised; then 2 live votes → MATCH, 3 spoof votes → reject
             16 pairs → give up (once more if the face moved or the exposure changed); 4 occluded frames in a row → give up
 ```
 
@@ -30,6 +31,10 @@ Details and the Windows Hello findings behind each step: [docs/capture-and-liven
   the threshold); liveness votes count from then on. A good-lighting pair is a live vote; the RGB
   liveness models (trained on visible light) can veto it, which makes it a spoof vote. They are
   there to catch printed photos.
+- **Second opinion:** with the converted Windows Hello models, every print also carries the feature of
+  Microsoft's own face recogniser, and a face is recognised only when ArcFace and Microsoft's net both
+  put its false-accept rate under 1e-5 (Microsoft's own calibration table; `ms=` `ms_far=` in the logs).
+  Prints enrolled without the models are matched by ArcFace alone.
 - **Several prints per user:** enrollment keeps 16 prints taken over a few seconds while you move
   your head a little (near-identical frames do not count); `enroll --add` appends more (glasses,
   other light) up to 100. A probe matches on the closest one, and the false-accept estimate is
@@ -103,6 +108,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
 |--|--|
 | Owner, IR similarity to the closest print | 0.96–0.98 (recognised at FAR < 1e-5, i.e. about 0.50; `far` ≈ 1e-7) |
 | Stranger faces (group photo) | −0.06…0.03 |
+| Owner, Microsoft's recogniser distance to the closest print, same sitting / another sitting with the chin cut off | 0.007–0.025 (`ms_far` ≈ 8e-7) / 0.42–0.45 (refused: FAR 1e-5 is distance 0.35) |
+| Strangers, Microsoft's recogniser distance | 0.85–1.0 (`ms_far` ≥ 0.07) |
+| Microsoft's recogniser, crop + net per frame | 4–6 ms |
 | Windows Hello anti-spoofing frame total, owner at face brightness ~100 | +1 on about 90 % of good frames |
 | Owner at face brightness ~150 (close, lamp behind the head), before face-metered exposure | +1 on about 35 % of good frames |
 | `sudo` unlock, end to end, 16-frame warm-up | ~2.6 s (1.75 s camera start + 0.5 s decision) |
@@ -115,6 +123,11 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   Windows Hello models (`models/windows_hello/converted`, git-ignored, personal use). Without them
   the IR evidence is only the lighting status and the open RGB models can only veto: a print or
   mask that reflects IR like skin passes the gate and the RGB veto has to catch it.
+- With those models, recognition also depends on Microsoft's recogniser: it can refuse a face that
+  ArcFace accepts (on the saved frames, the owner's chin-cut frames against a full-face template), and
+  its table's FAR is Microsoft's estimate, not charged for the template size like ArcFace's. Prints
+  enrolled before the models were there have no Microsoft feature and are matched by ArcFace alone;
+  re-enroll to get the second opinion on them.
 - Only the largest face is tracked across frames.
 - Microsoft's anti-spoofing nets are sure of a live face at a face brightness near 100 and unsure
   near 150; the face-metered exposure keeps the face near the camera's target, but a close face

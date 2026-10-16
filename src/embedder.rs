@@ -60,7 +60,7 @@ impl FaceEmbedder {
         let norm = raw.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
         let features: Vec<f32> = raw.iter().map(|x| x / norm).collect();
         debug!(dim = features.len(), "extracted embedding");
-        Ok(Embedding { features })
+        Ok(Embedding { features, windows: None })
     }
 }
 

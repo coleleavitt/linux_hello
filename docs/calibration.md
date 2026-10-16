@@ -274,6 +274,48 @@ IR-calibrated table for this camera needs impostor IR captures (Caveats). `cargo
 file: the 0.50 ↔ 1e-5 point, the measured 1e-5 and 1e-6 points within 10 %, monotonic FAR over −1…1, and the
 default for an unlisted camera.
 
+## Microsoft's table (second opinion)
+
+With the Windows Hello models, Microsoft's v5 recogniser gives a second opinion on every probe
+(capture-and-liveness.md §6). Its distance → FAR table is the one in the model container's header
+([winhello-models/cefa.md](winhello-models/cefa.md) §2.2: 20 (FPR, TAR, distance) rows, five identical
+copies for hardware models 0, 1, 2, 4, 5; dumped to `re/models/v5_gfp_calibration_table.tsv`). It is
+Microsoft's data, so it is not shipped: `calibration::load_windows` reads it from
+`models/windows_hello/converted/cefa/MODEL_FILES_123.json`, which `tools/winhello_models/cefa unpack` writes
+next to the model (git-ignored; `contrib/install.sh` copies both), takes the first hardware model's table
+and keeps it as a `CalibrationTable` in similarity = 1 − distance. The curve is Windows' own
+(`sub_1800397B4`, the same code as `pair_far`): FAR 1e-5 at distance 0.350, 2.0e-6 at 0.305 (the best row;
+beyond it the exponential extrapolation floors near 7.5e-7 at distance 0), 1.0e-2 at 0.583 (the worst row;
+beyond it linear).
+
+| distance | FPR | TAR |
+|---|---|---|
+| 0.305 | 2.04e-06 | 0.9957 |
+| 0.350 | 1.00e-05 | 0.9977 |
+| 0.415 | 1.01e-04 | 0.9989 |
+| 0.490 | 1.01e-03 | 0.9996 |
+| 0.583 | 1.00e-02 | 0.9998 |
+
+How the two opinions combine (`Template::best_match`, `PrintMatch::recognised`):
+
+- ArcFace: best similarity over the template's prints → `far` from the camera's table × prints × 16 (above).
+- Microsoft: minimum engine distance `min(1, 1 − cos)` (F50) over the prints that carry a Windows feature
+  (F28) → `ms_far` = the table's FPR at that distance, **not** multiplied by the comparison count. Windows
+  multiplies its GFP by 1…4 for the verification conditions compared (F51, F52); linux_hello compares one
+  condition of one user. The union bound used for ArcFace cannot be applied to this table: 16 prints × 16
+  pairs would need a per-comparison FPR of 3.9e-8, which the table reaches only at a (meaningless) negative
+  distance, and even one print × 16 pairs (6.3e-7) needs distance −0.06. So `ms_far` is Microsoft's own
+  estimate used Microsoft's way, and what it means per attempt is whatever Microsoft measured it as.
+- Recognised when `far < 1e-5` and, if there is a second opinion, `ms_far < 1e-5` (distance < 0.350).
+  Either opinion alone can refuse; both must accept. Without the models, or against prints enrolled
+  without them, ArcFace decides alone. Augmentation (F53) keys on the ArcFace FAR band as before, within a
+  recognised match.
+
+On the validation frames (cefa.md §7): same-sitting owner probes get distance 0.007–0.025 (`ms_far` ≈ 8e-7,
+the floor); the six strangers 0.846–1.0 (`ms_far` ≥ 0.067); the owner's chin-cut frames against a full-face
+template 0.42–0.45 (`ms_far` 1e-4…4e-4), which ArcFace alone accepts at 0.61–0.64. No IR stranger set exists
+yet, for either table.
+
 ## Caveats
 
 - **IR vs grayscale LFW.** linux_hello sees an 850 nm IR image with its own illuminator. Grayscale LFW
