@@ -1,7 +1,8 @@
 # Windows Hello Face: `.cefa` recognition containers and HelloFaceCipher
 
 Research and interoperability notes. The converted models are Microsoft proprietary. They stay
-local and git-ignored (`models/windows_hello/converted/`). linux_hello does not ship or use them.
+local and git-ignored (`models/windows_hello/converted/`); linux_hello uses the v5 recogniser when it is
+there (§7) and never ships it.
 Tool: `tools/winhello_models/cefa/` (README there). Shared cipher module: `tools/winhello_models/cipher.py`.
 Agent: conv-cefa. Binary: Windows 11 build 26300 `FaceRecognitionEngineAdapter.dll` (ENG, no PDB; names from
 RTTI and TraceLogging strings), `FaceProcessorCore.dll` / `FaceProcessor.dll` (public PDBs).
@@ -29,6 +30,8 @@ observed facts. **UNKNOWN** = not resolved.
   owner vs owner, same session: **0.007–0.033**. Owner vs owner, other session: **0.40–0.48**, because the
   `ir_*` frames cut the face off at the chin. Owner IR vs strangers: **≥ 0.806** (mean 0.93). The engine's
   FAR 1e-5 threshold is **0.350**. No stranger pair is accepted.
+- linux_hello runs the v5 net as a second opinion next to ArcFace (`src/ms_models/recognizer.rs`, §7): the
+  Rust port is exact to 4.5e-8 on identical crops.
 
 ## 1. Who loads the containers
 
@@ -250,7 +253,39 @@ What is verified, and what is assumed:
 - Not verified bit-for-bit: the crop against a Windows run (no Windows trace available). The landmark source is SCRFD,
   not Microsoft's aligner. The face box for occlusion is SCRFD's, not Microsoft's detector box.
 
-## 7. Open questions
+## 7. Rust port (`src/ms_models/recognizer.rs`)
+
+`MsRecognizer` runs the v5 net as the second opinion of linux_hello's matching (capture-and-liveness.md §6,
+calibration.md "Microsoft's table"). Loaded by `WindowsHelloModels` from `converted/cefa/MODEL_FILES_123.onnx`
+plus the calibration table of the container header from `MODEL_FILES_123.json` (`calibration::load_windows`,
+first hardware model; `contrib/install.sh` copies both). `MsRecognizer::crop` is §4 steps 1–4 — the same
+`prep::align_crop` as the anti-spoofing nets, whose `sub_180015F68` calls the same `sub_18001614C` /
+`sub_180016B20` / `sub_180016440` on the same template values (0x1800D7F40 here, 0x1800D7F68 in convnet.md
+§3.2) — at the Windows IR detector's five points (SCRFD's when it has no face); `embed` feeds it raw 0..255
+(the graph holds the FaceDataLayer's `x/127.5 − 1`) and L2-normalises the 256 floats. `recognizer::distance`
+is F50. Input image: the recognition image of F40 (a), `lit − min(lit, ambient)` with good lighting, the
+same one the ArcFace print comes from.
+
+Checked against §6's Python on the validation frames (`examples/ms_recognize <frames> <models> <crops_dir>`,
+then onnxruntime on the written crops with `align.py` on the same landmarks):
+
+- Net: on identical crops, max |Δfeature| ≤ 4.5e-8 (ort in Rust vs onnxruntime in Python).
+- Crop: 19–67 of the 16,384 pixels of an IR frame's crop differ by 1 grey level (one pixel by 21 at a
+  sampling boundary), from the order of the float additions before the truncation to uint8; features then
+  differ by ≤ 1.0e-3, distances by < 1e-3. Which order the DLL uses is not known; neither port is bit-exact to it.
+- Distances (Rust, Windows detector points on the `watch_*` frames, SCRFD's on `ir_*` where that detector
+  finds no face, F46): owner A vs A 0.007–0.030, B vs B 0.010–0.035, A vs B 0.417–0.467, owner vs strangers
+  ≥ 0.847 (mean 0.949), strangers vs strangers ≥ 0.604 — §6's numbers within 0.01 (§6 used SCRFD points for
+  all; the two point sets put a `watch_*` feature 0.006–0.012 apart).
+- End to end (`Template::best_match`, both tables): every owner frame against the other frames of its
+  session is recognised by ArcFace (similarity 0.965–0.986, FAR 2–3e-8) and by Microsoft's net (distance
+  0.007–0.025, its FAR 7.7–8.1e-7, the extrapolation floor of its table); the chin-cut `ir_*` frames against
+  the full-face `watch_*` template pass ArcFace (0.61–0.64, FAR 6e-8) but not Microsoft's net (0.42–0.45,
+  FAR 1.1e-4–3.7e-4), so the second opinion refuses them; the six strangers fail both (ArcFace −0.05…0.03,
+  Microsoft 0.846–1.0, FAR ≥ 0.067).
+- Time: crop + net 4.1–5.6 ms per face (release build, CPU, this laptop), on top of the ArcFace print.
+
+## 8. Open questions
 
 - Header bytes 3–5 and the body flag byte (this+113): always 0. Meaning UNKNOWN.
 - Hardware-model ids in the tables (0, 1, 2, 4/5, 5): which camera classes they mean is UNKNOWN (F51 has the GFP use).

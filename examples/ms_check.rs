@@ -9,13 +9,14 @@
 //! block (F43) and the liveness/occlusion crops from SCRFD's points, from the Windows IR detector's
 //! points (what the pipeline uses) and from the legacy LBF aligner's eye contour; and for an
 //! `ir_NN_lit` frame whose previous lit frame `ir_(NN-2)_lit` exists, the ambient warp (F13) from the
-//! two lit frames' anchors against the ambient frame as captured.
+//! two lit frames' anchors against the ambient frame as captured. Each face also gets Microsoft's
+//! recognition feature (`MsRecognizer`) of the recognition image, with its time.
 //! Usage: cargo run --release --example ms_check -- <frames_dir> [models_dir]
 
 use anyhow::{Context, Result};
 use image::GrayImage;
 use linux_hello::lighting::{affine_from_anchors, anchors, face_brightness, interpolate, subtract_ambient, warp};
-use linux_hello::ms_models::{MsIrLiveness, MsRetinaDetector, OcclusionDetector, RetinaModelType};
+use linux_hello::ms_models::{MsIrLiveness, MsRecognizer, MsRetinaDetector, OcclusionDetector, RetinaModelType};
 use linux_hello::{gray_to_rgb, Face, FaceDetector, FaceEmbedder, FaceOrientation, IrFaceOrientation, LbfAligner};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -134,6 +135,7 @@ fn main() -> Result<()> {
     };
     let mut occlusion = OcclusionDetector::load(ms.join("occlusion/MODEL_FILES_120.onnx"))?;
     let mut liveness = MsIrLiveness::load(ms.join("convnet"))?;
+    let mut recognizer = MsRecognizer::load(ms.join("cefa"))?;
     let mut embedder = FaceEmbedder::load(models.join("w600k_r50.onnx"))?;
 
     let mut names: Vec<String> = std::fs::read_dir(&frames)?
@@ -193,12 +195,17 @@ fn main() -> Result<()> {
             None => None,
         };
         // The nets with SCRFD's face (before) and with the Windows detector's face (the pipeline now).
+        // The recogniser gets the recognition image (lit − min(lit, ambient), F40 a).
+        let recognition_image = ambient.as_ref().map_or_else(|| lit.clone(), |a| subtract_ambient(&lit, a));
         let mut per_face = Vec::new();
         for (source, f) in [("scrfd", Some(&face)), ("retina", retina_face.as_ref())] {
             let Some(f) = f else { continue };
             let occ = occlusion.check(&lit, f)?;
             let live = liveness.frame(&lit, ambient.as_ref(), f, rgb_face.as_ref().map(|(i, f)| (*i, f)))?;
             let s = &live.scores;
+            let start = Instant::now();
+            let feature = recognizer.embed(&recognition_image, &f.landmarks)?;
+            let recognizer_ms = start.elapsed().as_secs_f64() * 1e3;
             per_face.push((
                 source,
                 json!({
@@ -207,6 +214,7 @@ fn main() -> Result<()> {
                         "general_ir": s.general_ir, "diffusion_ir": s.diffusion_ir, "color": s.color,
                         "border": s.border, "hh": s.hh, "total": live.total,
                     },
+                    "recognizer": { "feature": &feature[..], "ms": recognizer_ms },
                 }),
             ));
         }
