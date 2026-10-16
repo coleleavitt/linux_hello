@@ -10,6 +10,12 @@ pub const MIN_LIT: f32 = 35.0;
 pub const MIN_EMITTER_GAIN: f32 = 45.0;
 /// Maximum ambient-only face brightness: more means strong ambient IR such as sunlight (F14).
 pub const MAX_AMBIENT: f32 = 25.0;
+/// Clipped pixels (value 255) a region may hold, as a fraction of its pixels, before it counts as
+/// saturated (`CheckIfTooMuchSaturatedPixelOnFace`, F44: area · 1 / 100).
+pub const MAX_CLIPPED: f32 = 0.01;
+/// The band around the face where clipped pixels give status 7: the face box grown by this
+/// fraction of its width and height on every side, outside the face ellipse.
+pub const CLIPPED_BAND: f32 = 0.25;
 
 /// A 2×3 affine matrix: `x' = m[0][0]·x + m[0][1]·y + m[0][2]`, `y' = m[1][0]·x + m[1][1]·y + m[1][2]`.
 pub type Affine = [[f32; 3]; 2];
@@ -115,20 +121,40 @@ pub enum LightingStatus {
     /// lit image) is used for matching, but the frame casts no live vote and is not used for
     /// template augmentation (F45).
     Weak,
+    /// Status 6: more than [`MAX_CLIPPED`] of the face ellipse is clipped (too close, or a lamp
+    /// on the face). The frame is rejected, counted as too close like status 2 (F45).
+    Clipped,
+    /// Status 7: more than [`MAX_CLIPPED`] of the band around the face is clipped (a lamp behind
+    /// the head). Windows keeps the print but tags it (flag 0x20) and, the status not being 1,
+    /// does not subtract the ambient frame; here the frame is treated as status 4: print from
+    /// the lit image, no live vote, no augmentation (F45).
+    ClippedAround,
 }
 
-/// Face brightness (F43) in the lit and in the ambient frame.
+/// Face brightness (F43) in the lit and in the ambient frame, and the clipped fractions of the
+/// lit face (F44).
 #[derive(Debug, Clone, Copy)]
 pub struct Lighting {
     pub lit: f32,
     pub ambient: f32,
+    /// Fraction of clipped pixels in the face ellipse of the lit frame
+    pub clipped_face: f32,
+    /// Fraction of clipped pixels in the band around the face in the lit frame
+    pub clipped_around: f32,
 }
 
 impl Lighting {
-    /// `points` are the face's five landmarks on the lit frame; `ambient` is the ambient frame moved
-    /// onto the lit one ([`warp`]), where Windows measures the ambient brightness (F43).
-    pub fn measure(lit: &GrayImage, ambient: &GrayImage, points: &[[f32; 2]; 5]) -> Self {
-        Self { lit: face_brightness(lit, points), ambient: face_brightness(ambient, points) }
+    /// `points` are the face's five landmarks and `bbox` its box on the lit frame; `ambient` is the
+    /// ambient frame moved onto the lit one ([`warp`]), where Windows measures the ambient
+    /// brightness (F43).
+    pub fn measure(lit: &GrayImage, ambient: &GrayImage, points: &[[f32; 2]; 5], bbox: &[f32; 4]) -> Self {
+        let (clipped_face, clipped_around) = clipped(lit, bbox);
+        Self {
+            lit: face_brightness(lit, points),
+            ambient: face_brightness(ambient, points),
+            clipped_face,
+            clipped_around,
+        }
     }
 
     /// What the emitter added to the face: `d` in F14.
@@ -136,19 +162,49 @@ impl Lighting {
         self.lit - self.ambient
     }
 
-    /// Exposure first (F44), then the lit/ambient comparison (F14). Windows also turns
-    /// `d > 205` into status 2; that cannot happen here once the lit face is ≤ 205.
+    /// Exposure first (F44), then the clipped pixels (F44 status 6/7), then the lit/ambient
+    /// comparison (F14). Windows also turns `d > 205` into status 2; that cannot happen here once
+    /// the lit face is ≤ 205.
     pub fn status(&self) -> LightingStatus {
         if self.lit > MAX_LIT {
             LightingStatus::TooBright
         } else if self.lit < MIN_LIT {
             LightingStatus::TooDark
+        } else if self.clipped_face > MAX_CLIPPED {
+            LightingStatus::Clipped
+        } else if self.clipped_around > MAX_CLIPPED {
+            LightingStatus::ClippedAround
         } else if self.gain() < MIN_EMITTER_GAIN || self.ambient > MAX_AMBIENT {
             LightingStatus::Weak
         } else {
             LightingStatus::Good
         }
     }
+}
+
+/// Fraction of clipped pixels (value 255) inside the ellipse inscribed in `bbox`, and in the band
+/// around it: the box grown by [`CLIPPED_BAND`] of its size on every side, outside the ellipse
+/// (`CheckIfTooMuchSaturatedPixelOnFace`, F44). Windows counts a pixel as clipped when it equals
+/// its neighbours 2 px away in both directions; here a pixel is clipped at the sensor's maximum.
+/// Regions are clamped to the image; an empty region reads 0.
+pub fn clipped(image: &GrayImage, bbox: &[f32; 4]) -> (f32, f32) {
+    let [x1, y1, x2, y2] = *bbox;
+    let (w, h) = (x2 - x1, y2 - y1);
+    let (cx, cy, a, b) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0, w / 2.0, h / 2.0);
+    let clamp = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
+    let (bx1, bx2) = (clamp(x1 - CLIPPED_BAND * w, image.width()), clamp(x2 + CLIPPED_BAND * w, image.width()));
+    let (by1, by2) = (clamp(y1 - CLIPPED_BAND * h, image.height()), clamp(y2 + CLIPPED_BAND * h, image.height()));
+    let (mut face, mut around) = ((0u32, 0u32), (0u32, 0u32));
+    for y in by1..by2 {
+        for x in bx1..bx2 {
+            let (dx, dy) = ((x as f32 + 0.5 - cx) / a, (y as f32 + 0.5 - cy) / b);
+            let region = if dx * dx + dy * dy <= 1.0 { &mut face } else { &mut around };
+            region.0 += 1;
+            region.1 += u32::from(image.get_pixel(x, y).0[0] == u8::MAX);
+        }
+    }
+    let fraction = |(n, clipped): (u32, u32)| if n == 0 { 0.0 } else { clipped as f32 / n as f32 };
+    (fraction(face), fraction(around))
 }
 
 /// Mean of every 2nd pixel in every 2nd row of the block x ∈ [max(p3.x, p9.x), min(p4.x, p15.x)],
@@ -188,12 +244,54 @@ mod tests {
 
     #[test]
     fn statuses() {
-        let status = |lit, ambient| Lighting { lit, ambient }.status();
+        let status = |lit, ambient| Lighting { lit, ambient, clipped_face: 0.0, clipped_around: 0.0 }.status();
         assert_eq!(status(80.0, 10.0), LightingStatus::Good);
         assert_eq!(status(210.0, 0.0), LightingStatus::TooBright);
         assert_eq!(status(30.0, 0.0), LightingStatus::TooDark);
         assert_eq!(status(50.0, 10.0), LightingStatus::Weak); // emitter adds too little
         assert_eq!(status(120.0, 30.0), LightingStatus::Weak); // strong ambient IR
+        let clipped =
+            |clipped_face, clipped_around| Lighting { lit: 80.0, ambient: 10.0, clipped_face, clipped_around }.status();
+        assert_eq!(clipped(0.02, 0.0), LightingStatus::Clipped);
+        assert_eq!(clipped(0.0, 0.02), LightingStatus::ClippedAround);
+        assert_eq!(clipped(0.01, 0.01), LightingStatus::Good);
+        // Too bright is told first; the band status is not changed to weak.
+        assert_eq!(
+            Lighting { lit: 210.0, ambient: 0.0, clipped_face: 0.5, clipped_around: 0.5 }.status(),
+            LightingStatus::TooBright
+        );
+        assert_eq!(
+            Lighting { lit: 50.0, ambient: 10.0, clipped_face: 0.0, clipped_around: 0.5 }.status(),
+            LightingStatus::ClippedAround
+        );
+    }
+
+    #[test]
+    fn clipped_pixels_in_the_face_ellipse_and_the_band_around() {
+        // A 40×40 box at (20, 20); the band is 10 px wide (25 % of the box) on every side.
+        let bbox = [20.0, 20.0, 60.0, 60.0];
+        let dark = GrayImage::from_pixel(100, 100, image::Luma([80]));
+        assert_eq!(clipped(&dark, &bbox), (0.0, 0.0));
+        // A 4×4 clipped patch at the centre: 16 of the ellipse's ≈ 1257 pixels (1.3 %), none around.
+        let spot = GrayImage::from_fn(100, 100, |x, y| {
+            image::Luma([if (38..42).contains(&x) && (38..42).contains(&y) { 255 } else { 80 }])
+        });
+        let (face, around) = clipped(&spot, &bbox);
+        assert!((face - 16.0 / 1257.0).abs() < 0.002, "{face}");
+        assert_eq!(around, 0.0);
+        // A lamp behind the head: the band left of the face is clipped, the face is not.
+        let lamp = GrayImage::from_fn(100, 100, |x, _| image::Luma([if x < 20 { 255 } else { 80 }]));
+        let (face, around) = clipped(&lamp, &bbox);
+        assert_eq!(face, 0.0);
+        // 10 × 60 clipped pixels of the band's 3600 − 1257 ≈ 2343 pixels.
+        assert!((around - 600.0 / 2343.0).abs() < 0.01, "{around}");
+        // Corner pixels of the box lie outside the ellipse, in the band.
+        let corner = GrayImage::from_fn(100, 100, |x, y| image::Luma([if x == 20 && y == 20 { 255 } else { 80 }]));
+        let (face, around) = clipped(&corner, &bbox);
+        assert_eq!(face, 0.0);
+        assert!(around > 0.0);
+        // A box at the image edge is clamped.
+        assert_eq!(clipped(&dark, &[-10.0, -10.0, 30.0, 30.0]), (0.0, 0.0));
     }
 
     #[test]

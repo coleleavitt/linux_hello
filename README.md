@@ -128,7 +128,10 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   its table's FAR is Microsoft's estimate, not charged for the template size like ArcFace's. Prints
   enrolled before the models were there have no Microsoft feature and are matched by ArcFace alone;
   re-enroll to get the second opinion on them.
-- Only the largest face is tracked across frames.
+- The 3 largest faces of each frame are analysed and tracked (≈ 35 ms more per pair for each
+  face after the first); smaller ones are ignored. A photo of the owner held exactly where the
+  owner's face was continues its track (same place, same identity); the liveness votes have to
+  catch it.
 - Microsoft's anti-spoofing nets are sure of a live face at a face brightness near 100 and unsure
   near 150; the face-metered exposure keeps the face near the camera's target, but a close face
   with a lamp behind the head has not been re-tested since.

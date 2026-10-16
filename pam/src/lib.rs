@@ -149,6 +149,7 @@ fn failure_message(reply: &str) -> &'static CStr {
     match (words.next(), words.next()) {
         (Some("NOFACE"), Some("too_dark")) => c"Face too dark: move closer to the camera",
         (Some("NOFACE"), Some("too_bright")) => c"Face too bright: move back from the camera",
+        (Some("NOFACE"), Some("clipped")) => c"Face too bright: move back or turn away from the lamp",
         (Some("NOFACE"), Some("too_far")) => c"Face too small: move closer to the camera",
         (Some("NOFACE"), Some("edge")) => c"Face at the edge of the picture: center it in front of the camera",
         (Some("NOFACE"), Some("occluded")) => c"Face covered: remove the mask, sunglasses or hand",

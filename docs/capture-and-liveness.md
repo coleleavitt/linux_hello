@@ -10,15 +10,15 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
 ```
 /dev/video3 (UVCM metadata) ─ illumination flag per frame ─┐
 /dev/video2 (IR 640x360 @15) ───────────────────────────────┴─▶ lit/ambient pair (< 300 ms apart)
-  lit frame ─▶ SCRFD face ─▶ size/edge gates ─▶ Windows IR detector face (box, 5 points) ─▶ ambient warp
-     ─▶ face brightness + lighting status ─▶ occlusion, frontal pose
+  lit frame ─▶ SCRFD faces (3 largest) ─▶ Windows IR detector faces (box, 5 points); per face:
+     size/edge gates ─▶ ambient warp ─▶ face brightness + lighting status ─▶ occlusion, frontal pose
      good ─▶ embed lit − min(lit, warped ambient) ─▶ live vote unless the RGB models veto
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
-/dev/video0 (RGB) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
-  track: largest face followed by box overlap; a new face starts a new attempt
-  attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50) → recognised;
-           from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
+/dev/video0 (RGB) ─▶ SCRFD faces ─▶ nearest to the IR face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
+  track: every analysed face followed by box overlap and print similarity; a new face starts a new attempt
+  attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50), no other face
+           of the pair with a lower FAR → recognised; from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
   session: 16 pairs over all attempts → give up; once more if the face moved or the exposure changed
   after MATCH: add the best live print if it was a borderline match
 ```
@@ -77,9 +77,10 @@ from stream start and after each region change.
 
 ### 2. Frame gates (F45, F46)
 
-The face (largest SCRFD detection) is found on the lit frame. With the Windows Hello models, the
-Windows IR detector (`MsRetinaDetector`, MODEL_FILES_110) then runs on the lit frame and its face
-overlapping the SCRFD one (IoU ≥ 0.5, `Analysis::windows_face`) is the face Windows would track: its
+The faces are found on the lit frame (SCRFD); the `MAX_FACES` = 3 largest go through the gates, each
+on its own (§7). With the Windows Hello models, the Windows IR detector (`MsRetinaDetector`,
+MODEL_FILES_110) runs once on the lit frame and its face overlapping a SCRFD one (IoU ≥ 0.5,
+`Analysis::windows_face`) is the face Windows would track: its
 five points give the brightness block (§3), the ambient-warp anchors (§4) and the liveness crops (§5),
 its box the occlusion crop, its 6-DoF output the pose. Windows' 31-point landmark set is, on this
 path, those five points plus copies of them (`RetinaEngine::ComputeAlignment`, lbf.md "Which aligner
@@ -87,7 +88,7 @@ runs"), so nothing else is aligned; the legacy LBF aligner does not run. SCRFD's
 keep two jobs: the size/edge gates and the ArcFace recognition crop, whose alignment template is
 SCRFD's. Without the Windows Hello models SCRFD's points stand in everywhere.
 
-A pair gives no print and no vote if:
+A face gives no print and no vote if:
 
 | Reason (`NOFACE` word) | Check | Windows |
 |---|---|---|
@@ -96,6 +97,7 @@ A pair gives no print and no vote if:
 | `edge` | box closer to a frame edge than inter-eye distance / 5 | F46 |
 | `too_bright` | lit face brightness > 205 | F44 status 2 |
 | `too_dark` | lit face brightness < 35 | F44 status 3 |
+| `clipped` | more than 1 % of the face ellipse (inscribed in the box) at pixel value 255: too close, or a lamp on the face | F44 status 6, F45 (counted as too close) |
 | `occluded` | Windows Hello occlusion model: 1 − p(none) > 0.9 (> 0.5 while enrolling); only with the converted models | F46 |
 | `not_frontal` | Windows Hello IR detector's head pose: \|yaw\| > 20° or \|pitch\| > 25°, or that detector has no face overlapping the SCRFD face (IoU ≥ 0.5; checked right after the size/edge gates, before the lighting status); only with the converted models | F46, F59 |
 
@@ -132,11 +134,30 @@ aligner's real eye contour (`examples/ms_check`, `brightness`).
 |---|---|---|
 | too bright (2) | lit > 205 | rejected |
 | too dark (3) | lit < 35 | rejected |
+| clipped (6) | > 1 % of the face ellipse clipped | rejected (`NOFACE clipped`) |
+| clipped around (7) | > 1 % of the band around the face clipped | print from the lit frame, used for matching; no vote; not used for augmentation |
 | weak (4) | d < 45, or ambient > 25 (strong ambient IR, e.g. sunlight) | print from the lit frame, used for matching; no vote; not used for augmentation |
 | good (1) | otherwise | print from `lit − min(lit, ambient)`; votes |
 
 Windows also turns `d > 205` into status 2; with lit ≤ 205 that cannot happen. It smooths the
-ambient brightness over frames and counts clipped pixels (status 6/7); linux_hello does neither.
+ambient brightness over frames; linux_hello does not.
+
+**Clipped pixels (F44 status 6/7, `CheckIfTooMuchSaturatedPixelOnFace`).** On the lit frame,
+`lighting::clipped` counts the pixels at 255 inside the ellipse inscribed in the tracked face's box
+(the Windows IR detector's, SCRFD's without the Windows models) and in the band around it, the box
+grown by 25 % of its width and height on every side, outside the ellipse (`CLIPPED_BAND`; Windows'
+band size is not recovered). More than 1 % of a region (`MAX_CLIPPED`, Windows' area · 1 / 100)
+means status 6 for the ellipse — the frame is rejected and reported as `clipped` (Windows counts
+it as "too close", F45) — and status 7 for the band: Windows keeps the print tagged (flag 0x20),
+and the status not being 1, does not subtract the ambient frame, so here the frame is handled like
+status 4. Windows defines a clipped pixel as one equal to its neighbours 2 px away in both
+directions; linux_hello takes the sensor's maximum, 255. The check sits between the exposure
+status and the ambient comparison, as in Windows, so a bright band is reported before weak
+lighting. On the owner's frontal frames no pixel reaches 255 (one on `watch_0435`); a 12×12
+clipped patch on the face (1.2 % of the ellipse) gives `clipped`, a 25 px clipped column beside
+the face `clippedaround` with the print kept and no vote (`examples/check_frames` on edited copies
+of `watch_0014_ir_lit.png`). `watch`'s `log.jsonl` carries the two fractions (`clipped_face`,
+`clipped_around`).
 
 ### 4. Ambient subtraction (F12, F13, F40)
 
@@ -163,8 +184,9 @@ The ambient frame is first moved onto the lit one, as Windows does (`AdjustFaceF
   `ApplyAffineTransformToImage`). It is whole-frame, 1.5 ms at 640×360; Windows warps only the ambient
   crop (face crop + 100 px, F39).
 - The previous lit face must be less than 300 ms old (Windows' pairing constant, F13) and the same
-  face (box IoU ≥ 0.3, the tracker's rule, for Windows' same-tracking-id condition). Otherwise, and
-  for the first pair of a face, the ambient frame is subtracted as captured. Windows also requires
+  face (the face of the previous lit frame with the best box IoU, ≥ 0.3, the tracker's rule, for
+  Windows' same-tracking-id condition). Otherwise, and for the first pair of a face, the ambient
+  frame is subtracted as captured. With several faces each gets its own warp (whole frame, 1.5 ms). Windows also requires
   both lit frames frontal; here the previous frame's anchors are kept even when that frame was
   rejected later.
 
@@ -191,6 +213,11 @@ For a good frame:
 | IR: without the Windows Hello models, the good lighting status (reflects the emitter like a nearby face, little ambient IR) | +1 |
 | IR: with the Windows Hello models, their frame total (F25), see below | −3…+1 |
 | RGB, only without the Windows Hello models: FaceNox + MiniFASNetV2 mean P(real) < 0.5, or no face in the RGB frame | −2 |
+
+The RGB face of an IR face is the SCRFD face of the RGB frame whose box centre, normalised by the
+frame size, is nearest to the IR face's: the two cameras sit side by side with a similar field of
+view and the frames are not registered (`EvaluateColorFaceQuality` is not ported). With one face
+in each frame this is the largest face as before.
 
 Frame total > 0 is a live vote, < 0 a spoof vote. Weak and rejected frames do not vote (and the
 liveness models are not run for them), so with the Windows Hello models a frame is live only when
@@ -266,51 +293,76 @@ Windows itself would drop at the edge gate (§2). Cost: 4–6 ms per frame.
 ### 7. Decision (F25, F47, F48)
 
 The order follows Windows' `MakeDecisions`: recognise first, then liveness on the same face.
-"The same face" is the face track (F37, F47): `FaceTracker` follows the largest face of each pair
-from pair to pair while its box overlaps the last one (IoU ≥ 0.3). A face that does not overlap,
-or that comes back after 7 pairs (≈ 1 s, Windows' 1000 ms purge, F37) without a face, starts a new
-track, and a new track starts a new attempt: its prints, best similarity and liveness votes start
-from zero. So the owner's prints never recognise a photo held up next, and the owner's live votes
-never count for it. Pairs without a face keep the current track. The 16-pair limit counts the
-whole session (twice, after a re-attempt, below).
+"The same face" is the face track (F37, F47): `FaceTracker` follows every analysed face (the 3
+largest of the lit frame, `MAX_FACES`) from pair to pair. A face continues the track whose last
+box it overlaps best (IoU ≥ 0.3) among the tracks not already continued in this pair, provided its
+print, when the frame gives one, matches the track's last print (cosine ≥ 0.50,
+`SAME_FACE_SIMILARITY`); otherwise it starts a new track. A track whose face is not seen for 7
+pairs (≈ 1 s, Windows' 1000 ms purge, F37) is dropped; a face back within that time continues its
+track. Each track has its own attempt (`Session`, `Attempt`): its prints, best similarity and
+liveness votes start from zero, so the owner's prints never recognise a photo held up next to the
+owner or in the owner's place, and the owner's live votes never count for it. Rejected faces (no
+print) continue their track by place. The 16-pair limit counts the whole session (twice, after a
+re-attempt, below). Analysing a second face costs ≈ 31–37 ms per pair on top of ≈ 60 ms for one
+(per face: ArcFace 20 ms, Microsoft's recogniser ≈ 5 ms, the Windows nets 4 ms, occlusion 1 ms,
+warp and subtraction 2 ms; SCRFD and the Windows IR detector run once per frame, 28 ms); a third
+face that fails the size gate costs ≈ 5 ms (`examples/check_frames` on `watch_0014_ir_lit.png`
+with stranger faces pasted in, release build, machine under load; 55 ms for one face before the
+recogniser was added).
+
+The print check is an addition: Windows tracks by geometry alone (`FaceTrackerInternal`). 0.50
+is the calibration table's 1e-5-per-attempt point (per-comparison FAR 4e-8 on grayscale LFW,
+where 2 % of genuine pairs — photos from different occasions — fall below it). On the saved
+frames prints of one sitter 67 ms apart score 0.957–0.986, seconds apart 0.96–0.98, the same
+sitter in another sitting with the chin cut off 0.60–0.64, and different people ≤ 0.19 (the six
+faces of the stranger photo among themselves; −0.07…0.04 against the owner;
+`examples/embed_dir`). A false split only restarts the attempt (4 more prints); a missed switch
+would hand the track's recognition to the new face.
 
 1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the estimated FAR of
    the best similarity over them is < 1e-5 (similarity > 0.50 with the shipped table and 15
-   stored prints, 0.503 with 16).
+   stored prints, 0.503 with 16), and no other face of the pair matches the user with a lower
+   FAR (F48 `MakeDecisions`: "no other tracked face matches the same user better"). With the
+   owner and a photo of the owner both in view, only the better-matching one is recognised;
+   once it leaves the frame the other can be.
 2. **Liveness:** votes count only from the recognising frame on. ≥ 2 live votes → `MATCH <best
    similarity>`; else ≥ 3 spoof votes → `NOTLIVE`.
-3. **Give up** after 16 frame pairs (Windows: 48 frames or a counter > 16; one pair is two frames):
-   the current track recognised → `NOTLIVE`; ≥ 4 prints but no match → `NOMATCH <best>`; fewer
-   than 4 prints → `NOFACE <most frequent rejection reason over the session>`. Earlier, while the
-   track is not yet recognised, 4 consecutive occluded frames (§2) end the session with `NOFACE
-   occluded` (F46, `IdentifyAsGuest(3)`): a mask or a hand will not go away within the budget, so
-   the password prompt comes ≈ 1.6 s sooner. A clear frame in between starts the count over; a new
-   track starts it over too.
+3. **Give up** after 16 frame pairs (Windows: 48 frames or a counter > 16; one pair is two frames).
+   The verdict comes from the user's track: the recognised one, else the best-matching track with
+   ≥ 4 prints over the session. That track recognised → `NOTLIVE`; not recognised → `NOMATCH
+   <best>`; no track with 4 prints → `NOFACE <most frequent rejection reason of the largest face
+   over the session>`. Earlier, while no track is recognised, 4 consecutive occluded frames (§2) of
+   every face in view end the session with `NOFACE occluded` (F46, `IdentifyAsGuest(3)`): a mask
+   or a hand will not go away within the budget, so the password prompt comes ≈ 1.6 s sooner. A
+   clear frame in between starts a face's count over; a new track starts it over too.
 
 The earliest possible `MATCH` is therefore at the 5th pair (4 prints, the 4th frame votes live,
 the 5th too), where voting from the first pair allowed a match at the 2nd pair.
 
 **Re-attempt (F49).** Before a session ends in `NOMATCH` or `NOTLIVE` (at the pair limit or by three
-spoof votes), it checks what the tracked face did over the attempt's frames, as Windows'
+spoof votes), it checks what the deciding track's face did over the attempt's frames, as Windows'
 `sub_1800575E0` does for a track about to become a guest. If the face moved — the range of its box
 centre, normalised by the frame width and height, has ((Δx)² + (Δy)²) / 2 > 0.01 (about 0.14 of
 the frame), or its box width changed by more than 20 % — or the exposure changed — the standard
 deviation of the last 10 lit face brightness values (§3, including rejected too-dark/too-bright
 frames) is above 12 — the session gets another 16 pairs with fresh counters for the track (prints,
-best similarity, votes), once per session (`ReAttemptRecognitionByMovement`,
+best similarity, votes), once per track, as Windows (`ReAttemptRecognitionByMovement`,
 `ReAttemptRecognitionByExposure`). A still face in steady light is rejected at the 16th pair as
-before; `NOFACE` is never re-attempted (nothing was recognised). The motion record starts over
-with a new track, so a photo replacing the owner does not inherit the owner's movement. Windows
-also refuses the re-attempt after more than one "too many saturated pixels" frame; linux_hello
-has no saturated-pixel count (F44 status 6/7), so that part is left out. A re-attempted session
-reads up to 32 pairs, ≈ 4.3 s at 15 fps plus the ≈ 0.5 s start-up, within the PAM module's 10 s
-timeout.
+before; `NOFACE` is never re-attempted (nothing was recognised). Each track keeps its own motion
+record, so a photo replacing the owner does not inherit the owner's movement; it can earn a
+re-attempt of its own if it reaches a verdict, so a session can run past 32 pairs only when
+another track decides it. As Windows, a track with more than one clipped-face frame (§3 status
+6) gets no re-attempt: a face too close or under a lamp will not fix itself. A re-attempted session reads up to 32 pairs, ≈ 4.3 s at 15 fps plus the ≈ 0.5 s
+start-up, within the PAM module's 10 s timeout.
 
 Checked on saved frames (`validation_frames`): five consecutive lit frames of one sitting keep one
 track (boxes move ≤ 2 px); the owner's frames from another sitting, 110 px higher, and the stranger
-photo each start a new track. Limits: only the largest face is tracked; a photo held exactly where
-the face was (IoU ≥ 0.3) continues the track. Not implemented: the "closer to another user" check
-(1:1 by design).
+photo each start a new track. With a stranger's face pasted next to the owner's
+(`examples/check_frames --store`), the owner's track is recognised (similarity 0.998) and live
+while the stranger's reads −0.07 and stays unrecognised. Limits: a photo of the owner held
+exactly where the face was continues the track (same place, same identity: the liveness votes
+have to catch it); faces beyond the 3 largest are not analysed. Not implemented: the "closer to
+another enrolled user" check (1:1 by design).
 
 ### 8. Template augmentation (F31, F53)
 
@@ -334,7 +386,8 @@ print from a failed face attempt after the user signs in another way. Here:
 1. A session ends in `NOMATCH`. Its candidate is the best-matching print of a live-voting (good
    lighting) frame, if the face was "deemed real" by its own votes (≥ 2 live votes counted over all
    its frames, `FaceNotDeemedAsARealFace`) and it was the only face track of the session
-   (`AbortingSinceOtherFacesWereSeenDuringTrackedSession`). The daemon keeps it in memory with a
+   (`AbortingSinceOtherFacesWereSeenDuringTrackedSession`; a second face in view, or the same face
+   back after a second, is another track). The daemon keeps it in memory with a
    random 128-bit token and replies `NOMATCH 0.430 <token>`. Any later `AUTH` drops it.
 2. The PAM module keeps `<user> <token>` in the PAM handle. When the password (or another module)
    then authenticates the user, the application calls `pam_setcred`; the module sends
@@ -376,7 +429,7 @@ The first word is unchanged from earlier versions, so older PAM modules keep wor
 | `MATCH 0.812` | success | — |
 | `NOMATCH 0.310`, `NOMATCH 0.430 <token>` (enroll-on-failure candidate) | auth error | Face not recognized |
 | `NOTLIVE` | auth error | Face not accepted as live |
-| `NOFACE too_dark` / `too_bright` / `too_far` / `edge` / `no_face` | auth error | Face too dark: move closer… / Face too bright: move back… / Face too small: move closer… / Face at the edge… / No face seen… |
+| `NOFACE too_dark` / `too_bright` / `clipped` / `too_far` / `edge` / `occluded` / `not_frontal` / `no_face` | auth error | Face too dark: move closer… / Face too bright: move back… / Face too bright: move back or turn away from the lamp / Face too small: move closer… / Face at the edge… / Face covered… / Face turned away… / No face seen… |
 | `UNAVAILABLE lid_closed` | ignore | Face login not available: the lid is closed |
 | `NOTENROLLED`, `ERROR …` | ignore | — |
 
@@ -440,8 +493,9 @@ the terminal of the `sudo` call.
 
 ## Inspecting
 
-`linux_hello watch [--seconds 30]` prints one line per pair: face brightness lit/ambient, `d`,
-status or rejection reason, RGB P(real), vote, similarity and its estimated FAR per attempt, the
-face track, whether the track's face is recognised and its liveness state. It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
+`linux_hello watch [--seconds 30]` prints one line per pair with one part per analysed face: its
+track id, face brightness lit/ambient, `d`, status or rejection reason, RGB P(real), vote,
+similarity and its estimated FAR, whether the track is recognised and its liveness state
+(`log.jsonl` has the same under `faces`). It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
 `/tmp/linux_hello_watch`). When a session reaches a verdict it prints it and starts a new one.
 `watch` does not augment the template.
