@@ -175,3 +175,34 @@ screen, and the IR face is not even found).
 **Attack set.** Not recorded yet.
 
 **Role.** Logged; no threshold.
+
+## 5. Micro-motion (`motion`)
+
+**Physics.** A live head is not a rigid plane: when it turns, the nose (2–3 cm nearer the camera)
+moves more across the image than the eyes and the mouth, and breathing and expression move the
+mouth against the eyes. A hand-held print is a plane; a plane's points move together under one
+affine map (the homography of a small rotation is affine to first order), whatever the hand does.
+
+**Measure.** The least-squares affine map from the face's five points in the oldest pair of its
+track (the session's first sight of it, up to 16 pairs back) to the current five, and its RMS
+residual over the points, as a fraction of the inter-ocular distance (`affine_residual`). The
+Windows IR detector's points, as everywhere here. A still face reads the landmark jitter; the
+measure only says something once the head has moved, and nothing in a single frame.
+
+**Genuine.**
+
+| Set | frames | min | p10 | p50 | p90 | max | session max (min / median) |
+|---|---|---|---|---|---|---|---|
+| lh_lock (still) | 55 | 0.000 | 0.001 | 0.004 | 0.014 | 0.025 | 0.005 / 0.011 |
+| lh_now (head turning) | 51 | 0.001 | 0.006 | 0.020 | 0.088 | 0.112 | 0.029 / 0.058 |
+| lh_view | 26 | 0.001 | 0.002 | 0.016 | 0.020 | 0.022 | 0.006 / 0.022 |
+| validation_frames | 3 | 0.008 | — | 0.012 | — | 0.021 | 0.021 |
+
+A 10° turn of the head moves the nose by ≈ 0.08 IOD against the eye/mouth plane
+(3 cm nose depth × sin 10° over a 6.5 cm IOD), which `lh_now` shows (0.09–0.11); still
+sessions stay under 0.025. A hand-held print that is tilted should stay at the jitter level.
+
+**Attack set.** Not recorded yet.
+
+**Role.** Logged; no threshold. As evidence it is one-sided: a high value is a head, a low value
+is a still head or a print.

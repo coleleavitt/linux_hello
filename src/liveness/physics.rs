@@ -14,7 +14,7 @@ use crate::{FaceCheck, Vote};
 
 /// The checks, in the order they are logged.
 pub fn all() -> Vec<Box<dyn Check>> {
-    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker), Box::new(Material)]
+    vec![Box::new(Glint), Box::new(Shape), Box::new(Flicker), Box::new(Material), Box::new(Motion)]
 }
 
 /// Score every check on every face of `check` that has a print, record the scores in
@@ -355,6 +355,73 @@ impl Check for Material {
     }
 }
 
+/// Micro-motion: a live head is not a rigid plane. When it turns, the nose (nearer the camera)
+/// moves more than the eyes and the mouth; a hand-held print is a plane, and a plane's points
+/// move together under one affine map (the homography of a small rotation is affine to first
+/// order). Score = the residual of the least-squares affine map from the face's five points in
+/// the oldest pair of its track (the session's first sight of it, up to 16 pairs back) to the
+/// current five, RMS over the points as a fraction of the inter-ocular distance. A still face
+/// reads the landmark jitter (≈ 0.01–0.02); the measure only says something once the head
+/// has moved.
+pub struct Motion;
+
+/// Solve the 3×3 system `a · x = b` by Cramer's rule; `None` when singular.
+fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let d = det(a);
+    if d.abs() < 1e-9 {
+        return None;
+    }
+    let column = |i: usize| {
+        let mut m = a;
+        for (row, v) in m.iter_mut().zip(b) {
+            row[i] = v;
+        }
+        det(m) / d
+    };
+    Some([column(0), column(1), column(2)])
+}
+
+/// RMS residual of the least-squares affine map `from` → `to` over the five points, as a
+/// fraction of `from`'s inter-ocular distance.
+pub fn affine_residual(from: &[[f32; 2]; 5], to: &[[f32; 2]; 5]) -> Option<f32> {
+    // Normal equations of [x y 1] · m = u for each output coordinate.
+    let mut ata = [[0.0f64; 3]; 3];
+    let mut atb = [[0.0f64; 3]; 2];
+    for (p, q) in from.iter().zip(to) {
+        let row = [p[0] as f64, p[1] as f64, 1.0];
+        for i in 0..3 {
+            for j in 0..3 {
+                ata[i][j] += row[i] * row[j];
+            }
+            atb[0][i] += row[i] * q[0] as f64;
+            atb[1][i] += row[i] * q[1] as f64;
+        }
+    }
+    let (mx, my) = (solve3(ata, atb[0])?, solve3(ata, atb[1])?);
+    let mut sum = 0.0;
+    for (p, q) in from.iter().zip(to) {
+        let (x, y) = (p[0] as f64, p[1] as f64);
+        let (dx, dy) = (mx[0] * x + mx[1] * y + mx[2] - q[0] as f64, my[0] * x + my[1] * y + my[2] - q[1] as f64);
+        sum += dx * dx + dy * dy;
+    }
+    Some(((sum / 5.0).sqrt() / iod(from) as f64) as f32)
+}
+
+impl Check for Motion {
+    fn name(&self) -> &str {
+        "motion"
+    }
+
+    fn score(&mut self, frame: &Frame, face: usize) -> Result<Option<f32>> {
+        let Some((oldest, i)) = frame.history(face).last() else { return Ok(None) };
+        Ok(affine_residual(&points(&oldest.check.faces[i]), &points(frame.face(face))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +486,16 @@ mod tests {
         let (face, back) = regions(100, 100, &[20.0, 20.0, 30.0, 30.0], |x, y| image.get_pixel(x, y).0[0] as f32);
         assert_eq!((face, back), (200.0, Some(20.0)));
         assert_eq!(regions(100, 100, &[-100.0, -100.0, 200.0, 200.0], |_, _| 1.0).1, None);
+    }
+
+    #[test]
+    fn a_plane_moves_affinely_and_a_nose_does_not() {
+        let moved = POINTS.map(|[x, y]| [1.1 * x + 0.05 * y + 3.0, -0.02 * x + 0.95 * y - 2.0]);
+        assert!(affine_residual(&POINTS, &moved).unwrap() < 1e-5);
+        let mut nose = moved;
+        nose[2][0] += 6.0;
+        let residual = affine_residual(&POINTS, &nose).unwrap();
+        assert!(residual > 0.03, "{residual}");
+        assert_eq!(affine_residual(&[[0.0, 0.0]; 5], &POINTS), None);
     }
 }
