@@ -16,8 +16,8 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Emitter alternate-frame mode via `FACEAUTH_MODE` = 2 (F8, F9, F16, F17) | N/A on this camera: the IR function strobes by itself and has no MSXU face-auth control (L1, L4, L5) | Only needed for other cameras: UVC XU `{0F3F95DC…}` selector 6 via `UVCIOC_CTRL_QUERY` |
 | Per-frame lit/unlit flag from `MF_CAPTURE_METADATA_FRAME_ILLUMINATION` (F10, F19) | **Done**: `IrCamera` reads `UVCM` metadata from `/dev/video3` (item 6, `Flags & 1`), paired with video by sequence; frames without a flag are dropped (L2, L3) | — |
 | Brightness-based strobe guess only for replay (F15) | **Done**: fallback only with `--no-ir-metadata` (brighter of two consecutive frames, F15 sampling) | — |
-| Warm-up: exposure settles ≈ 11 frames (L1) | Done: `WARMUP_FRAMES = 16` | — |
-| RGB camera in parallel for colour liveness (F22) | Done: `OpenCameras` opens RGB first, then IR; RGB dark-frame skip (`DARK_RATIO 0.5`, 4 skips) | — |
+| Warm-up: exposure settles ≈ 11 frames (L1) | **Done**: `WARMUP_FRAMES = 4`; the camera resumes near its last exposure (L7) and a ±35 % brightness offset does not move match scores; first pair ≈ 0.54 s after opening (was ≈ 1.6 s) | — |
+| RGB camera in parallel for colour liveness (F22) | Done: `OpenCameras` opens IR first, then RGB (≈ 50 ms); RGB dark-frame skip (`DARK_RATIO 0.5`, 4 skips) | — |
 | Secure camera path (`SECURE_MODE`, SecureUSBVideo trustlet, VTL1 frame buffers) (F8, F36) | N/A: needs VBS/trustlets; no Linux equivalent for UVC | Closest: run capture + matching only in the root daemon (already so) |
 | Driver face-detection property (`FACEDETECTION`, id 29) (F8) | N/A: not used for auth; camera does not expose it | — |
 | ROI / exposure control on the face (`SensorController`, `ToggleFaceDetectionOnDriverIfCapable`) (Q1) | **Done**: `IrCamera::expose_on` sets the UVC region-of-interest rectangle to the last face box with auto-exposure on, after every pair (L6); defaults restored at open and close; no-op without the controls | — |

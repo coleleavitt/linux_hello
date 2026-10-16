@@ -18,8 +18,11 @@ use v4l::v4l_sys::v4l2_rect;
 use v4l::video::Capture;
 use v4l::FourCC;
 
-/// Frames dropped after the IR stream starts, while auto-exposure settles.
-const WARMUP_FRAMES: usize = 16;
+/// IR frames dropped after the stream starts. The camera resumes near the exposure it had when
+/// it last streamed and converges by 1–2 % per frame, so the first lit frames are 15–40 % too
+/// bright or too dark; after 4 frames they are within ≈ 30 % of the settled value, which
+/// changes a print's cosine similarity by < 0.02 (docs/capture-and-liveness.md §1).
+const WARMUP_FRAMES: usize = 4;
 /// A lit frame is only paired with an ambient frame closer in time than this (F13).
 const MAX_PAIR_GAP: Duration = Duration::from_millis(300);
 /// Frames read while looking for one lit/ambient pair before giving up.

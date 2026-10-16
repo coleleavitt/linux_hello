@@ -59,6 +59,20 @@ written when the camera opens, in case an earlier run died, and when it closes. 
 the controls logs once (debug) and meters the whole frame; a camera that rejects a rectangle
 logs once (warn) and keeps whatever it has.
 
+**Start-up (L7).** `OpenCameras::open` opens the IR camera first (its first frame comes after
+≈ 90 ms alone), drops `WARMUP_FRAMES = 4` frames, then opens the RGB camera (first frame after
+≈ 50 ms; started first it takes ≈ 245 ms, and the earlier note that it stalls when started after
+the IR stream did not reproduce in 20 runs). The metadata node is read along with the warm-up
+frames so that it is in step with the video by the first pair. The first pair with its RGB frame
+is ready ≈ 0.54 s after opening (before: ≈ 1.6 s with RGB first and 16 warm-up frames; measured
+on 2026-10-16 with a scratch example, 8 runs each). 4 warm-up frames because the camera resumes
+near its last exposure and converges by 1–2 % per lit frame: the first lit frame was 17–45 %
+off after 30–300 s idle, frame 4–5 is within ≈ 30 %, and after that it only drifts; a ±35 %
+brightness change moves a print's cosine similarity by < 0.015 and the cross-sitting match
+score by < 0.02 (`examples/embed_dir` on brightness-scaled validation frames). Frames still
+saturated after an abnormal start (L7) are rejected by the F44 gates until exposure comes down.
+`examples/ir_exposure [--frames N] [x1,y1,x2,y2 | full ...]` prints the per-frame brightness
+from stream start and after each region change.
 
 ### 2. Frame gates (F45, F46)
 

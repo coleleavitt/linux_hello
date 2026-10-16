@@ -52,19 +52,15 @@ pub struct OpenCameras {
 
 impl OpenCameras {
     pub fn open(setup: &CameraSetup) -> Result<Self> {
-        // Open RGB first: starting it after the IR stream stalls it. Reading one frame starts
-        // the stream (v4l starts streaming on the first read); its auto-exposure then keeps
-        // adjusting while the IR camera warms up, so afterwards we only drop the frames it
-        // buffered meanwhile.
-        let mut liveness = setup
+        // IR first: alone, its stream delivers the first frame in ≈ 90 ms. The RGB stream's
+        // first frame takes ≈ 245 ms when it starts first and ≈ 50 ms after the IR stream
+        // (docs/capture-and-liveness.md §1).
+        let ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
+        let liveness = setup
             .liveness_device
             .as_ref()
             .map(|d| Camera::open_with(d, CameraType::Rgb, 1, LIVENESS_BUFFERS))
             .transpose()?;
-        let ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
-        if let Some(cam) = liveness.as_mut() {
-            cam.skip(LIVENESS_BUFFERS as usize)?;
-        }
         Ok(Self { ir, liveness, rgb_level: None })
     }
 
