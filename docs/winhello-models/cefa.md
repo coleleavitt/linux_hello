@@ -90,9 +90,9 @@ Calibration table (`sub_180059DC0`):
 
 | Field | Size | Notes |
 |---|---|---|
-| hardware_model | u32 | v5: 0, 1, 2, 4, 5; v1–v4: 0, 1, 2, 5, 5 |
+| condition (first read as a hardware model) | u32 | v5: 0, 1, 2, 4, 5; v1–v4: 0, 1, 2, 5, 5 — the verification condition the table is for (F67) |
 | n_ids | u32 | 0 in all files |
-| ids | n_ids × u32 | |
+| ids | n_ids × u32 | hardware models the table is specialised for; empty = generic (F67) |
 | n_rows | u32 | 20 |
 | rows | n_rows × (f32 FPR, f32 TAR, f32 distance) | used by the distance → GFP curve (F51) |
 
@@ -288,7 +288,7 @@ then onnxruntime on the written crops with `align.py` on the same landmarks):
 ## 8. Open questions
 
 - Header bytes 3–5 and the body flag byte (this+113): always 0. Meaning UNKNOWN.
-- Hardware-model ids in the tables (0, 1, 2, 4/5, 5): which camera classes they mean is UNKNOWN (F51 has the GFP use).
+- ~~Hardware-model ids in the tables (0, 1, 2, 4/5, 5)~~: resolved (windows-hello-re.md F67). The first u32 of a table is the **verification condition** it calibrates (0 clean, 1 weak lighting / clipped band, 2 non-frontal, 4 coupled prints, 5 edge cut); the `ids` set lists the hardware models it is specialised for (empty = generic).
 - Feature converter: the exact roles of models A and B are INFERRED (§3). Model B cannot be tested without legacy templates.
 - Feature flag `unk_1801246E8` (selects 125/126/core-120): its name and default are UNKNOWN.
 - Why 123 and 125 differ byte-wise but compute the same function: per conv-convnet, 125 is an ONNX re-export

@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use crate::calibration::CalibrationTable;
 use crate::camera::MAX_PAIR_GAP;
 use crate::lighting::{self, subtract_ambient, Lighting, LightingStatus};
+use crate::matcher::Condition;
 use crate::tracker::{iou, MIN_IOU};
 use crate::{
     gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
@@ -277,7 +278,9 @@ impl FacePipeline {
                 continue;
             };
             let windows_table = self.windows.as_ref().map(|w| &w.recognizer.calibration);
-            let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration, windows_table));
+            let condition = Condition::of(analysis.status().expect("a print has a lighting status"));
+            let best =
+                self.store.get(user).and_then(|t| t.best_match(print, condition, &self.calibration, windows_table));
             if analysis.status() != Some(LightingStatus::Good) {
                 let vote = Vote::from_evidence(false, None, None);
                 faces.push(FaceCheck { analysis, liveness: None, windows: None, vote, best });

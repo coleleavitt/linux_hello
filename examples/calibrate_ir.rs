@@ -23,7 +23,7 @@
 
 use anyhow::{bail, Context, Result};
 use image::GrayImage;
-use linux_hello::matcher::ENROLL_ON_FAILURE_THRESHOLD;
+use linux_hello::matcher::{Condition, ENROLL_ON_FAILURE_THRESHOLD};
 use linux_hello::{
     calibration, cosine, gray_to_rgb, sysfs, CalibrationTable, Embedding, FaceDetector, FaceEmbedder, FacePipeline,
     FaceStore, IrPair, LightingStatus, Template, WindowsHelloModels, TARGET_FAR,
@@ -128,7 +128,9 @@ fn score(template: &Template, tools: &Tools, prints: Vec<(String, String, Embedd
     let scored = prints
         .into_iter()
         .map(|(name, kind, print)| {
-            let m = template.best_match(&print, &tools.table, tools.windows.as_ref()).expect("template has prints");
+            let m = template
+                .best_match(&print, Condition::Clean, &tools.table, tools.windows.as_ref())
+                .expect("template has prints");
             let ms = m.windows.map_or(String::new(), |w| format!(" ms {:.3} ms_far {:.1e}", w.distance, w.far));
             println!("{name} ({kind}): similarity {:.3} far {:.1e}{ms}", m.similarity, m.far);
             comparisons.extend(template.prints.iter().map(|p| cosine(&p.features, &print.features)));

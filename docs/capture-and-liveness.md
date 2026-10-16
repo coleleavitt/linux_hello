@@ -312,6 +312,25 @@ on-failure) 0.525, so the bound stays honest as the template grows. Every per-fr
 `watch`'s `log.jsonl` carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the
 daemon reply keeps the similarity only.
 
+**Verification condition (F67).** Windows reads the FAR of a comparison from the calibration
+table of its *verification condition*, derived from the quality flags of the probe frame and of
+the closest stored print: clean (0), weak lighting or a clipped band (1, statuses 4/5/7), a
+non-frontal pose (2), an edge cut (5), and the coupled mean/pair prints (4). The five tables of
+the v5 model are one per condition (cefa.md §2.2), all identical in the shipped build, and the
+best GFP is kept per condition with the lowest deciding, so the condition changes no number
+there; the print's source (enrolled, on-failure, on-success) does not enter it. Windows' × 1…4
+is the number of enrolled users, capped (F52): × 1 for one user, and linux_hello matches 1:1.
+Here every stored print comes from a good-lighting frame (enrollment, augmentation and
+enroll-on-failure take live frames only), so the condition is the probe frame's:
+`Condition::Clean` for a good frame, `Condition::Weak` for a weak or clipped-band frame
+(`Condition::of`, recorded in `PrintMatch::condition`); non-frontal and edge-cut frames give no
+print (§2). The FAR comes from the one table per camera, as Windows' identical tables; a
+per-condition table would need impostor data from weak-lighting frames, which there is none of.
+Two Windows details are not followed: on-failure prints are compared only while Windows'
+`AutoEnrollmentMode` is on (here they are matched whenever they are in the template, and only
+the daemon with `--enroll-on-failure` adds them), and Windows counts the 4 prints a track needs
+among the prints of the current frame's quality category (here any 4 prints of the track).
+
 **Second opinion (F28, F50, F51).** With the Windows Hello models, every print also carries Microsoft's
 own recognition feature: the v5 net (`MsRecognizer`, [winhello-models/cefa.md](winhello-models/cefa.md)
 §7) on the same recognition image, cropped at the Windows IR detector's five points, 256 floats

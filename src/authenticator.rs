@@ -706,7 +706,13 @@ mod tests {
             liveness: None,
             windows: None,
             vote,
-            best: Some(PrintMatch { similarity, far, generation: 1, windows: None }),
+            best: Some(PrintMatch {
+                similarity,
+                far,
+                condition: crate::Condition::Clean,
+                generation: 1,
+                windows: None,
+            }),
         }
     }
 

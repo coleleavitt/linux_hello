@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use tracing::debug;
 
 use crate::calibration::CalibrationTable;
+use crate::matcher::Condition;
 use crate::matcher::ENROLL_ON_FAILURE_THRESHOLD;
 #[cfg(feature = "tpm")]
 use crate::tpm::{DataKey, SealedFile};
@@ -207,7 +208,8 @@ impl FaceStore {
     }
 
     /// The other enrolled user that one of `prints` matches (ArcFace FAR under the target, as a
-    /// recognition without the second opinion), with the match; the closest one if several do
+    /// recognition without the second opinion; `prints` come from good-lighting frames, so the
+    /// clean condition), with the match; the closest one if several do
     /// (`CheckForDuplicateEnrollment`).
     pub fn duplicate(&self, user: &str, prints: &[Embedding], table: &CalibrationTable) -> Option<(&str, PrintMatch)> {
         self.faces
@@ -216,7 +218,7 @@ impl FaceStore {
             .filter_map(|(other, template)| {
                 let best = prints
                     .iter()
-                    .filter_map(|p| template.best_match(p, table, None))
+                    .filter_map(|p| template.best_match(p, Condition::Clean, table, None))
                     .max_by(|a, b| a.similarity.total_cmp(&b.similarity))?;
                 Some((other.as_str(), best))
             })
@@ -230,7 +232,7 @@ impl FaceStore {
     pub fn add_on_failure(&mut self, user: &str, print: &Embedding, table: &CalibrationTable) -> OnFailure {
         let Some(template) = self.faces.get(user) else { return OnFailure::NotEnrolled };
         let similarity = template
-            .best_match_where(print, table, None, |p| p.source != PrintSource::OnFailure)
+            .best_match_where(print, Condition::Clean, table, None, |p| p.source != PrintSource::OnFailure)
             .map_or(f32::NEG_INFINITY, |m| m.similarity);
         if similarity < ENROLL_ON_FAILURE_THRESHOLD {
             return OnFailure::TooFar { similarity };
