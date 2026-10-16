@@ -1,134 +1,105 @@
-//! The Hello face icon: Windows' own still and animation when the assets have them, a glyph
-//! of its icon font, or our Cairo drawing. The animation plays while looking.
+//! The Hello icon under the user's name: Windows' eye animation when the assets have it
+//! ([`super::eye`]), a glyph of its icon font, or our Cairo face (the shape of
+//! `hello-face.svg`: two eyes and a smile).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gtk::gdk::prelude::GdkCairoContextExt;
-use gtk::gdk_pixbuf::{Pixbuf, PixbufAnimation, PixbufAnimationIter};
 use gtk::prelude::*;
 use gtk::{glib, pango};
+use tracing::warn;
 
+use super::eye::Eye;
 use crate::assets::Hello;
 use crate::state::Face;
 
-/// Logical size in pixels; Windows' images are scaled to it.
-pub const SIZE: i32 = 56;
+/// Windows: a 64×64 Lottie canvas / a 60 px glyph.
+pub const SIZE: i32 = 64;
 
 pub struct HelloIcon {
     pub widget: gtk::Widget,
-    shared: Rc<RefCell<Shared>>,
+    kind: Kind,
 }
 
-struct Shared {
+enum Kind {
+    Eye(Eye),
+    Glyph,
+    Vector(Rc<RefCell<VectorState>>),
+}
+
+struct VectorState {
     face: Face,
-    still: Option<Pixbuf>,
-    animation: Option<PixbufAnimation>,
-    /// The running animation (looking, recognised).
-    playing: Option<PixbufAnimationIter>,
-    /// Seconds since the looking animation of the Cairo face began.
+    /// Frame-clock time when the looking animation began.
     started: Option<i64>,
 }
 
 impl HelloIcon {
     pub fn new(source: &Hello) -> HelloIcon {
-        let mut shared = Shared { face: Face::Idle, still: None, animation: None, playing: None, started: None };
-        let widget: gtk::Widget = match source {
+        let (widget, kind): (gtk::Widget, Kind) = match source {
+            Hello::Eye(dir) => match Eye::new(dir, SIZE) {
+                Ok(eye) => (eye.widget.clone().upcast(), Kind::Eye(eye)),
+                Err(e) => {
+                    warn!("Windows eye animation in {}: {e:#}; using the built-in icon", dir.display());
+                    vector()
+                }
+            },
             Hello::Glyph { family, ch } => {
                 let label = gtk::Label::new(Some(&ch.to_string()));
                 let attrs = pango::AttrList::new();
                 attrs.insert(pango::AttrString::new_family(family));
                 attrs.insert(pango::AttrSize::new_size_absolute(SIZE * pango::SCALE * 3 / 4));
                 label.set_attributes(Some(&attrs));
-                label.upcast()
+                (label.upcast(), Kind::Glyph)
             }
-            Hello::Windows { still, animation } => {
-                shared.still = still.as_ref().and_then(|p| Pixbuf::from_file_at_scale(p, SIZE, SIZE, true).ok());
-                shared.animation = animation.as_ref().and_then(|p| PixbufAnimation::from_file(p).ok());
-                gtk::DrawingArea::new().upcast()
-            }
-            Hello::Vector => gtk::DrawingArea::new().upcast(),
+            Hello::Vector => vector(),
         };
-        let shared = Rc::new(RefCell::new(shared));
-        if let Some(area) = widget.downcast_ref::<gtk::DrawingArea>() {
-            let draw = Rc::clone(&shared);
-            area.set_draw_func(move |area, cr, width, height| draw.borrow().draw(area, cr, width, height));
-        }
         widget.set_size_request(SIZE, SIZE);
         widget.add_css_class("hello-icon");
-        HelloIcon { widget, shared }
+        HelloIcon { widget, kind }
     }
 
     pub fn set_face(&self, face: &Face) {
-        let mut shared = self.shared.borrow_mut();
-        if shared.face == *face {
-            return;
-        }
-        shared.face = face.clone();
-        shared.started = None;
-        shared.playing = None;
-        // Windows' GIF plays once and ends on the smile: looped while looking, once when
-        // recognised.
-        let animate = matches!(face, Face::Starting | Face::Looking | Face::Verifying | Face::Welcome);
-        if animate {
-            shared.playing = shared.animation.as_ref().map(|a| a.iter(Some(std::time::SystemTime::now())));
-        }
-        drop(shared);
-        self.widget.set_opacity(if matches!(face, Face::Failed(_)) { 0.55 } else { 1.0 });
-        self.widget.queue_draw();
-        if animate {
-            let shared = Rc::clone(&self.shared);
-            let face = face.clone();
-            self.widget.add_tick_callback(move |widget, clock| {
-                let mut s = shared.borrow_mut();
-                if s.face != face {
-                    return glib::ControlFlow::Break;
+        match &self.kind {
+            Kind::Eye(eye) => eye.set_face(face),
+            Kind::Glyph => self.widget.set_opacity(if matches!(face, Face::Failed(_)) { 0.55 } else { 1.0 }),
+            Kind::Vector(state) => {
+                let mut s = state.borrow_mut();
+                if s.face == *face {
+                    return;
                 }
-                s.started.get_or_insert(clock.frame_time());
-                if let Some(playing) = &s.playing {
-                    let now = std::time::SystemTime::now();
-                    playing.advance(now);
-                    // No delay once a non-looping animation has shown its last frame.
-                    if playing.delay_time().is_none() {
-                        if face == Face::Welcome {
+                s.face = face.clone();
+                s.started = None;
+                drop(s);
+                self.widget.set_opacity(if matches!(face, Face::Failed(_)) { 0.55 } else { 1.0 });
+                self.widget.queue_draw();
+                if matches!(face, Face::Looking | Face::Verifying) {
+                    let state = Rc::clone(state);
+                    let face = face.clone();
+                    self.widget.add_tick_callback(move |widget, clock| {
+                        let mut s = state.borrow_mut();
+                        if s.face != face {
                             return glib::ControlFlow::Break;
                         }
-                        s.playing = s.animation.as_ref().map(|a| a.iter(Some(now)));
-                    }
+                        s.started.get_or_insert(clock.frame_time());
+                        widget.queue_draw();
+                        glib::ControlFlow::Continue
+                    });
                 }
-                widget.queue_draw();
-                glib::ControlFlow::Continue
-            });
+            }
         }
     }
 }
 
-impl Shared {
-    fn draw(&self, area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, height: i32) {
-        let frame = match (&self.playing, &self.still) {
-            (Some(playing), _) => Some(playing.pixbuf()),
-            (None, Some(still)) => Some(still.clone()),
-            (None, None) => None,
-        };
-        match frame {
-            Some(frame) => {
-                let scale = f64::from(width.min(height)) / f64::from(frame.width().max(frame.height()));
-                cr.translate(
-                    (f64::from(width) - scale * f64::from(frame.width())) / 2.0,
-                    (f64::from(height) - scale * f64::from(frame.height())) / 2.0,
-                );
-                cr.scale(scale, scale);
-                cr.set_source_pixbuf(&frame, 0.0, 0.0);
-                let _ = cr.paint();
-            }
-            None => {
-                let elapsed = self
-                    .started
-                    .map_or(0.0, |t0| (area.frame_clock().map_or(t0, |c| c.frame_time()) - t0) as f64 / 1e6);
-                draw_vector(cr, f64::from(width), f64::from(height), &self.face, elapsed);
-            }
-        }
-    }
+fn vector() -> (gtk::Widget, Kind) {
+    let state = Rc::new(RefCell::new(VectorState { face: Face::Idle, started: None }));
+    let area = gtk::DrawingArea::new();
+    let draw = Rc::clone(&state);
+    area.set_draw_func(move |area, cr, width, height| {
+        let s = draw.borrow();
+        let elapsed = s.started.map_or(0.0, |t0| (area.frame_clock().map_or(t0, |c| c.frame_time()) - t0) as f64 / 1e6);
+        draw_vector(cr, f64::from(width), f64::from(height), &s.face, elapsed);
+    });
+    (area.upcast(), Kind::Vector(state))
 }
 
 /// The Windows Hello face: two eyes and a smile (as `hello-face.svg`, no outline). While

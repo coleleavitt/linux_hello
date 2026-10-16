@@ -18,6 +18,7 @@ use crate::state::{Effect, Face, Input, Screen, State};
 use crate::users::Account;
 
 mod background;
+mod eye;
 mod hello_icon;
 mod screens;
 

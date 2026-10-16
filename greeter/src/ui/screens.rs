@@ -6,7 +6,7 @@ use gtk::gdk::prelude::GdkCairoContextExt;
 use gtk::glib;
 
 use super::hello_icon::HelloIcon;
-use crate::assets::Assets;
+use crate::assets::{Assets, Hello};
 use crate::state::{Face, State};
 use crate::users::Account;
 
@@ -227,10 +227,26 @@ impl SignIn {
         options_link.set_margin_top(16);
         widget.append(&options_link);
 
+        // The provider's logo, 24×24 in the 44×44 button (hello-face.svg's png render).
         let face_option = gtk::Button::new();
         face_option.add_css_class("option");
-        face_option.set_child(Some(&HelloIcon::new(&assets.hello).widget));
-        face_option.set_tooltip_text(Some("Windows Hello Face"));
+        let logo: gtk::Widget = match &assets.face_icon {
+            Some(path) => {
+                let picture = gtk::Picture::for_filename(path);
+                picture.set_size_request(24, 24);
+                picture.set_can_shrink(true);
+                picture.upcast()
+            }
+            None => {
+                let icon = HelloIcon::new(&Hello::Vector);
+                icon.widget.set_size_request(24, 24);
+                icon.widget
+            }
+        };
+        logo.set_halign(gtk::Align::Center);
+        logo.set_valign(gtk::Align::Center);
+        face_option.set_child(Some(&logo));
+        face_option.set_tooltip_text(Some("Face"));
         let password_option = gtk::Button::from_icon_name("dialog-password-symbolic");
         password_option.add_css_class("option");
         password_option.set_tooltip_text(Some("Password"));

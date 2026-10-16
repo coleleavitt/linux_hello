@@ -90,10 +90,13 @@ fn session(mut stream: UnixStream, scenario: &Scenario) -> Result<()> {
             Request::CancelSession => return Ok(()),
             _ => return fail(&mut stream, "unexpected request"),
         }
-        // The camera time comes after "Looking for your face..." was acknowledged.
+        // The camera time comes after "Looking for your face..." was acknowledged, and half of
+        // it again after "Making sure it's you..." (the liveness votes).
         if !delayed {
             delayed = true;
             thread::sleep(scenario.delay);
+        } else if text.starts_with("Making sure") {
+            thread::sleep(scenario.delay / 2);
         }
     }
     if !scenario.face_match {
