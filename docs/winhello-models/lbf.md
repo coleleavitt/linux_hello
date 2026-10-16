@@ -161,8 +161,24 @@ OBSERVED (FaceProcessorCore, pseudocode and disassembly in `~/SiteResearch/windo
   `IFaceAlignment` sub-object (RetinaEngine+8) at this+11; when the byte at `StaticAdapterInfo`+2938 is set, its
   `IFaceOrientation` (RetinaEngine+16) at this+14. `IsRetinaFaceAlignmentEnabled` returns 1 whenever feature
   `IntegrateComplianceHelloModels` is on, else the byte at `StaticAdapterInfo`+2937 (0 in the constructor
-  0x18002f4a8, `dword_180067988 = 0x10000`, which also sets +2938 = 1; the adapter configuration that may
-  overwrite it was not traced — UNKNOWN).
+  0x18002f4a8, `dword_180067988 = 0x10000`, which also sets +2938 = 1).
+* **Which path a stock install runs (OBSERVED, F64).** Nothing writes +2937: the `StaticAdapterInfo` setters
+  that exist cover the neighbouring bytes only — `SetRotateFrameToDetectFaceEnabled` +2936,
+  `SetRetinaSearchAreaOptimizationEnabled` +2939, `SetAverageAggregationEnabled` +2940,
+  `SetFaceOcclusionDetectorEnabled` +2942, `SetInfraredROIControlImprovementEnabled` +2943 (FaceRecognitionSensorAdapterVsm
+  0x18002fd84, 0x18002fd24, 0x18002fa80, 0x18002fb3c, 0x18002fc64; the plain sensor adapter writes +2939…+2945 by the
+  same offsets, 0x18002e214…0x18002e4b8, and +2941/+2945 directly), and the literal offset 2937 appears in no pseudocode dump of
+  FaceProcessor, FaceProcessorCore or the three sensor adapters except the two copies of the getter (FaceProcessorCore
+  0x18002f72c, FaceProcessor 0x18007b864). No registry or WinBio string names it. So the byte stays 0 and the
+  decision is the feature flag alone. The flag is a WIL velocity feature, id **60805723** (0x39FD25B), compiled
+  **enabled by default**: `FeatureImpl<…IntegrateComplianceHelloModels>::GetCurrentFeatureEnabledState` 0x18002c3dc
+  treats `GetFeatureEnabledState` = 0 (no override) as enabled (`v8 = 64` on the default branch; compare
+  `ImproveFaceQualityFilter` 0x180030d54, id 61462116, whose default branch leaves the bit clear = disabled by
+  default), and requires `TestLoc03` (id 58989177, 0x18002c5e4, itself enabled by default). INFERRED: a stock
+  26100.9444 install runs the **RetinaEngine alignment path** (slots 5–30 copied from the five Retina points, eye
+  corners at ±0.1875·IOD) and never the LBF aligner, unless the OS feature store
+  (`HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides`, feature 60805723) turns the flag off,
+  which is a per-machine state that static analysis cannot see.
 * `InitializeLegacyFaceAlignmentAndFaceOrientationIfNeeded` 0x18003a954 loads MODEL_FILES 102 and creates the
   `LbfAligner` **only if this+11 is still null** (`if (this+11 != 0) goto LABEL_69`), and `IrFaceOrientation` only
   if this+14 is null. So with Retina alignment the LBF database is never loaded and the aligner never runs.
@@ -184,8 +200,8 @@ Consequences (OBSERVED arithmetic on the copies above):
   points, now taken from the Retina points.
 * F13 anchors: A = mean(p0, p7, p10, p8, p9) = p0 (the ±d corners cancel), B = p1, C = mean(p3, p4, 4 × midpoint)
   = (p3 + p4) / 2. The affine warp is fitted through the eye centres and the mouth midpoint.
-* Which path a given Windows install runs depends on the feature flag / configuration byte (UNKNOWN). linux_hello
-  follows the Retina path: its other converted models are the compliance-flag variants (occlusion 120, detector
+* A stock install runs the Retina path (the flag is compiled enabled by default and the byte has no writer, above).
+  linux_hello follows it: its other converted models are the compliance-flag variants (occlusion 120, detector
   112 ≡ 110, cefa.md §5), under which `IsRetinaFaceAlignmentEnabled` is unconditionally true.
 
 ### Point layout (names INFERRED from mean shape + anchor groups; "L" = image left = subject's right)
