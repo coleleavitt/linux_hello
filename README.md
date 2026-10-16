@@ -101,21 +101,24 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
 
 | | |
 |--|--|
-| Owner, IR similarity | 0.82–0.99 (threshold 0.4) |
-| Stranger (InsightFace sample photo) | −0.04 |
-| Owner, RGB liveness | 0.92–0.99 |
-| PAM `sudo`-style request, end to end | ~2.1 s |
+| Owner, IR similarity to the closest print | 0.96–0.98 (recognised at FAR < 1e-5, i.e. about 0.50; `far` ≈ 1e-7) |
+| Stranger faces (group photo) | −0.06…0.03 |
+| Windows Hello anti-spoofing frame total, owner at face brightness ~100 | +1 on about 90 % of good frames |
+| Owner at face brightness ~150 (close, lamp behind the head), before face-metered exposure | +1 on about 35 % of good frames |
+| `sudo` unlock, end to end, 16-frame warm-up | ~2.6 s (1.75 s camera start + 0.5 s decision) |
+| First usable frame pair after opening the cameras, 4-frame warm-up and IR first | 0.54 s (expected unlock ~1.5 s, not yet measured) |
 
 ## Known limitations
 
 - Not yet tested against a real printed-photo or phone-screen attack.
-- No IR anti-spoofing model: Windows votes "live" with two IR CNNs (proprietary). Here the IR
-  evidence is only the lighting status, and the RGB models can only veto. A print or mask that
-  reflects IR like skin passes the gate; the RGB veto has to catch it.
-- The head-pose and occlusion checks run only with the converted Windows Hello models
-  (`models/windows_hello/converted`, git-ignored); only the largest face is tracked across frames.
-- Ambient subtraction has no motion compensation (Windows warps with an affine transform); fast
-  head movement between the two frames (67 ms) leaves edges in the difference image.
+- The IR anti-spoofing vote, the head-pose gate and the occlusion gate run only with the converted
+  Windows Hello models (`models/windows_hello/converted`, git-ignored, personal use). Without them
+  the IR evidence is only the lighting status and the open RGB models can only veto: a print or
+  mask that reflects IR like skin passes the gate and the RGB veto has to catch it.
+- Only the largest face is tracked across frames.
+- Microsoft's anti-spoofing nets are sure of a live face at a face brightness near 100 and unsure
+  near 150; the face-metered exposure keeps the face near the camera's target, but a close face
+  with a lamp behind the head has not been re-tested since.
 - The false-accept estimate behind the match decision (FAR < 1e-5 per attempt, charged for every
   print in the template × 16 frame pairs) comes from a calibration table built on grayscale LFW
   photos ([docs/calibration.md](docs/calibration.md)), not yet on IR captures.
