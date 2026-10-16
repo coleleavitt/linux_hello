@@ -115,7 +115,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   Windows Hello models (`models/windows_hello/converted`, git-ignored, personal use). Without them
   the IR evidence is only the lighting status and the open RGB models can only veto: a print or
   mask that reflects IR like skin passes the gate and the RGB veto has to catch it.
-- Only the largest face is tracked across frames.
+- Only the largest face is tracked across frames. A photo of the owner held exactly where the
+  owner's face was continues its track (same place, same identity); the liveness votes have to
+  catch it.
 - Microsoft's anti-spoofing nets are sure of a live face at a face brightness near 100 and unsure
   near 150; the face-metered exposure keeps the face near the camera's target, but a close face
   with a lamp behind the head has not been re-tested since.

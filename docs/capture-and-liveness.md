@@ -16,7 +16,7 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
 /dev/video0 (RGB) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
-  track: largest face followed by box overlap; a new face starts a new attempt
+  track: largest face followed by box overlap and print similarity; a new face starts a new attempt
   attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50) → recognised;
            from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
   session: 16 pairs over all attempts → give up; once more if the face moved or the exposure changed
@@ -251,12 +251,23 @@ daemon reply keeps the similarity only.
 
 The order follows Windows' `MakeDecisions`: recognise first, then liveness on the same face.
 "The same face" is the face track (F37, F47): `FaceTracker` follows the largest face of each pair
-from pair to pair while its box overlaps the last one (IoU ≥ 0.3). A face that does not overlap,
-or that comes back after 7 pairs (≈ 1 s, Windows' 1000 ms purge, F37) without a face, starts a new
-track, and a new track starts a new attempt: its prints, best similarity and liveness votes start
-from zero. So the owner's prints never recognise a photo held up next, and the owner's live votes
-never count for it. Pairs without a face keep the current track. The 16-pair limit counts the
-whole session (twice, after a re-attempt, below).
+from pair to pair while its box overlaps the last one (IoU ≥ 0.3) and its print, when the frame
+gives one, matches the track's last print (cosine ≥ 0.50, `SAME_FACE_SIMILARITY`). A face that
+does not overlap, whose print does not match, or that comes back after 7 pairs (≈ 1 s, Windows'
+1000 ms purge, F37) without a face, starts a new track, and a new track starts a new attempt: its
+prints, best similarity and liveness votes start from zero. So the owner's prints never recognise
+a photo held up next or in the owner's place, and the owner's live votes never count for it.
+Pairs without a face, and rejected frames (no print), keep the current track. The 16-pair limit
+counts the whole session (twice, after a re-attempt, below).
+
+The print check is an addition: Windows tracks by geometry alone (`FaceTrackerInternal`). 0.50
+is the calibration table's 1e-5-per-attempt point (per-comparison FAR 4e-8 on grayscale LFW,
+where 2 % of genuine pairs — photos from different occasions — fall below it). On the saved
+frames prints of one sitter 67 ms apart score 0.957–0.986, seconds apart 0.96–0.98, the same
+sitter in another sitting with the chin cut off 0.60–0.64, and different people ≤ 0.19 (the six
+faces of the stranger photo among themselves; −0.07…0.04 against the owner;
+`examples/embed_dir`). A false split only restarts the attempt (4 more prints); a missed switch
+would hand the track's recognition to the new face.
 
 1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the estimated FAR of
    the best similarity over them is < 1e-5 (similarity > 0.50 with the shipped table and 15
@@ -292,9 +303,9 @@ timeout.
 
 Checked on saved frames (`validation_frames`): five consecutive lit frames of one sitting keep one
 track (boxes move ≤ 2 px); the owner's frames from another sitting, 110 px higher, and the stranger
-photo each start a new track. Limits: only the largest face is tracked; a photo held exactly where
-the face was (IoU ≥ 0.3) continues the track. Not implemented: the "closer to another user" check
-(1:1 by design).
+photo each start a new track. Limits: only the largest face is tracked; a photo of the owner held
+exactly where the face was continues the track (same place, same identity: the liveness votes
+have to catch it). Not implemented: the "closer to another user" check (1:1 by design).
 
 ### 8. Template augmentation (F31, F53)
 

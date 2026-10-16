@@ -115,9 +115,9 @@ pub const MAX_PAIRS: u32 = 16;
 pub const OCCLUDED_GIVE_UP: u32 = 4;
 
 /// One authentication: up to [`MAX_PAIRS`] frame pairs, once more after a re-attempt (F49). The
-/// largest face is tracked across pairs and each track gets its own [`Attempt`] (F37, F47), so the
-/// prints and votes of one face never count for another (the owner's face, then a photo held up
-/// in its place).
+/// largest face is tracked across pairs by place and by print ([`FaceTracker`]) and each track
+/// gets its own [`Attempt`] (F37, F47), so the prints and votes of one face never count for
+/// another (the owner's face, then a photo held up next to it or in its place).
 #[derive(Default)]
 pub struct Session {
     tracker: FaceTracker,
@@ -142,7 +142,7 @@ impl Session {
         if let Some(problem) = check.analysis.problem {
             *self.problems.entry(problem).or_default() += 1;
         }
-        let track = self.tracker.update(check.analysis.face.as_ref());
+        let track = self.tracker.update(check.analysis.face.as_ref(), check.analysis.print.as_ref());
         if track.is_some() && track != self.track {
             if self.track.is_some() {
                 debug!(?track, "new face track: starting over");
@@ -573,8 +573,11 @@ mod tests {
     }
 
     /// A usable pair of the face at `bbox` with good (`live`) or weak lighting, matching at
-    /// `similarity` against a 15-print template (FAR from the shipped table: 0.50 ↔ 1e-5).
-    fn usable_at(bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
+    /// `similarity` against a 15-print template (FAR from the shipped table: 0.50 ↔ 1e-5). The
+    /// print's first component tells the owner (1) from another person (−1): prints of one person
+    /// score > 1 to each other, of two people < 0, around the tracker's 0.5; the second keeps the
+    /// frame's similarity so a test can tell which print was picked.
+    fn usable_as(person: f32, bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
         let ambient = if vote == Vote::Abstain { 60.0 } else { 5.0 };
         let far = crate::calibration::lfw_gray().far(similarity, 15);
         FrameCheck {
@@ -584,7 +587,7 @@ mod tests {
                 windows_face: None,
                 lighting: Some(Lighting { lit: 80.0, ambient }),
                 problem: None,
-                print: Some(Embedding { features: vec![similarity] }),
+                print: Some(Embedding { features: vec![person, similarity] }),
             },
             liveness: None,
             windows: None,
@@ -593,8 +596,18 @@ mod tests {
         }
     }
 
+    /// The owner's face at `bbox`.
+    fn usable_at(bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
+        usable_as(1.0, bbox, vote, similarity)
+    }
+
     fn usable(vote: Vote, similarity: f32) -> FrameCheck {
         usable_at(OWNER, vote, similarity)
+    }
+
+    /// Someone else's face at `bbox`.
+    fn stranger_at(bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
+        usable_as(-1.0, bbox, vote, similarity)
     }
 
     /// The owner's box shifted right by `dx` pixels.
@@ -826,6 +839,29 @@ mod tests {
     }
 
     #[test]
+    fn another_face_in_the_same_place_starts_a_new_track() {
+        // The owner is recognised and has one live vote; a photo of someone else is then held
+        // exactly where the face was. By place alone it would continue the track and its live
+        // vote would unlock; its print does not match the owner's, so it starts a new track.
+        let mut s = Session::default();
+        for _ in 0..MIN_PRINTS {
+            s.add(&usable(Vote::Abstain, 0.9));
+        }
+        assert_eq!(s.add(&usable(Vote::Live, 0.9)), None);
+        let owner = s.track();
+        assert_eq!(s.add(&stranger_at(OWNER, Vote::Live, 0.2)), None);
+        assert_ne!(s.track(), owner);
+        assert!(!s.attempt().recognised());
+        // A rejected frame (no print) continues the photo's track by place; the owner's face
+        // back in place is yet another track.
+        let photo = s.track();
+        assert_eq!(s.add(&rejected(FaceProblem::TooDark)), None);
+        assert_eq!(s.track(), photo);
+        assert_eq!(s.add(&usable(Vote::Live, 0.9)), None);
+        assert_ne!(s.track(), photo);
+    }
+
+    #[test]
     fn votes_of_one_face_do_not_count_for_another() {
         // The owner is recognised and casts one live vote; a different face then votes live.
         let mut s = Session::default();
@@ -849,7 +885,7 @@ mod tests {
         for similarity in [0.30, 0.45, 0.42, 0.35] {
             s.add(&usable(Vote::Live, similarity));
         }
-        assert_eq!(s.failed_print().map(|p| p.features[0]), Some(0.45));
+        assert_eq!(s.failed_print().map(|p| p.features[1]), Some(0.45));
 
         // Weak lighting only: no live vote, not deemed real.
         let mut weak = Session::default();
