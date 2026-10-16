@@ -66,9 +66,8 @@ mod imp {
                     widget.snapshot_child(&self.picture, snapshot);
                 }
             }
-            if amount > 0.0 {
-                snapshot.append_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.45 * amount as f32), &bounds);
-            }
+            // ImageMask: 20 % black over the lock-screen image; darker under the sign-in screen.
+            snapshot.append_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.2 + 0.25 * amount as f32), &bounds);
         }
     }
 }

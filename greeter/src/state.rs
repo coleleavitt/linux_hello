@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 use crate::auth::pam::PASSWORD_PROMPT;
 use crate::auth::AuthEvent;
 
-/// The face module's first line, docs/pam.md.
+/// The face module's lines that mean a state rather than a reason (docs/pam.md).
 pub const LOOKING: &str = "Looking for your face...";
-/// Windows' text after a wrong password (BioCredProv/credprovhost string tables, to be
-/// confirmed by docs/windows-hello-ui.md).
+pub const VERIFYING: &str = "Making sure it's you...";
+/// Windows' text after a wrong password (INFERRED from public screenshots; not in the
+/// extracted string tables, docs/windows-hello-ui.md §2).
 pub const WRONG_PASSWORD: &str = "The password is incorrect. Try again.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,16 +26,22 @@ pub enum Screen {
     SignIn,
 }
 
-/// The Hello icon's state and the status text.
+/// The Hello icon's state and the status text (Windows' `BioFeedbackState`,
+/// docs/windows-hello-ui.md §1.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Face {
     /// Nothing running and nothing to say.
     Idle,
-    /// An attempt is looking for the face.
+    /// An attempt has started; the module has not spoken yet ("Getting ready...", id 105).
+    Starting,
+    /// The module is looking for the face (state 2, "Looking for you...", id 104).
     Looking,
-    /// Recognised.
+    /// Recognised, liveness being checked (state 3, "Making sure it's you...", id 123).
+    Verifying,
+    /// Recognised and live (state 4, "Hello <name>", id 101).
     Welcome,
-    /// The face check failed; the reason, or `None` when face sign-in was not available at all.
+    /// The face check failed (state 1, or 7 for camera errors); the reason, or `None` when
+    /// face sign-in was not available at all.
     Failed(Option<String>),
 }
 
@@ -142,6 +149,7 @@ impl State {
         self.prompt = None;
         self.notices.clear();
         self.backend_error = None;
+        self.face = Face::Starting;
         vec![Effect::StartAttempt]
     }
 
@@ -168,9 +176,13 @@ impl State {
                 self.face = Face::Looking;
                 vec![]
             }
+            AuthEvent::Info(text) if text == VERIFYING => {
+                self.face = Face::Verifying;
+                vec![]
+            }
             AuthEvent::Info(text) | AuthEvent::Error(text) => {
                 // The first line after "Looking" is the verdict's reason; the rest are notices.
-                if self.face == Face::Looking {
+                if matches!(self.face, Face::Starting | Face::Looking | Face::Verifying) {
                     self.face = Face::Failed(Some(text));
                 } else {
                     self.notices.push(text);
@@ -180,7 +192,7 @@ impl State {
             AuthEvent::Prompt { text, .. } => {
                 let prompt = if text == PASSWORD_PROMPT { Prompt::Module } else { Prompt::Other };
                 self.prompt = Some(prompt);
-                if matches!(self.face, Face::Looking | Face::Idle) {
+                if matches!(self.face, Face::Starting | Face::Looking | Face::Verifying | Face::Idle) {
                     self.face = Face::Failed(None);
                 }
                 if let Some(password) = self.typed.take() {
@@ -291,6 +303,7 @@ mod tests {
     fn recognised_on_the_lock_screen_starts_the_session() {
         let (mut s, now) = greeter();
         assert_eq!(s.start(), vec![Effect::StartAttempt]);
+        assert_eq!(s.face, Face::Starting);
         assert_eq!(s.handle(info(LOOKING), now), vec![]);
         assert_eq!(s.face, Face::Looking);
         assert_eq!(s.handle(Input::Auth(AuthEvent::Success), now), vec![Effect::StartSession]);
@@ -327,9 +340,11 @@ mod tests {
         s.start();
         assert_eq!(s.handle(Input::Wake, now), vec![Effect::FocusPassword]);
         s.handle(info(LOOKING), now);
-        s.handle(info("Face not recognized"), now);
+        assert_eq!(s.handle(info(VERIFYING), now), vec![]);
+        assert_eq!(s.face, Face::Verifying);
+        s.handle(info("Couldn't recognize you. Please sign in with your password."), now);
         assert_eq!(s.handle(prompt(), now), vec![Effect::FocusPassword]);
-        assert_eq!(s.face, Face::Failed(Some("Face not recognized".into())));
+        assert_eq!(s.face, Face::Failed(Some("Couldn't recognize you. Please sign in with your password.".into())));
         assert_eq!(s.handle(Input::Submit("hunter2".into()), now), vec![Effect::Answer("hunter2".into())]);
         assert!(s.signing_in);
         assert_eq!(s.handle(Input::Auth(AuthEvent::Success), now), vec![Effect::StartSession]);

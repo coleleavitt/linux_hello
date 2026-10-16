@@ -10,8 +10,8 @@
 //!                       SegoeIcons.ttf (Segoe Fluent Icons), segmdl2.ttf; added to fontconfig
 //!   screen/img100.jpg   Windows/Web/Screen: the lock-screen background
 //!   user-pictures/user-192.png   ProgramData/Microsoft/User Account Pictures: the default avatar
-//!   hello/hello-face.png, hello/HelloFaceAnimation.gif   the Hello face (still, and the
-//!                       animation that plays while looking)
+//!   hello/eye/animation.json, hello/eye/seqNN/FFF.png   the Hello eye (ui/eye.rs)
+//!   hello/hello-face.png   the face logo of the "Sign-in options" button
 //! ```
 
 use std::ffi::{c_char, c_int, c_void, CString};
@@ -24,8 +24,8 @@ use crate::config::{Config, INSTALLED_ASSETS};
 /// Where the Hello face icon comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hello {
-    /// Windows' own files: the still face and/or the animation played while looking.
-    Windows { still: Option<PathBuf>, animation: Option<PathBuf> },
+    /// Windows' own eye: the directory with `animation.json` and the frame sequences.
+    Eye(PathBuf),
     /// A glyph of an icon font from the assets (`hello_glyph` in the config).
     Glyph { family: String, ch: char },
     /// The greeter's own Cairo drawing.
@@ -39,6 +39,8 @@ pub struct Assets {
     pub fonts: Vec<String>,
     pub background: Option<PathBuf>,
     pub hello: Hello,
+    /// `hello/hello-face.png`, the face logo in the "Sign-in options" row.
+    pub face_icon: Option<PathBuf>,
     pub user_picture: Option<PathBuf>,
 }
 
@@ -48,16 +50,25 @@ impl Assets {
     pub fn load(config: &Config, dir: Option<&Path>) -> Assets {
         let dir = dir.map(Path::to_path_buf).or_else(|| config.assets.clone()).or_else(find);
         let Some(dir) = dir else {
-            return Assets { dir: None, fonts: vec![], background: None, hello: Hello::Vector, user_picture: None };
+            return Assets {
+                dir: None,
+                fonts: vec![],
+                background: None,
+                hello: Hello::Vector,
+                face_icon: None,
+                user_picture: None,
+            };
         };
         let fonts = add_fonts(&dir.join("fonts"));
         let background =
             if config.background.is_absolute() { config.background.clone() } else { dir.join(&config.background) };
         let hello = hello_source(&dir, &config.hello_glyph, &fonts);
         let user_picture = dir.join("user-pictures/user-192.png");
+        let face_icon = dir.join("hello/hello-face.png");
         Assets {
             background: background.is_file().then_some(background),
             user_picture: user_picture.is_file().then_some(user_picture),
+            face_icon: face_icon.is_file().then_some(face_icon),
             hello,
             fonts,
             dir: Some(dir),
@@ -72,9 +83,7 @@ impl Assets {
             |p: &PathBuf| self.dir.as_ref().and_then(|d| p.strip_prefix(d).ok()).unwrap_or(p).display().to_string();
         let fonts = if self.fonts.is_empty() { "system sans".to_string() } else { self.fonts.join(", ") };
         let hello = match &self.hello {
-            Hello::Windows { still, animation } => {
-                [still, animation].into_iter().flatten().map(short).collect::<Vec<_>>().join(" + ")
-            }
+            Hello::Eye(dir) => format!("{} (Windows' glyph animation)", short(dir)),
             Hello::Glyph { family, ch } => format!("U+{:04X} of {family}", *ch as u32),
             Hello::Vector => "built-in icon".to_string(),
         };
@@ -96,13 +105,9 @@ pub fn find() -> Option<PathBuf> {
 }
 
 fn hello_source(dir: &Path, glyph: &str, fonts: &[String]) -> Hello {
-    let still = dir.join("hello/hello-face.png");
-    let animation = dir.join("hello/HelloFaceAnimation.gif");
-    if still.is_file() || animation.is_file() {
-        return Hello::Windows {
-            still: still.is_file().then_some(still),
-            animation: animation.is_file().then_some(animation),
-        };
+    let eye = dir.join("hello/eye");
+    if eye.join("animation.json").is_file() {
+        return Hello::Eye(eye);
     }
     if let Some(ch) = u32::from_str_radix(glyph.trim_start_matches("U+"), 16).ok().and_then(char::from_u32) {
         if let Some(family) = fonts.iter().find(|f| f.contains("Icons") || f.contains("MDL2")) {

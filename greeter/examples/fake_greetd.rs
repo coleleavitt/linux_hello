@@ -40,7 +40,10 @@ impl Scenario {
         let (steps, face_match) = match name {
             "match" => (vec![looking], true),
             "noface" => (vec![looking, "No face seen by the camera"], false),
-            "nomatch" => (vec![looking, "Face not recognized"], false),
+            "nomatch" => (
+                vec![looking, "Making sure it's you...", "Couldn't recognize you. Please sign in with your password."],
+                false,
+            ),
             "notlive" => (vec![looking, "Face not accepted as live"], false),
             "busy" => (vec![looking, "Face login not available: another program is using the camera"], false),
             _ => return None,
@@ -87,10 +90,13 @@ fn session(mut stream: UnixStream, scenario: &Scenario) -> Result<()> {
             Request::CancelSession => return Ok(()),
             _ => return fail(&mut stream, "unexpected request"),
         }
-        // The camera time comes after "Looking for your face..." was acknowledged.
+        // The camera time comes after "Looking for your face..." was acknowledged, and half of
+        // it again after "Making sure it's you..." (the liveness votes).
         if !delayed {
             delayed = true;
             thread::sleep(scenario.delay);
+        } else if text.starts_with("Making sure") {
+            thread::sleep(scenario.delay / 2);
         }
     }
     if !scenario.face_match {

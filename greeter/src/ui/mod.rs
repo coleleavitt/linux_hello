@@ -18,6 +18,7 @@ use crate::state::{Effect, Face, Input, Screen, State};
 use crate::users::Account;
 
 mod background;
+mod eye;
 mod hello_icon;
 mod screens;
 
@@ -155,7 +156,7 @@ impl App {
             window.set_decorated(false);
             let main = i == 0;
             if main {
-                self.build_main(&window);
+                self.build_main(&window, &monitor);
             } else {
                 window.set_child(Some(&Background::new(self.options.assets.background.as_deref())));
             }
@@ -201,10 +202,14 @@ impl App {
         self.render();
     }
 
-    fn build_main(self: &Rc<Self>, window: &gtk::Window) {
+    fn build_main(self: &Rc<Self>, window: &gtk::Window, monitor: &gtk::gdk::Monitor) {
         let background = Background::new(self.options.assets.background.as_deref());
-        let lock_screen = LockScreen::new();
+        let lock_screen = LockScreen::new(&self.options.account.display_name);
         let sign_in = SignIn::new(&self.options.account, &self.options.assets);
+        // LockScreenStyles.xaml adaptive sizes: 136/28 px from 1920 logical px, else 98/20.
+        if monitor.geometry().width() >= 1920 {
+            window.add_css_class("xlarge");
+        }
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::SlideUp);
         stack.set_transition_duration(300);
@@ -216,9 +221,9 @@ impl App {
         if self.options.surface == Surface::Window {
             let caption = gtk::Label::new(Some(&self.options.assets.describe()));
             caption.add_css_class("caption");
-            caption.set_halign(gtk::Align::End);
+            caption.set_halign(gtk::Align::Start);
             caption.set_valign(gtk::Align::End);
-            caption.set_margin_end(16);
+            caption.set_margin_start(16);
             caption.set_margin_bottom(8);
             caption.set_wrap(true);
             caption.set_max_width_chars(80);
@@ -229,7 +234,11 @@ impl App {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let this = Rc::clone(self);
-        keys.connect_key_pressed(move |_, key, _, modifiers| {
+        keys.connect_key_pressed(move |controller, key, _, modifiers| {
+            if let Some(main) = this.main.borrow().as_ref() {
+                let caps = controller.current_event_device().is_some_and(|d| d.is_caps_locked());
+                main.sign_in.set_caps_lock(caps);
+            }
             if this.state.borrow().screen == Screen::Lock {
                 this.dispatch(Input::Wake);
                 return glib::Propagation::Stop;
@@ -275,6 +284,18 @@ impl App {
         sign_in.face_option.connect_clicked(move |_| this.dispatch(Input::RetryFace));
         let this = Rc::clone(self);
         sign_in.password_option.connect_clicked(move |_| this.dispatch(Input::UsePassword));
+
+        // Power menu: loginctl through elogind (the greeter has no session bus of its own).
+        let power = gtk::gio::SimpleAction::new("power", Some(glib::VariantTy::STRING));
+        power.connect_activate(|_, verb| {
+            if let Some(verb) = verb.and_then(|v| v.str()) {
+                info!("loginctl {verb}");
+                if let Err(e) = std::process::Command::new("loginctl").arg(verb).spawn() {
+                    warn!("loginctl {verb}: {e}");
+                }
+            }
+        });
+        self.app.add_action(&power);
 
         *self.main.borrow_mut() = Some(MainWindow { window: window.clone(), background, stack, lock_screen, sign_in });
     }

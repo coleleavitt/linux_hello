@@ -298,6 +298,11 @@ impl Session {
         self.decided.and_then(|id| self.tracks.get(&id)).map(|t| &t.attempt)
     }
 
+    /// Whether a tracked face has been recognised (its liveness votes are being counted).
+    pub fn recognised(&self) -> bool {
+        self.tracks.values().any(|t| t.attempt.recognised())
+    }
+
     /// The enroll-on-failure candidate (F31) of a session that saw only one face: Windows aborts
     /// enroll-on-failure when other faces were seen (`AbortingSinceOtherFacesWereSeenDuringTrackedSession`).
     pub fn failed_print(&self) -> Option<&Embedding> {
@@ -553,7 +558,7 @@ impl Authenticator {
     /// template if it was a borderline match (F53) and save the store. After `NOMATCH`, return
     /// the session's enroll-on-failure candidate.
     pub fn verify(&mut self, user: &str) -> Result<Outcome> {
-        self.run(user, None)
+        self.run(user, None, &mut || {})
     }
 
     /// [`Self::verify`] as a presence wait for a lock screen or console login (F55, F57: Windows
@@ -562,10 +567,22 @@ impl Authenticator {
     /// not passed; the session running at the deadline finishes. A wrong or spoofed face ends the
     /// wait as it ends a single check, so a stranger gets no more tries than with `sudo`.
     pub fn verify_within(&mut self, user: &str, deadline: Instant) -> Result<Outcome> {
-        self.run(user, Some(deadline))
+        self.run(user, Some(deadline), &mut || {})
     }
 
-    fn run(&mut self, user: &str, deadline: Option<Instant>) -> Result<Outcome> {
+    /// [`Self::verify`] (`deadline` `None`) or [`Self::verify_within`], calling `on_recognised`
+    /// once, the moment a face is recognised and the liveness votes begin: Windows' "Making
+    /// sure it's you..." (docs/windows-hello-ui.md state 3).
+    pub fn verify_reporting(
+        &mut self,
+        user: &str,
+        deadline: Option<Instant>,
+        on_recognised: &mut dyn FnMut(),
+    ) -> Result<Outcome> {
+        self.run(user, deadline, on_recognised)
+    }
+
+    fn run(&mut self, user: &str, deadline: Option<Instant>, on_recognised: &mut dyn FnMut()) -> Result<Outcome> {
         let nodes = self.cameras.nodes()?;
         if lid::lid_closed() && lid::built_in(&nodes.ir) {
             return Ok(Verdict::LidClosed.into());
@@ -574,6 +591,7 @@ impl Authenticator {
             return Ok(Verdict::NotEnrolled.into());
         }
         let mut cams = OpenCameras::open(&nodes, self.cameras.rotation)?;
+        let mut reported = false;
         let (verdict, session) = loop {
             let mut session = Session::default();
             let verdict = loop {
@@ -582,6 +600,10 @@ impl Authenticator {
                 cams.expose_on(check.largest().map(|f| &f.analysis.face));
                 let verdict = session.add(&check);
                 info!(user, "{}", describe(&check, &session));
+                if !reported && session.recognised() {
+                    reported = true;
+                    on_recognised();
+                }
                 if let Some(verdict) = verdict {
                     break verdict;
                 }
