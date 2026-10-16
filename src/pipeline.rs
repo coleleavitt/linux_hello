@@ -27,6 +27,8 @@ const EDGE_MARGIN_EYES: f32 = 0.2;
 /// What a frame pair gives for recognition.
 #[derive(Debug, Clone)]
 pub struct Analysis {
+    /// Width and height of the IR frame, to normalise face positions (F49)
+    pub frame: [u32; 2],
     /// Largest face, detected on the lit frame
     pub face: Option<Face>,
     /// The same face as the Windows IR detector reports it (box and five points), when the
@@ -132,9 +134,11 @@ impl FacePipeline {
     /// with, F58); without them SCRFD's box and points stand in. The ambient frame is moved onto the
     /// lit one before it is measured and subtracted (F13, F40).
     pub fn analyze(&mut self, pair: &IrPair) -> Result<Analysis> {
+        let frame = [pair.lit.width(), pair.lit.height()];
         let faces = self.detector.detect_gray(&pair.lit)?;
         let Some(face) = faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))) else {
             return Ok(Analysis {
+                frame,
                 face: None,
                 windows_face: None,
                 lighting: None,
@@ -144,7 +148,7 @@ impl FacePipeline {
         };
         let rejected = |face, windows_face, lighting, problem| {
             debug!(?problem, ?lighting, "frame rejected");
-            Ok(Analysis { face: Some(face), windows_face, lighting, problem: Some(problem), print: None })
+            Ok(Analysis { frame, face: Some(face), windows_face, lighting, problem: Some(problem), print: None })
         };
         if let Some(problem) = geometry_problem(&face, pair.lit.width(), pair.lit.height()) {
             return rejected(face, None, None, problem);
@@ -174,7 +178,14 @@ impl FacePipeline {
             _ => pair.lit.clone(),
         };
         let print = self.embedder.embed_face(&gray_to_rgb(&image), &face)?;
-        Ok(Analysis { face: Some(face), windows_face, lighting: Some(lighting), problem: None, print: Some(print) })
+        Ok(Analysis {
+            frame,
+            face: Some(face),
+            windows_face,
+            lighting: Some(lighting),
+            problem: None,
+            print: Some(print),
+        })
     }
 
     /// The ambient frame moved onto the lit one (`AdjustFaceForAmbientLight`, F13): the face's anchors
@@ -247,9 +258,16 @@ impl FacePipeline {
         Ok(total / self.liveness.len() as f32)
     }
 
-    /// Store one print per enrollment frame (no averaging, F28) and save. Unless `force`, refuse
-    /// prints that match another enrolled user (`CheckForDuplicateEnrollment`).
-    pub fn enroll(&mut self, user_id: &str, prints: Vec<Embedding>, force: bool) -> Result<()> {
+    /// The user's template.
+    pub fn template(&self, user: &str) -> Option<&Template> {
+        self.store.get(user)
+    }
+
+    /// Store one print per enrollment frame (no averaging, F28) and save: a new template, or with
+    /// `add` more prints on the existing one (up to [`crate::matcher::MAX_PRINTS`]). Unless `force`,
+    /// refuse prints that match another enrolled user (`CheckForDuplicateEnrollment`). Returns the
+    /// prints stored and the prints in the template afterwards.
+    pub fn enroll(&mut self, user_id: &str, prints: Vec<Embedding>, force: bool, add: bool) -> Result<(usize, usize)> {
         if prints.is_empty() {
             bail!("no enrollment prints");
         }
@@ -260,11 +278,18 @@ impl FacePipeline {
                 m.far
             );
         }
-        let count = prints.len();
-        self.store.add(user_id.to_string(), Template::enrolled(prints));
+        let (stored, total) = if add {
+            let Some(template) = self.store.get_mut(user_id) else { bail!("{user_id} is not enrolled") };
+            let stored = template.add_enrolled(prints);
+            (stored, template.prints.len())
+        } else {
+            let count = prints.len();
+            self.store.add(user_id.to_string(), Template::enrolled(prints));
+            (count, count)
+        };
         self.store.save().context("saving face store")?;
-        info!(user_id, prints = count, "enrolled");
-        Ok(())
+        info!(user_id, prints = stored, total, add, "enrolled");
+        Ok((stored, total))
     }
 
     /// Add a print from a successful unlock to the user's template and save the store (F31).

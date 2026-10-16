@@ -9,6 +9,9 @@ use crate::Embedding;
 
 /// A user is recognised once the session has this many prints and the best one matches (F48, F54).
 pub const MIN_PRINTS: u32 = 4;
+/// Prints a user's template holds at most, enrolled and added together (F54: 100 in the v5
+/// parameter block).
+pub const MAX_PRINTS: usize = 100;
 /// Highest generation of an augmented print: an augmented print may itself seed another one,
 /// at most this many times in a row (F31).
 pub const MAX_GENERATION: u8 = 3;
@@ -49,7 +52,8 @@ pub struct Print {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrintMatch {
     pub similarity: f32,
-    /// Estimated FAR of an attempt whose best comparison is this one ([`CalibrationTable::far`])
+    /// Estimated FAR of an attempt against the compared prints whose best comparison is this one
+    /// ([`CalibrationTable::far`])
     pub far: f64,
     pub generation: u8,
 }
@@ -83,8 +87,25 @@ impl Template {
         Self { prints }
     }
 
-    /// The highest cosine similarity over all prints (the minimum distance, F28), with its FAR
-    /// from `table`.
+    /// Append enrolled prints (`enroll --add`, Windows' "improve recognition"), up to [`MAX_PRINTS`]
+    /// in all; returns how many were taken.
+    pub fn add_enrolled(&mut self, embeddings: impl IntoIterator<Item = Embedding>) -> usize {
+        let before = self.prints.len();
+        self.prints.extend(embeddings.into_iter().take(self.room()).map(|e| Print {
+            features: e.features,
+            generation: 0,
+            source: PrintSource::Enroll,
+        }));
+        self.prints.len() - before
+    }
+
+    /// Prints that can still be added before [`MAX_PRINTS`].
+    pub fn room(&self) -> usize {
+        MAX_PRINTS.saturating_sub(self.prints.len())
+    }
+
+    /// The highest cosine similarity over all prints (the minimum distance, F28), with the FAR of
+    /// an attempt against this many prints from `table`.
     pub fn best_match(&self, probe: &Embedding, table: &CalibrationTable) -> Option<PrintMatch> {
         self.best_match_where(probe, table, |_| true)
     }
@@ -96,12 +117,16 @@ impl Template {
         table: &CalibrationTable,
         keep: impl Fn(&Print) -> bool,
     ) -> Option<PrintMatch> {
-        self.prints
+        let compared: Vec<&Print> = self.prints.iter().filter(|p| keep(p)).collect();
+        compared
             .iter()
-            .filter(|p| keep(p))
             .map(|p| (crate::cosine(&p.features, &probe.features), p.generation))
             .max_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(similarity, generation)| PrintMatch { similarity, far: table.far(similarity), generation })
+            .map(|(similarity, generation)| PrintMatch {
+                similarity,
+                far: table.far(similarity, compared.len()),
+                generation,
+            })
     }
 
     /// Add `probe`, a live frame that matched a print of generation `matched.generation`
@@ -141,7 +166,7 @@ mod tests {
     }
 
     fn matched(similarity: f32, generation: u8) -> PrintMatch {
-        PrintMatch { similarity, far: crate::calibration::lfw_gray().far(similarity), generation }
+        PrintMatch { similarity, far: crate::calibration::lfw_gray().far(similarity, 15), generation }
     }
 
     #[test]
@@ -160,9 +185,21 @@ mod tests {
         let template = Template::enrolled([emb(&[1.0, 0.0]), emb(&[0.0, 1.0]), emb(&[0.6, 0.8])]);
         let m = template.best_match(&emb(&[0.0, 1.0]), &table).unwrap();
         assert!((m.similarity - 1.0).abs() < 1e-6);
-        assert_eq!(m.far, table.far(m.similarity));
+        assert_eq!(m.far, table.far(m.similarity, 3));
         assert_eq!(m.generation, 0);
         assert!(Template::default().best_match(&emb(&[1.0, 0.0]), &table).is_none());
+    }
+
+    #[test]
+    fn added_prints_stop_at_the_per_user_maximum() {
+        let mut template = Template::enrolled((0..MAX_PRINTS - 2).map(|i| emb(&[i as f32, 1.0])));
+        assert_eq!(template.room(), 2);
+        assert_eq!(template.add_enrolled([emb(&[1.0, 0.0]), emb(&[0.0, 1.0]), emb(&[0.5, 0.5])]), 2);
+        assert_eq!(template.prints.len(), MAX_PRINTS);
+        assert_eq!(template.room(), 0);
+        assert_eq!(template.add_enrolled([emb(&[1.0, 0.0])]), 0);
+        let last = template.prints.last().unwrap();
+        assert_eq!((last.features[1], last.generation, last.source), (1.0, 0, PrintSource::Enroll));
     }
 
     #[test]

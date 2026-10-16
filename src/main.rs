@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
 
-use linux_hello::authenticator::describe;
+use linux_hello::authenticator::{describe, describe_skipped, ENROLL_PRINTS};
 use linux_hello::lighting::subtract_ambient;
 use linux_hello::{
     calibration, daemon, sysfs, AntiSpoof, Authenticator, CameraSetup, FacePipeline, LivenessModel, OpenCameras,
@@ -59,15 +59,18 @@ struct Cli {
 enum Commands {
     /// Check whether the person in front of the camera is USER (default: current user)
     Auth { user: Option<String> },
-    /// Enroll a face from the IR camera
+    /// Enroll a face from the IR camera: 16 prints over a few seconds (10 s at most)
     Enroll {
         user: String,
-        /// Frame pairs to keep as prints (each must pass the IR lighting gate)
-        #[arg(long, default_value_t = 5)]
+        /// Prints to collect, each from a frame pair with good IR lighting and a different view
+        #[arg(long, default_value_t = ENROLL_PRINTS)]
         frames: usize,
         /// Enroll even if the face matches another enrolled user
         #[arg(long)]
         force: bool,
+        /// Add the prints to USER's existing template (e.g. with glasses) instead of replacing it
+        #[arg(long)]
+        add: bool,
     },
     /// Remove an enrolled face
     Remove { user: String },
@@ -157,10 +160,30 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Enroll { user, frames, force } => {
+        Commands::Enroll { user, frames, force, add } => {
             let pipeline = pipeline(Vec::new())?;
-            Authenticator { pipeline, cameras }.enroll(&user, frames, force)?;
-            println!("Enrolled {user} with {frames} prints into {}", store.display());
+            let mut auth = Authenticator { pipeline, cameras };
+            println!(
+                "Look at the camera and move your head a little, as when talking to someone: \
+                 {frames} prints are taken over a few seconds."
+            );
+            let mut progress = |n: usize, wanted: usize| {
+                print!("\r{n}/{wanted}");
+                let _ = std::io::stdout().flush();
+            };
+            let result = auth.enroll(&user, frames, force, add, &mut progress);
+            println!();
+            let enrolled = result?;
+            println!(
+                "{} {user} with {} prints ({} in the template, {} wanted) in {:.1} s into {}; skipped frames: {}",
+                if add { "Improved" } else { "Enrolled" },
+                enrolled.stored,
+                enrolled.total,
+                enrolled.wanted,
+                enrolled.elapsed.as_secs_f32(),
+                store.display(),
+                describe_skipped(&enrolled.skipped),
+            );
         }
 
         Commands::Remove { user } => {

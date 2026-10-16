@@ -291,8 +291,13 @@ mod tests {
         assert_eq!(rounded(store.duplicate("carol", &probe, &table)), Some(("bob".into(), 96)));
         // Re-enrolling bob only compares with the others.
         assert_eq!(rounded(store.duplicate("bob", &probe, &table)), Some(("alice".into(), 80)));
-        // At FAR 1e-5 (similarity 0.50) or above it is not a duplicate.
-        assert_eq!(store.duplicate("carol", &[emb(&[0.5, 0.0, 0.866])], &table), None);
+        // At FAR 1e-5 or above it is not a duplicate: against bob's one print (16 comparisons)
+        // that is similarity 0.42; 0.40 to bob (0.24 to alice) is nobody, 0.43 is bob.
+        assert_eq!(store.duplicate("carol", &[emb(&[0.24, 0.32, 0.9165])], &table), None);
+        assert_eq!(
+            rounded(store.duplicate("carol", &[emb(&[0.258, 0.344, 0.9028])], &table)),
+            Some(("bob".into(), 43))
+        );
     }
 
     #[test]

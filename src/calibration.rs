@@ -12,12 +12,10 @@ use std::fs;
 use std::path::Path;
 use tracing::info;
 
+use crate::authenticator::MAX_PAIRS;
+
 /// A face is recognised when its estimated FAR is below this (F27).
 pub const TARGET_FAR: f64 = 1e-5;
-/// Print comparisons one attempt can make: 15 prints × 16 frame pairs, the union bound of
-/// docs/calibration.md. The table gives the FAR of one comparison; the attempt's FAR is that
-/// times this count, as Windows scales its GFP by the number of comparisons (F51, F52).
-pub const ATTEMPT_COMPARISONS: f64 = 240.0;
 
 /// One table row: the false-accept and true-accept rates of one comparison at a similarity.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,10 +70,12 @@ impl CalibrationTable {
         a.fpr + f64::from(similarity - a.similarity) * (b.fpr - a.fpr) / f64::from(b.similarity - a.similarity)
     }
 
-    /// Estimated FAR of an attempt whose best comparison scored `similarity`:
-    /// [`pair_far`](Self::pair_far) × [`ATTEMPT_COMPARISONS`], at most 1. Compared with [`TARGET_FAR`].
-    pub fn far(&self, similarity: f32) -> f64 {
-        (self.pair_far(similarity) * ATTEMPT_COMPARISONS).min(1.0)
+    /// Estimated FAR of an attempt whose best comparison, against a template of `prints` prints,
+    /// scored `similarity`: [`pair_far`](Self::pair_far) × the comparisons the attempt can make,
+    /// `prints` × [`MAX_PAIRS`] (the union bound of docs/calibration.md), at most 1. Windows scales
+    /// its GFP by the number of comparisons too (F51, F52). Compared with [`TARGET_FAR`].
+    pub fn far(&self, similarity: f32, prints: usize) -> f64 {
+        (self.pair_far(similarity) * (prints * MAX_PAIRS as usize) as f64).min(1.0)
     }
 }
 
@@ -131,8 +131,10 @@ mod tests {
         assert_eq!(t.pair_far(0.4), 1e-4);
         assert!(close(t.pair_far(0.7), 1e-4 * (-0.5f64).exp(), 1e-6));
         assert!(close(t.pair_far(1.0), 1e-4 * (-1.0f64).exp(), 1e-6));
-        assert_eq!(t.far(0.3), 1e-3 * ATTEMPT_COMPARISONS);
-        assert_eq!(t.far(0.0), 1.0);
+        // 15 prints × 16 pairs = 240 comparisons; 16 prints × 16 = 256.
+        assert_eq!(t.far(0.3, 15), 1e-3 * 240.0);
+        assert_eq!(t.far(0.3, 16), 1e-3 * 256.0);
+        assert_eq!(t.far(0.0, 15), 1.0);
     }
 
     #[test]
@@ -160,9 +162,14 @@ mod tests {
     fn shipped_table_keeps_the_calibrated_operating_point() {
         let t = lfw_gray();
         assert_eq!(t.name(), "lfw_gray");
-        // The 0.50 row is the per-attempt bound: FAR 1e-5 (to the precision of the JSON float).
-        assert!(close(t.far(0.5), TARGET_FAR, 1e-12));
-        assert!(t.far(0.4999) > TARGET_FAR && t.far(0.5001) < TARGET_FAR);
+        // The 0.50 row is the per-attempt bound for 15 prints: FAR 1e-5 (to the precision of the
+        // JSON float). A 16-print template needs 0.503, a 31-print one (16 enrolled + 10 augmented
+        // + 5 on-failure) 0.525; a single print 0.42.
+        assert!(close(t.far(0.5, 15), TARGET_FAR, 1e-12));
+        assert!(t.far(0.4999, 15) > TARGET_FAR && t.far(0.5001, 15) < TARGET_FAR);
+        assert!(t.far(0.5, 16) > TARGET_FAR && t.far(0.503, 16) < TARGET_FAR);
+        assert!(t.far(0.52, 31) > TARGET_FAR && t.far(0.525, 31) < TARGET_FAR);
+        assert!(t.far(0.42, 1) > TARGET_FAR && t.far(0.43, 1) < TARGET_FAR);
         // The measured FAR points of docs/calibration.md (1e-5 at 0.346, 1e-6 at 0.401) within 10%.
         assert!(close(t.pair_far(0.346), 1e-5, 0.1));
         assert!(close(t.pair_far(0.4007), 1e-6, 0.1));
