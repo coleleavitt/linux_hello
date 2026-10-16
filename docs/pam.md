@@ -17,6 +17,7 @@ runs are pending (2026-10-16). The system-wide install (`contrib/install.sh`) ne
 | `su`, `su-l` | `/etc/pam.d/su` (`su-l` includes it), after `pam_rootok` and `pam_wheel` | su, setuid root | one session for the **target** account (`PAM_USER` is who you become, unlike sudo): `su` to root looks for root's template, which does not exist unless you enroll root with your face (`linux_hello enroll root`; then anyone pam_wheel lets through can become root with that face); `su alice` looks for alice's. Root needs no face (`pam_rootok`), non-wheel users are still refused |
 | `swaylock` | `/etc/pam.d/system-local-login` (`swaylock` includes `login`, which includes it); `/etc/pam.d/swaylock` with `--no-login` | swaylock's PAM child, **as the user** | presence wait, up to 10 s |
 | `login` (console) | `/etc/pam.d/system-local-login` | login, as root | presence wait, up to 10 s |
+| `greetd`, `hello-lock` (hello-greeter, [greeter.md](greeter.md)) | `/etc/pam.d/greetd`, `/etc/pam.d/hello-lock`, own files written by `contrib/install-greeter.sh` | greetd's worker as root / the locker as the user | presence wait, `password_prompt` |
 | `system-login`, `system-remote-login`, `sshd` | never | | the module also returns `PAM_IGNORE` on its own when `SSH_CONNECTION`, `SSH_TTY` or `PAM_RHOST` is set |
 
 The line is the same everywhere, placed right before the password stack (the first
@@ -29,10 +30,27 @@ auth		sufficient	pam_linux_hello.so
 Module arguments: `socket=PATH` (default `/run/linux_hello.sock`), `timeout=SECONDS` (the
 presence wait, default 10), `wait_services=NAME,NAME` (the services that get a presence wait,
 default `swaylock,login`; `wait_services=` turns it off, `wait_services=swaylock,login,hyprlock`
-adds a locker). The module reads `PAM_SERVICE` (the name the application gave `pam_start`; an
-`include` does not change it) and sends `AUTH <user> <timeout>` for a wait service, `AUTH <user>`
-otherwise. The reply's first word decides, as before; a reply may go on with `NOTICE <text>`
-lines (below).
+adds a locker), `password_prompt` (below, for `hello-greeter` only). The module reads
+`PAM_SERVICE` (the name the application gave `pam_start`; an `include` does not change it) and
+sends `AUTH <user> <timeout>` for a wait service, `AUTH <user>` otherwise. The reply's first
+word decides, as before; a reply may go on with `NOTICE <text>` lines (below).
+
+### `password_prompt` (the greeter's lines)
+
+A greeter that looks for the face over and over cannot cancel a PAM stack: a cancelled
+`pam_unix` prompt is a failed login for `pam_faillock authfail` (`system-auth`; three in 15 min
+lock the password for 10 min). On a line
+
+```
+auth  [success=done conv_err=die default=ignore]  pam_linux_hello.so password_prompt wait_services=greetd timeout=10
+```
+
+the module asks for the password itself after anything but a match (`PAM_PROMPT_ECHO_OFF`
+"Password") and leaves the answer in `PAM_AUTHTOK`, so `pam_unix try_first_pass` never prompts;
+an empty answer or a failed conversation returns `PAM_CONV_ERR` and `conv_err=die` ends the
+stack before the password modules. The greeter answers only that prompt (its text tells it from
+`pam_unix`'s "Password: "). Checked through real libpam with the real module in
+`greeter/tests/pam.rs`; details in [greeter.md](greeter.md).
 
 ### One session (sudo, polkit, su)
 
