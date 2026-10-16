@@ -34,13 +34,13 @@ pub use camera::{Camera, CameraNodes, CameraType, IrCamera, IrFrame, IrPair, Rot
 pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
 pub use lighting::{Lighting, LightingStatus};
-pub use liveness::{LivenessSession, LivenessState, Vote};
+pub use liveness::{Check, LivenessSession, LivenessState, Vote};
 pub use matcher::{Condition, Print, PrintMatch, PrintSource, Template};
 pub use ms_models::{FaceOrientation, IrFaceOrientation, LbfAligner, WindowsHelloModels};
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
 pub use ms_models::{OcclusionDetector, OcclusionResult, OcclusionType};
-pub use pipeline::{ColorNet, FacePipeline, FrameCheck};
+pub use pipeline::{ColorNet, FaceCheck, FacePipeline, FrameCheck};
 pub use store::{FaceStore, OnFailure};
 pub use tracker::FaceTracker;
 
