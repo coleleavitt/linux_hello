@@ -274,6 +274,68 @@ IR-calibrated table for this camera needs impostor IR captures (Caveats). `cargo
 file: the 0.50 ↔ 1e-5 point, the measured 1e-5 and 1e-6 points within 10 %, monotonic FAR over −1…1, and the
 default for an unlisted camera.
 
+## IR impostor check (`examples/impostor_capture`, `examples/calibrate_ir`)
+
+The table above is LFW, not this camera. The check that closes that gap for one household or office is
+real IR frames of people who are not the owner, scored exactly as an unlock would score them.
+
+**Collect.** Ask a volunteer who is not enrolled; say what is recorded (IR face frames, kept on this
+machine, deletable with the directory) and record only with their consent. Then, with the owner away
+from the camera:
+
+```sh
+cargo build --release --examples
+LINUX_HELLO_MODELS=models target/release/examples/impostor_capture /tmp/impostor_<name> --frames 32   # ≤ 60 s
+```
+
+The volunteer looks at the camera and moves a little, as when enrolling. Only pairs that would give a
+print in an unlock with good lighting are kept (`FacePipeline::analyze`: face ≥ 72 px, away from the
+edges, frontal, not occluded, lit 35–205, lit − ambient ≥ 45, ambient ≤ 25), with the face-metered
+exposure, as `NNNN_lit.png` / `NNNN_ambient.png` plus `frames.jsonl` (box, brightness). Several
+volunteers, several sittings (glasses, lighting, distance) are worth more than many frames of one
+sitting: consecutive frames of one person score 0.96–0.99 against each other, so 32 frames of one
+sitting are nearly one sample. Relatives are the sample that matters most. Genuine frames come the
+same way from the owner (or from `linux_hello watch`, whose `NNNN_lit/ambient.png` have the same layout).
+
+**Score.**
+
+```sh
+LINUX_HELLO_MODELS=models target/release/examples/calibrate_ir --store ~/.local/share/linux_hello/faces.json \
+    cole /tmp/impostor_<name> [/tmp/genuine]          # one directory per run; or --template-from <owner frames dir>
+```
+
+Every pair goes through `FacePipeline::analyze` (the pipeline's own crop: largest face, ambient-
+subtracted ArcFace input, every frame gate; the Windows Hello gates when the converted models are
+present), so the print is the one an unlock compares. A `*_lit.png` without its ambient frame is
+subtracted against a black frame (the lit crop as is); a visible-light photo (anything that is not a
+lit/ambient/dark/diff/rgb frame) gets every SCRFD face embedded on the grayscale image, as the LFW
+table was built — pseudo-impostors for a dry run, not IR data. Per frame it prints the best
+similarity over the template and the estimated per-attempt FAR (`CalibrationTable::far`, charged
+for the template size); then:
+
+- impostor frames: median and max best-of-template similarity; how many are **recognised**
+  (FAR < 1e-5); how many score ≥ 0.35; how many reach the enroll-on-failure threshold 0.40;
+- genuine frames (if given): min and median similarity, how many would not be recognised on their own;
+- every impostor print against every template print, per table row: the FPR the table claims, the
+  comparisons expected above the row, the comparisons observed (rows where the table expects fewer
+  than 0.5 are left out: 32 frames × 16 prints = 512 comparisons only reach the 0.200–0.225 rows).
+
+**What counts as a pass.** `PASS` when no impostor frame is recognised and none scores ≥ 0.35.
+0.35 is the point where, on grayscale LFW, a stranger's best similarity over 15 prints is seen in
+about 4 of 100,000 probes: one real impostor frame there says the IR scores sit well above the
+table and the table is not usable for this camera as it stands. The comparison rows are a
+plausibility check, not a fit: with hundreds of comparisons of a few people only the first rows
+are measurable, and if the observed counts run several times above the expected ones the IR
+distribution is wider than LFW's. A genuine frame below 0.50 is a recognition miss worth a look
+(lighting, glasses), not a failure of the impostor check. Any impostor frame ≥ 0.40 means
+enroll-on-failure (off by default) could add that person after a password; keep it off, or note
+who.
+
+Checked on the saved validation frames (template = `watch_0014` + `watch_0147`, 2 prints): the six
+faces of the stranger photo score −0.063…0.028 (FAR ≥ 0.29 per attempt, none recognised), the
+other two frontal owner frames 0.983 and 0.965 (FAR 1.3e-8); the `ir_NN` pairs give no print (the
+chin is cut, edge gate), which is the gate working. No real IR impostor has been captured yet.
+
 ## Caveats
 
 - **IR vs grayscale LFW.** linux_hello sees an 850 nm IR image with its own illuminator. Grayscale LFW
