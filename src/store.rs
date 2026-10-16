@@ -197,7 +197,7 @@ impl FaceStore {
     pub fn get_mut(&mut self, user_id: &str) -> Option<&mut Template> {
         self.faces.get_mut(user_id)
     }
-    
+
     /// The other enrolled user that one of `prints` matches (similarity above [`MATCH_THRESHOLD`]),
     /// with the similarity; the closest one if several do (`CheckForDuplicateEnrollment`).
     pub fn duplicate(&self, user: &str, prints: &[Embedding]) -> Option<(&str, f32)> {
