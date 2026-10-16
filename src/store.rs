@@ -121,7 +121,8 @@ impl FaceStore {
 
     fn format_error(&self) -> String {
         format!(
-            "parsing face store {} (stores from before multi-print templates must be re-enrolled)",
+            "parsing face store {0} (a store from before multi-print templates: move it aside, e.g. \
+             `mv {0} {0}.old`, and enroll again)",
             self.path.display()
         )
     }

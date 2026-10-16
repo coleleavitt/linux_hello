@@ -33,6 +33,14 @@ if [ -d "$ms" ]; then
 fi
 install -m755 "$repo/contrib/openrc/linux_hello" /etc/init.d/linux_hello
 
+# A store from before multi-print templates (one `features` vector per user) cannot be read:
+# keep it as a backup and enroll from scratch.
+store=/var/lib/linux_hello/faces.json
+if [ -f "$store" ] && ! grep -q '"prints"\|"format"' "$store"; then
+    mv "$store" "$store.pre-multiprint"
+    echo "old face store moved to $store.pre-multiprint"
+fi
+
 echo "== enroll $user (look at the camera)"
 LINUX_HELLO_MODELS="$share/models" /usr/local/bin/linux_hello -v warn enroll "$user"
 
