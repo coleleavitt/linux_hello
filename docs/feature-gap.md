@@ -27,9 +27,9 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Pair unlit + next lit frame, ambient < 300 ms older (F12, F13) | **Done**: consecutive lit/ambient frames < 300 ms apart by buffer timestamps (either order) | — |
-| Ambient crop = previous face crop + 100 px per side (F39) | Different: whole ambient frame is kept and subtracted | Crop around last known box to save work (optimisation only) |
-| Recognition image = lit − min(lit, warped ambient), affine from eye/eye/mouth anchors, only when lighting status = 1 (F13, F40) | **Done without warp**: whole-frame `lit − min(lit, ambient)` for status 1, lit frame otherwise; no affine motion compensation (frames 67 ms apart) | Affine warp: 3 anchor means → 2×3 solve |
-| Liveness image = lit − min(lit, ambient) unwarped, only if status 1 and ambient ≤ 25 (F40) | N/A until an IR liveness model exists (the difference image is computed for recognition) | — |
+| Ambient crop = previous face crop + 100 px per side (F39) | Different: the whole ambient frame is warped and subtracted (1.5 ms at 640×360) | Crop around last known box to save work (optimisation only) |
+| Recognition image = lit − min(lit, warped ambient), affine from eye/eye/mouth anchors, only when lighting status = 1 (F13, F40) | **Done**: the ambient frame is warped onto the lit one by the affine through the three anchors (eyes, mouth midpoint), their ambient-frame positions interpolated from the previous lit frame (< 300 ms, same face) — capture-and-liveness.md §4; the first pair of a face is subtracted as captured | — |
+| Liveness image = lit − min(lit, ambient) unwarped, only if status 1 and ambient ≤ 25 (F40) | **Done**: the diffusion net gets the unwarped difference (`MsIrLiveness::frame`), the recognition print the warped one | — |
 | Single-slot hand-off, newest frame wins (F11) | Done (sequential capture loop) | — |
 | Driver background-subtraction mode (FACEAUTH_MODE 4) + background brightness check (F9, F44) | N/A (camera does alternate frames) | — |
 
@@ -37,16 +37,16 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | **Done** (largest face only): SCRFD per pair on the lit frame; `FaceTracker` follows the largest face by box IoU ≥ 0.3, dropped after 7 pairs (≈ 1 s, F37) without a face. The Windows IR Retina detector (MODEL_FILES_110, `MsRetinaDetector`) runs on the lit frame for the frontal check only; its box and landmarks are not used | — |
-| 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | Partial: SCRFD 5 points in the pipeline; Windows' 31 points are available from `LbfAligner` (bit-exact port) but not used yet | Use `LbfAligner` points for the F43 brightness box and the F13 anchors |
+| Detection on the lit frame, tracker across frames (FaceTrackerInternal, RetinaEngine ONNX or LBF aligner) (Q5, F58) | **Done** (largest face only): SCRFD per pair on the lit frame; `FaceTracker` follows the largest face by box IoU ≥ 0.3, dropped after 7 pairs (≈ 1 s, F37) without a face. The Windows IR Retina detector (MODEL_FILES_110, `MsRetinaDetector`) runs on the lit frame; its face overlapping SCRFD's (`Analysis::windows_face`) gives the frontal check, the brightness block, the ambient-warp anchors, the occlusion box and the liveness crops | — |
+| 31-point landmark set (5 RetinaFace + eye contours + mouth) (F58) | **Done** as on Windows' RetinaEngine path: points 0–4 are the Windows IR detector's five, and points 5–30 are copies of them (`RetinaEngine::ComputeAlignment`, lbf.md "Which aligner runs"), so the F43 block and the F13 anchors follow from the five Retina points (`lighting::face_brightness`, `lighting::anchors`). The LBF aligner only runs on Windows' legacy path; `LbfAligner` stays a diagnostic (`examples/ms_check`) | — |
 | Recognition crop 3× box, ≤ 400 px, 8-bit lit luminance (F38) | Different: ArcFace 112×112 aligned crop from the RGB-converted IR frame | Keep ArcFace alignment; do subtraction on a 3× crop before aligning |
-| Face brightness = mean of 2×2-subsampled cheek/nose box (F43) | **Done** (approximation): box between eyes and mouth corners from SCRFD's 5 points (`lighting::face_brightness`) | — |
+| Face brightness = mean of 2×2-subsampled cheek/nose box (F43) | **Done**: block between the eye centres and the mouth corners of the Windows IR detector's five points (on Windows' Retina path the eye-contour points p9/p15 are the eye centres); ambient brightness on the warped ambient frame; SCRFD's points without the Windows models | — |
 | Exposure status: > 205 too bright, < 35 too dark, clipped pixels > 1 % → reject (F44, F45) | **Done** for 205/35 (rejected, no print, no vote); clipped-pixel statuses 6/7 Missing | Add saturated-pixel count (pixel = 255 or equal to ±2 neighbours) |
 | Lit − ambient ≥ 45, ambient ≤ 25 (F14, F44) | **Done**: otherwise status 4 (print kept for matching, no vote, no augmentation) | — |
 | Min face width 72 px and ≥ 0.12 × min(frame w,h) (F46, F54) | **Done** (`too_far`) | — |
 | Edge cut: box ≥ inter-ocular/5 from border (F46) | **Done** (`edge`, frame rejected) | — |
 | Frontal pose: \|yaw\| ≤ 20°, \|pitch\| ≤ 25° (F46, F59) | **Done** (with the converted models): `FacePipeline::analyze` takes the pose of the Windows IR Retina detector (MODEL_FILES_110, `RetinaEngine::ComputeOrientation` angle order, F59) for the face overlapping SCRFD's; not frontal or no such face → `NOFACE not_frontal`. All 4 frontal owner frames pass (ldmf.md §11) | — |
-| Occlusion detectors (eyes, mouth/nose, face; ONNX); 4 consecutive occluded frames → give up; occlusion mode after 30 frames ≥ 50 % (F46, F61) | **Partial**: face-level occlusion gate in `FacePipeline::analyze` (converted Windows Hello model, used when `models/windows_hello/converted` exists; 1 − p_none > 0.9, 0.5 while enrolling; face-box input as in `sub_18004B5B8`); occluded frames give no print and the reply `NOFACE occluded`. The 4-frame give-up and occlusion mode are Missing | — |
+| Occlusion detectors (eyes, mouth/nose, face; ONNX); 4 consecutive occluded frames → give up; occlusion mode after 30 frames ≥ 50 % (F46, F61) | **Partial**: face-level occlusion gate in `FacePipeline::analyze` (converted Windows Hello model, used when `models/windows_hello/converted` exists; 1 − p_none > 0.9, 0.5 while enrolling; face-box input as in `sub_18004B5B8`, the Windows IR detector's box); occluded frames give no print and the reply `NOFACE occluded`. The 4-frame give-up and occlusion mode are Missing | — |
 | Re-attempt by movement (centre range > 0.01, size ±20 %) or exposure (σ > 12) before rejecting (F49) | Missing (fixed 16 frame pairs) | Keep per-session stats; extend the session once on movement/exposure change |
 | Colour-face correspondence + colour quality (edge cut, too close/far, low-confidence alignment) (`EvaluateColorFaceQuality`) | Partial: largest face on RGB, no geometric correspondence to IR face | Map IR box to RGB with a fixed extrinsic offset; reject if none |
 
@@ -54,7 +54,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| IR CNNs (general on lit crop, diffusion on difference crop), 128×128×1, SqueezeNet, cosine 2×512 head (F22, F23, F42, F62) | **Done** (converted Windows Hello model, used when `models/windows_hello/converted` exists): good-lighting frames run the diffusion net (slot 12) on the difference image, flag-on mode-0 thresholds; the frame total (F25) must be > 0 together with the lighting gate for a live vote (`Vote::from_evidence`). The general net (slot 11) runs only in `examples/ms_check` | — |
+| IR CNNs (general on lit crop, diffusion on difference crop), 128×128×1, SqueezeNet, cosine 2×512 head (F22, F23, F42, F62) | **Done** (converted Windows Hello model, used when `models/windows_hello/converted` exists): good-lighting frames run the diffusion net (slot 12) on the difference image, crop aligned on the Windows IR detector's five points (F23), flag-on mode-0 thresholds; the frame total (F25) must be > 0 together with the lighting gate for a live vote (`Vote::from_evidence`). The general net (slot 11) runs only in `examples/ms_check` | — |
 | Colour CNN veto (BGR 128×128) (F22, F62) | **Done**: with the Windows Hello models, their colour net (slot 13) on the face found in the RGB frame; without them, FaceNox + MiniFASNetV2 mean < 0.5 vetoes a frame (−2, so a vetoed frame is a spoof vote) | — |
 | Multi-task IR border / HH vetoes, enabled after first live vote (F22, F42) | **Done** (converted Windows Hello model, used when `models/windows_hello/converted` exists); they run on every good-lighting frame, not only after the first live vote, which can only add vetoes. The colour net (slot 13) runs on the face detected in the RGB frame | — |
 | Thresholds: IR live > 0.5 (strict 0.9), spoof > 0.5 strict only; colour 0.5; border 0.7 (F24) | Partial: 0.5 on RGB mean | Use per-model thresholds once IR model exists |
@@ -70,7 +70,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Embedding CNN on 128×128×1 IR crop, ~256-d (F30) | Done differently: ArcFace R50/MBF 112×112 RGB-replicated IR, 512-d | — (Windows models are proprietary) |
 | Distance 1 − cos, clamped ≤ 1 (F50) | Done (cosine similarity) | — |
 | Min distance over all stored prints (+coupled mean/pair prints) (F28) | **Done** (max cosine over prints); coupled prints Missing | Coupled prints optional |
-| Distance → FAR via per-hardware calibration table, × 1…4 correction; accept FAR < 1e-5 (F27, F51) | Partial: fixed cosine `MATCH_THRESHOLD` 0.50 from `docs/calibration.md` (FAR ≤ 1e-5 per attempt on LFW) | Store a (FAR, distance) table per camera/model and threshold on FAR; collect IR genuine/impostor data on this camera |
+| Distance → FAR via per-hardware calibration table, × 1…4 correction; accept FAR < 1e-5 (F27, F51) | **Done** (same structure, LFW data): `models/calibration.json` holds (FPR, TAR, similarity) rows per camera (USB `vid:pid`) with a default; `CalibrationTable::pair_far` interpolates as `sub_1800397B4` (linear, exponential past the best row), × 240 comparisons per attempt (15 prints × 16 pairs) stands in for Windows' × 1…4; recognised when `far < 1e-5` (`TARGET_FAR`), the former 0.50. Logs print `far=` next to `similarity=` | Collect IR genuine/impostor data on this camera for an IR-calibrated table (`docs/calibration.md`, "Calibration table") |
 | ≥ 4 prints on the track before deciding (F48, F54) | **Done** per track: a new track starts a new `Attempt` (prints, best similarity, votes) within the 16-pair session | — |
 | 1:N with "closer to another tracked/enrolled user" check (F48) | N/A by design: 1:1 for the PAM user | Could add: reject if another enrolled user scores higher |
 | Recognise first, then liveness on the same track (F47, F48) | **Done** (`Attempt`) | — |
@@ -80,14 +80,14 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Multi-pose enrolment, 16 prints, quality-gated frames, registration per hardware model (F54, Q5) | Partial: 5 individual prints, each from a gated good-lighting frame; no pose guidance | Guide the user through slight poses; more prints |
-| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | **Done**: `enroll` refuses when a new print matches another user's template above `MATCH_THRESHOLD` (0.50) and names that user; `--force` overrides | — |
-| Per-hardware-model registrations (`Registration`, `HardwareModelContainer`) (F51) | N/A (single camera) | Store camera id with prints if a second camera is used |
+| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | **Done**: `enroll` refuses when a new print matches another user's template (estimated FAR < 1e-5, i.e. similarity > 0.50) and names that user; `--force` overrides | — |
+| Per-hardware-model registrations (`Registration`, `HardwareModelContainer`) (F51) | N/A (single camera); the calibration table is per camera (above), the prints are not | Store camera id with prints if a second camera is used |
 
 ## Template update
 
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
-| Enroll-on-success: after a live success, borderline match (GFP in [FAR/2, FAR]), once per session, generation < 3, FIFO eviction (F31, F53) | **Done**: best live print with similarity in (0.50, 0.55], once per session, generation ≤ 3, ≤ 10 augmented (FIFO) | — |
+| Enroll-on-success: after a live success, borderline match (GFP in [FAR/2, FAR]), once per session, generation < 3, FIFO eviction (F31, F53) | **Done**: best live print with estimated FAR in [5e-6, 1e-5) (similarity 0.50–0.52 with the shipped table), once per session, generation ≤ 3, ≤ 10 augmented (FIFO) | — |
 | Enroll-on-failure: add print after face fail + password success, relaxed threshold, must not match others (F31, `EnrollOnFailure*Threshold`) | **Done**, opt-in (`daemon --enroll-on-failure`): after `NOMATCH` of one real (≥ 2 live votes), unrecognised face, the best live print waits ≤ 60 s in the daemon; `pam_sm_setcred` after the password success of the same PAM transaction (token) commits it if similarity to the enrolled/augmented prints ≥ 0.40 and no other user matches; ≤ 5 such prints (FIFO); root only (`SO_PEERCRED`). Windows' threshold values are runtime policy data, not recovered | — |
 | Print categories (normal, on-failure, on-success, flags) used as verification conditions (F28) | Partial: prints are tagged `enroll`, `augment`, `on_failure`; all are matched alike; on-failure prints are left out of the enroll-on-failure check and never seed augmentation | Per-category thresholds if needed |
 
@@ -124,7 +124,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 |---|---|---|
 | Multiple tracked faces, multiple enrolled users, best-user assignment (F47, F48) | N/A by design (1:1 for the requested user); largest face only | Optionally reject if a second face is present (shoulder-surfer case) |
 | Sensor allow-list, device watcher, camera re-selection (`SensorAllowListManager`, `SensorEnumeration`) | Partial: fixed device paths / CLI | udev-based discovery |
-| Per-hardware calibration tables (F51, F60) | Missing | One table per camera model in the store or config |
+| Per-hardware calibration tables (F51, F60) | **Done** (structure): `models/calibration.json` maps the IR camera's USB `vid:pid` (sysfs `idVendor:idProduct`, `sysfs::usb_id`; here `30c9:00f3`) to a named table, with a default for unlisted cameras; the only table is the LFW one | An IR-calibrated table per camera; Windows' hardware-model ids are not mapped to cameras (cefa.md §7) |
 
 ## Anything else
 

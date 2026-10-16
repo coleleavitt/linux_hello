@@ -3,13 +3,18 @@
 
 use anyhow::{bail, Context, Result};
 use image::{GrayImage, RgbImage};
+use std::borrow::Cow;
 use std::path::Path;
+use std::time::Duration;
 use tracing::{debug, info};
 
-use crate::lighting::{subtract_ambient, Lighting, LightingStatus};
+use crate::calibration::CalibrationTable;
+use crate::camera::MAX_PAIR_GAP;
+use crate::lighting::{self, subtract_ambient, Lighting, LightingStatus};
+use crate::tracker::{iou, MIN_IOU};
 use crate::{
     gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
-    OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
+    MsRetinaFace, OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
 };
 
 /// Minimum face box width in pixels (F46, F54).
@@ -24,6 +29,9 @@ const EDGE_MARGIN_EYES: f32 = 0.2;
 pub struct Analysis {
     /// Largest face, detected on the lit frame
     pub face: Option<Face>,
+    /// The same face as the Windows IR detector reports it (box and five points), when the
+    /// Windows Hello models run: Windows' crops and landmarks come from it (F23, F43, F58)
+    pub windows_face: Option<Face>,
     pub lighting: Option<Lighting>,
     /// Why there is no print; `None` when there is one
     pub problem: Option<FaceProblem>,
@@ -47,7 +55,7 @@ pub struct FrameCheck {
     /// Windows Hello anti-spoofing frame vote; only for good-lighting frames
     pub windows: Option<MsFrame>,
     pub vote: Vote,
-    /// Closest print of the user's template
+    /// Closest print of the user's template, with its estimated FAR
     pub best: Option<PrintMatch>,
 }
 
@@ -57,6 +65,17 @@ pub struct FacePipeline {
     liveness: Vec<AntiSpoof>,
     windows: Option<WindowsHelloModels>,
     store: FaceStore,
+    /// Similarity → FAR for this camera (F51)
+    calibration: CalibrationTable,
+    /// The face of the last lit frame, for the ambient warp of the next pair (F13)
+    previous: Option<LitFace>,
+}
+
+/// Where a lit frame's face was, for the motion compensation of the ambient frame (F13).
+struct LitFace {
+    at: Duration,
+    bbox: [f32; 4],
+    anchors: [[f32; 2]; 3],
 }
 
 impl FacePipeline {
@@ -66,12 +85,13 @@ impl FacePipeline {
         embedder_path: impl AsRef<Path>,
         liveness: Vec<AntiSpoof>,
         store_path: impl AsRef<Path>,
+        calibration: CalibrationTable,
     ) -> Result<Self> {
         info!("initializing face pipeline");
         let detector = FaceDetector::load(detector_path)?;
         let embedder = FaceEmbedder::load(embedder_path)?;
         let store = FaceStore::load(store_path)?;
-        Ok(Self { detector, embedder, liveness, windows: None, store })
+        Ok(Self { detector, embedder, liveness, windows: None, store, calibration, previous: None })
     }
 
     /// Add the Windows Hello anti-spoofing vote and the occlusion and frontal gates.
@@ -106,31 +126,81 @@ impl FacePipeline {
     /// Find the face on the lit frame, apply the size and edge gates (F46), the lighting status
     /// (F44, F45) and, with the Windows Hello models, the occlusion and frontal gates (F46, F59), and
     /// embed the face if the frame is usable.
+    ///
+    /// With the Windows Hello models the lighting status, the occlusion crop and the frontal check use
+    /// the face of the Windows IR detector that overlaps the SCRFD face (the detector Windows tracks
+    /// with, F58); without them SCRFD's box and points stand in. The ambient frame is moved onto the
+    /// lit one before it is measured and subtracted (F13, F40).
     pub fn analyze(&mut self, pair: &IrPair) -> Result<Analysis> {
         let faces = self.detector.detect_gray(&pair.lit)?;
         let Some(face) = faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))) else {
-            return Ok(Analysis { face: None, lighting: None, problem: Some(FaceProblem::NoFace), print: None });
+            return Ok(Analysis {
+                face: None,
+                windows_face: None,
+                lighting: None,
+                problem: Some(FaceProblem::NoFace),
+                print: None,
+            });
         };
-        let lighting = Lighting::measure(&pair.lit, &pair.ambient, &face);
-        let problem = geometry_problem(&face, pair.lit.width(), pair.lit.height()).or(match lighting.status() {
+        let rejected = |face, windows_face, lighting, problem| {
+            debug!(?problem, ?lighting, "frame rejected");
+            Ok(Analysis { face: Some(face), windows_face, lighting, problem: Some(problem), print: None })
+        };
+        if let Some(problem) = geometry_problem(&face, pair.lit.width(), pair.lit.height()) {
+            return rejected(face, None, None, problem);
+        }
+        let retina = match &mut self.windows {
+            Some(w) => w.retina.matching(&pair.lit, &face)?.map(|(f, _)| f),
+            None => None,
+        };
+        let windows_face = retina.as_ref().map(|f| f.face.clone());
+        let points = windows_face.as_ref().unwrap_or(&face).landmarks;
+        let ambient = self.compensated_ambient(pair, &face.bbox, &points);
+        let lighting = Lighting::measure(&pair.lit, &ambient, &points);
+        let problem = match lighting.status() {
             LightingStatus::TooDark => Some(FaceProblem::TooDark),
             LightingStatus::TooBright => Some(FaceProblem::TooBright),
             LightingStatus::Good | LightingStatus::Weak => None,
-        });
+        };
         let problem = match (problem, &mut self.windows) {
-            (None, Some(w)) => windows_problem(w, &pair.lit, &face)?,
+            (None, Some(w)) => windows_problem(w, &pair.lit, retina.as_ref())?,
             (problem, _) => problem,
         };
         if let Some(problem) = problem {
-            debug!(?problem, lit = lighting.lit, ambient = lighting.ambient, "frame rejected");
-            return Ok(Analysis { face: Some(face), lighting: Some(lighting), problem: Some(problem), print: None });
+            return rejected(face, windows_face, Some(lighting), problem);
         }
         let image = match lighting.status() {
-            LightingStatus::Good => subtract_ambient(&pair.lit, &pair.ambient),
+            LightingStatus::Good => subtract_ambient(&pair.lit, &ambient),
             _ => pair.lit.clone(),
         };
         let print = self.embedder.embed_face(&gray_to_rgb(&image), &face)?;
-        Ok(Analysis { face: Some(face), lighting: Some(lighting), problem: None, print: Some(print) })
+        Ok(Analysis { face: Some(face), windows_face, lighting: Some(lighting), problem: None, print: Some(print) })
+    }
+
+    /// The ambient frame moved onto the lit one (`AdjustFaceForAmbientLight`, F13): the face's anchors
+    /// in the ambient frame are taken by linear motion from where they were in the previous lit frame,
+    /// if that frame is less than 300 ms old and shows the same face (box overlap as the tracker). The
+    /// first pair of a face is subtracted as captured.
+    fn compensated_ambient<'a>(
+        &mut self,
+        pair: &'a IrPair,
+        bbox: &[f32; 4],
+        points: &[[f32; 2]; 5],
+    ) -> Cow<'a, GrayImage> {
+        let anchors = lighting::anchors(points);
+        let previous = self.previous.replace(LitFace { at: pair.lit_at, bbox: *bbox, anchors });
+        let Some(previous) = previous
+            .filter(|p| p.at < pair.lit_at && pair.lit_at - p.at < MAX_PAIR_GAP && iou(&p.bbox, bbox) >= MIN_IOU)
+        else {
+            return Cow::Borrowed(&pair.ambient);
+        };
+        let nanos = |d: Duration| d.as_nanos() as f64;
+        let t = (nanos(pair.ambient_at) - nanos(pair.lit_at)) / (nanos(previous.at) - nanos(pair.lit_at));
+        let in_ambient = lighting::interpolate(&anchors, &previous.anchors, t as f32);
+        match lighting::affine_from_anchors(&anchors, &in_ambient) {
+            Some(m) => Cow::Owned(lighting::warp(&pair.ambient, &m)),
+            None => Cow::Borrowed(&pair.ambient),
+        }
     }
 
     /// Run every stage on one frame pair. The face is compared only with `user`'s template.
@@ -141,7 +211,9 @@ impl FacePipeline {
         let (Some(print), Some(face)) = (&analysis.print, &analysis.face) else {
             return Ok(FrameCheck { analysis, liveness: None, windows: None, vote: Vote::Abstain, best: None });
         };
-        let best = self.store.get(user).and_then(|t| t.best_match(print));
+        // The Windows nets take Windows' landmarks for their crop (F23).
+        let face = analysis.windows_face.as_ref().unwrap_or(face);
+        let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration));
         if analysis.status() != Some(LightingStatus::Good) {
             let vote = Vote::from_evidence(false, None, None);
             return Ok(FrameCheck { analysis, liveness: None, windows: None, vote, best });
@@ -181,9 +253,11 @@ impl FacePipeline {
         if prints.is_empty() {
             bail!("no enrollment prints");
         }
-        if let (false, Some((other, similarity))) = (force, self.store.duplicate(user_id, &prints)) {
+        if let (false, Some((other, m))) = (force, self.store.duplicate(user_id, &prints, &self.calibration)) {
             bail!(
-                "this face matches enrolled user {other} (similarity {similarity:.3}); use --force to enroll it anyway"
+                "this face matches enrolled user {other} (similarity {:.3}, FAR {:.1e}); use --force to enroll it anyway",
+                m.similarity,
+                m.far
             );
         }
         let count = prints.len();
@@ -207,7 +281,7 @@ impl FacePipeline {
     /// Enroll-on-failure (F31): add `print` to the user's template if [`FaceStore::add_on_failure`]
     /// accepts it, and save the store.
     pub fn add_on_failure(&mut self, user_id: &str, print: &Embedding) -> Result<OnFailure> {
-        let result = self.store.add_on_failure(user_id, print);
+        let result = self.store.add_on_failure(user_id, print, &self.calibration);
         if let OnFailure::Added { .. } = result {
             self.store.save().context("saving face store")?;
         }
@@ -231,17 +305,21 @@ fn area(f: &Face) -> f32 {
     (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
 }
 
-/// Gates that need the Windows Hello models: occlusion, then the frontal check (F46, F59) with the
-/// pose of the Windows IR detector's face that overlaps the SCRFD face (`RetinaEngine::ComputeOrientation`).
-/// When that detector has no such face, Windows tracks no face and gets no orientation, so the frame is
-/// not frontal either.
-fn windows_problem(w: &mut WindowsHelloModels, lit: &GrayImage, face: &Face) -> Result<Option<FaceProblem>> {
-    if w.occlusion.check(lit, face)?.is_occluded {
+/// Gates that need the Windows Hello models, on `retina`, the Windows IR detector's face that overlaps
+/// the SCRFD face: occlusion on its box, then the frontal check (F46, F59) with its pose
+/// (`RetinaEngine::ComputeOrientation`). When that detector has no such face, Windows tracks no face
+/// and gets no orientation, so the frame is not frontal either.
+fn windows_problem(
+    w: &mut WindowsHelloModels,
+    lit: &GrayImage,
+    retina: Option<&MsRetinaFace>,
+) -> Result<Option<FaceProblem>> {
+    let Some(retina) = retina else { return Ok(Some(FaceProblem::NotFrontal)) };
+    if w.occlusion.check(lit, &retina.face)?.is_occluded {
         return Ok(Some(FaceProblem::Occluded));
     }
-    let orientation = w.retina.matching(lit, face)?.and_then(|(f, _)| f.orientation);
-    debug!(?orientation, "IR detector pose");
-    Ok((!orientation.is_some_and(|o| o.is_frontal())).then_some(FaceProblem::NotFrontal))
+    debug!(orientation = ?retina.orientation, "IR detector pose");
+    Ok((!retina.orientation.is_some_and(|o| o.is_frontal())).then_some(FaceProblem::NotFrontal))
 }
 
 /// Size and edge gates of Windows' per-frame check (F46). Occlusion and pose are checked in

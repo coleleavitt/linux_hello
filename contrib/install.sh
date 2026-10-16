@@ -11,7 +11,7 @@ line='auth		sufficient	pam_linux_hello.so'
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 for f in target/release/linux_hello target/release/libpam_linux_hello.so \
-         models/det_10g.onnx models/w600k_r50.onnx \
+         models/det_10g.onnx models/w600k_r50.onnx models/calibration.json \
          models/antispoof/facenox_antispoof.onnx models/antispoof/MiniFASNetV2.onnx; do
     [ -f "$repo/$f" ] || { echo "missing $f (build first / run scripts/download_models.sh)" >&2; exit 1; }
 done
@@ -20,7 +20,7 @@ echo "== files"
 install -m755 "$repo/target/release/linux_hello" /usr/local/bin/linux_hello
 install -m755 "$repo/target/release/libpam_linux_hello.so" /lib64/security/pam_linux_hello.so
 install -d -m755 "$share/models/antispoof"
-install -m644 "$repo/models/det_10g.onnx" "$repo/models/w600k_r50.onnx" "$share/models/"
+install -m644 "$repo/models/det_10g.onnx" "$repo/models/w600k_r50.onnx" "$repo/models/calibration.json" "$share/models/"
 install -m644 "$repo/models/antispoof/facenox_antispoof.onnx" "$repo/models/antispoof/MiniFASNetV2.onnx" "$share/models/antispoof/"
 # Converted Windows Hello models (git-ignored, docs/winhello-models/): used when present.
 ms="$repo/models/windows_hello/converted"

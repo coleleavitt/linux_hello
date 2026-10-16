@@ -24,7 +24,7 @@ use v4l::FourCC;
 /// changes a print's cosine similarity by < 0.02 (docs/capture-and-liveness.md §1).
 const WARMUP_FRAMES: usize = 4;
 /// A lit frame is only paired with an ambient frame closer in time than this (F13).
-const MAX_PAIR_GAP: Duration = Duration::from_millis(300);
+pub(crate) const MAX_PAIR_GAP: Duration = Duration::from_millis(300);
 /// Frames read while looking for one lit/ambient pair before giving up.
 const MAX_PAIR_FRAMES: usize = 8;
 /// `V4L2_META_FMT_UVC_MSXU_1_5`: uvcvideo metadata with the Microsoft UVC 1.5 items.
@@ -160,8 +160,16 @@ impl Camera {
 pub struct IrPair {
     pub lit: GrayImage,
     pub ambient: GrayImage,
+    /// Buffer timestamps of the two frames (`CLOCK_MONOTONIC`)
+    pub lit_at: Duration,
+    pub ambient_at: Duration,
+}
+
+impl IrPair {
     /// Time between the two frames
-    pub gap: Duration,
+    pub fn gap(&self) -> Duration {
+        self.lit_at.abs_diff(self.ambient_at)
+    }
 }
 
 /// One IR frame with its illumination flag.
@@ -213,7 +221,12 @@ impl IrCamera {
             if gap < MAX_PAIR_GAP {
                 if let Some(prev_lit) = self.is_first_lit(&prev, &next) {
                     let (lit, ambient) = if prev_lit { (prev, next) } else { (next, prev) };
-                    return Ok(IrPair { lit: lit.image, ambient: ambient.image, gap });
+                    return Ok(IrPair {
+                        lit: lit.image,
+                        ambient: ambient.image,
+                        lit_at: lit.time,
+                        ambient_at: ambient.time,
+                    });
                 }
             }
             debug!(?gap, prev = ?prev.lit, next = ?next.lit, "frames do not form a lit/ambient pair");

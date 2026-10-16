@@ -10,13 +10,14 @@ MiniFASNetV2); the Microsoft models extracted for analysis are not.
 ```
 /dev/video3 (UVCM metadata) ─ illumination flag per frame ─┐
 /dev/video2 (IR 640x360 @15) ───────────────────────────────┴─▶ lit/ambient pair (< 300 ms apart)
-  lit frame ─▶ SCRFD face ─▶ size/edge gates ─▶ face brightness + lighting status ─▶ occlusion, frontal pose
-     good ─▶ embed lit − min(lit, ambient) ─▶ live vote unless the RGB models veto
+  lit frame ─▶ SCRFD face ─▶ size/edge gates ─▶ Windows IR detector face (box, 5 points) ─▶ ambient warp
+     ─▶ face brightness + lighting status ─▶ occlusion, frontal pose
+     good ─▶ embed lit − min(lit, warped ambient) ─▶ live vote unless the RGB models veto
      weak ─▶ embed the lit frame ───────────▶ no vote
      too dark / too bright / too small / edge / occluded / not frontal / no face ─▶ no print, no vote (reason counted)
 /dev/video0 (RGB) ─▶ SCRFD face ─▶ FaceNox + MiniFASNetV2 mean P(real) ─▶ veto if < 0.5
   track: largest face followed by box overlap; a new face starts a new attempt
-  attempt: ≥ 4 prints and best similarity > threshold → recognised;
+  attempt: ≥ 4 prints and estimated FAR of the best print < 1e-5 (similarity > 0.50) → recognised;
            from then on 2 live votes → MATCH, 3 spoof votes → NOTLIVE
   session: 16 pairs over all attempts → give up
   after MATCH: add the best live print if it was a borderline match
@@ -76,7 +77,17 @@ from stream start and after each region change.
 
 ### 2. Frame gates (F45, F46)
 
-The face (largest SCRFD detection) is found on the lit frame. A pair gives no print and no vote if:
+The face (largest SCRFD detection) is found on the lit frame. With the Windows Hello models, the
+Windows IR detector (`MsRetinaDetector`, MODEL_FILES_110) then runs on the lit frame and its face
+overlapping the SCRFD one (IoU ≥ 0.5, `Analysis::windows_face`) is the face Windows would track: its
+five points give the brightness block (§3), the ambient-warp anchors (§4) and the liveness crops (§5),
+its box the occlusion crop, its 6-DoF output the pose. Windows' 31-point landmark set is, on this
+path, those five points plus copies of them (`RetinaEngine::ComputeAlignment`, lbf.md "Which aligner
+runs"), so nothing else is aligned; the legacy LBF aligner does not run. SCRFD's own box and points
+keep two jobs: the size/edge gates and the ArcFace recognition crop, whose alignment template is
+SCRFD's. Without the Windows Hello models SCRFD's points stand in everywhere.
+
+A pair gives no print and no vote if:
 
 | Reason (`NOFACE` word) | Check | Windows |
 |---|---|---|
@@ -86,10 +97,12 @@ The face (largest SCRFD detection) is found on the lit frame. A pair gives no pr
 | `too_bright` | lit face brightness > 205 | F44 status 2 |
 | `too_dark` | lit face brightness < 35 | F44 status 3 |
 | `occluded` | Windows Hello occlusion model: 1 − p(none) > 0.9 (> 0.5 while enrolling); only with the converted models | F46 |
-| `not_frontal` | Windows Hello IR detector's head pose: \|yaw\| > 20° or \|pitch\| > 25°, or that detector has no face overlapping the SCRFD face (IoU ≥ 0.5); only with the converted models | F46, F59 |
+| `not_frontal` | Windows Hello IR detector's head pose: \|yaw\| > 20° or \|pitch\| > 25°, or that detector has no face overlapping the SCRFD face (IoU ≥ 0.5; checked right after the size/edge gates, before the lighting status); only with the converted models | F46, F59 |
 
 The occlusion model is the converted Windows Hello one (`models/windows_hello/converted/occlusion`,
-docs/winhello-models/cefa.md). Its input is the face box resampled to 128×128, as in Windows.
+docs/winhello-models/cefa.md). Its input is the face box resampled to 128×128, as in Windows; the box
+is the Windows IR detector's (on the owner's frontal frames p(none) is 0.991–0.999 with it, 0.961–0.998
+with SCRFD's box).
 
 The frontal check uses the pose Windows uses: the 6-DoF output of its IR RetinaFace-style detector
 (`models/windows_hello/converted/ldmf/ort/MODEL_FILES_110.ort`, `RetinaEngine::ComputeOrientation`,
@@ -102,11 +115,18 @@ frontal faces from this camera, so it would reject most real frames.
 
 ### 3. Face brightness and lighting status (F14, F43, F44)
 
-Face brightness (F43) is the mean of every 2nd pixel in every 2nd row of the block between the
-eyes and the mouth corners. Windows bounds it with eye-contour points of its 31-point aligner;
-with SCRFD's 5 points the block spans x from the inner of (left eye, left mouth corner) to the
-inner of (right eye, right mouth corner), and y from the lower eye to the higher mouth corner. It
-is measured on the lit and on the ambient frame: `lit`, `ambient`, `d = lit − ambient`.
+Face brightness (F43) is the mean of every 2nd pixel in every 2nd row of the block
+x ∈ [max(p3.x, p9.x), min(p4.x, p15.x)], y ∈ [max(p9.y, p15.y), min(p3.y, p4.y)] of Windows' 31-point
+set: p3/p4 are the mouth corners, p9/p15 the eye-contour bottoms. On Windows' RetinaEngine path p9 and
+p15 are the eye centres (`RetinaEngine::ComputeAlignment` copies the detector's five points into the
+contour slots), so the block spans x from the inner of (left eye, left mouth corner) to the inner of
+(right eye, right mouth corner), and y from the lower eye to the higher mouth corner, from the Windows
+IR detector's five points (SCRFD's without the Windows models). It is measured on the lit frame and
+on the ambient frame warped onto it (§4): `lit`, `ambient`, `d = lit − ambient`.
+
+On the owner's frontal frames the lit brightness from the Retina points is within 1.5 of the value
+from SCRFD's points (86.4–91.9 vs 87.0–91.1), and within 1.6 of the block from the legacy LBF
+aligner's real eye contour (`examples/ms_check`, `brightness`).
 
 | Status | Rule | Effect |
 |---|---|---|
@@ -124,10 +144,42 @@ For good frames, recognition uses `diff = lit − min(lit, ambient)` per pixel, 
 emitter added. This removes sunlight and other ambient IR, so enrollment and unlock see the same
 lighting. Enrollment uses only good frames, so every enrolled print is a difference image.
 
-Difference from Windows: Windows warps the ambient face crop onto the lit one with an affine
-transform from eye and mouth anchors before subtracting (F13, F40). `linux_hello` subtracts the
-whole frames without motion compensation: the two frames are 67 ms apart, and a face moves little
-in that time.
+The ambient frame is first moved onto the lit one, as Windows does (`AdjustFaceForAmbientLight`,
+`RemoveAmbientLightFromFace`, F13, F40):
+
+- Three anchors per lit face (`ComputeAnchorPoints`): the means of the left-eye, right-eye and mouth
+  points of the 31-point set, which on the Retina path are the two eye centres and the midpoint of the
+  mouth corners (`lighting::anchors`).
+- Where the anchors were in the ambient frame is taken by linear motion between the current lit
+  frame and the previous one: `cur + (prev − cur)·t`, `t` = (t_ambient − t_cur) / (t_prev − t_cur) from
+  the V4L2 buffer timestamps (`lighting::interpolate`). Windows weighs the two lit frames the other way
+  round (`AdjustFaceForAmbientLight` 0x180036c10: `cur·(1 − t') + prev·t'` with
+  `t' = (t_ambient − t_prev) / (t_cur − t_prev)`), which is the same at the only point it sees,
+  t = 0.5 (alternate frames at a fixed rate). Here the ambient frame may also follow the lit one
+  (t < 0), which the linear motion covers.
+- The affine through the three anchor pairs (`lighting::affine_from_anchors`, Windows'
+  `Affine2DMatrix::DeriveTransform`) maps lit positions to ambient ones; the warped ambient frame
+  reads `ambient(M·p)` at every pixel, bilinear with zero padding (`lighting::warp`,
+  `ApplyAffineTransformToImage`). It is whole-frame, 1.5 ms at 640×360; Windows warps only the ambient
+  crop (face crop + 100 px, F39).
+- The previous lit face must be less than 300 ms old (Windows' pairing constant, F13) and the same
+  face (box IoU ≥ 0.3, the tracker's rule, for Windows' same-tracking-id condition). Otherwise, and
+  for the first pair of a face, the ambient frame is subtracted as captured. Windows also requires
+  both lit frames frontal; here the previous frame's anchors are kept even when that frame was
+  rejected later.
+
+The lighting status (§3) reads the ambient brightness off the warped frame, as Windows does; the
+liveness nets get the unwarped difference (F40 (b), §5).
+
+Checked on the saved frames (`examples/ms_check`, `warp`): between consecutive lit frames of a still
+sitter (`ir_11…19`, anchors move 0.1–1.3 px by SCRFD's own jitter) the matrix is within 0.01 of the
+identity plus a 0.5–5 px translation; the dark frames there are black (ambient 0), so the subtracted
+image and its ArcFace print are unchanged (cosine 1.000). With the previous lit frame standing in
+for the ambient frame (t = 1), the warped frame differs from the raw one by 1–3.6 gray levels per
+pixel in the face box and the F43 brightness by ≤ 0.8, and the residual `|lit − ambient|` over the box
+stays at 1.5–3.3 (1.8 → 2.3 and 2.0 → 3.3 on two frames: the landmark jitter becomes a sub-pixel
+shift). When the face has moved (owner frames from different moments, Retina anchors 3–9 px apart)
+the warp halves the residual: 12.4 → 4.1 and 6.4 → 3.9.
 
 ### 5. Liveness votes (F22–F25)
 
@@ -156,7 +208,7 @@ turns it off). Good frames are the frames Windows sends to its diffusion net (st
 
 | Net (slot) | Input | Rule (flag-on thresholds, mode 0) |
 |---|---|---|
-| diffusion IR (12) | `lit − min(lit, ambient)`, 5-point aligned 128×128 crop | p(real) > 0.5037 → +1 |
+| diffusion IR (12) | `lit − min(lit, ambient)` (unwarped, F40), 128×128 crop aligned on the Windows IR detector's five points (F23) | p(real) > 0.5037 → +1 |
 | colour (13) | face detected in the RGB frame, aligned crop, BGR | p(spoof) > 0.5 → −1 |
 | border (14) | whole IR frame as 128×128 | p(spoof) > 0.7 → −1 |
 | HH (15) | whole IR frame as 128×128 | p(spoof) > 0.5 → −1 |
@@ -181,11 +233,17 @@ not an average. The similarity of a probe is the maximum cosine similarity over 
 i.e. the minimum distance `1 − cos` (F28, F50). Faces are compared only with the template of the
 user being authenticated (1:1).
 
-`MATCH_THRESHOLD` is 0.50, calibrated on grayscale LFW ([calibration.md](calibration.md)): one
-comparison FAR ≈ 4e-8 (tail fit), simulated per-attempt FAR ≈ 1.8e-6 for 15 prints × 16 frames,
-FRR 0.23% per probe frame against 15 prints. Windows instead converts the distance into an
-estimated FAR with a calibration table and accepts below 1e-5 (F27, F51); `linux_hello` uses one
-fixed cosine threshold chosen for the same 1e-5 target per attempt.
+As Windows (F27, F51, F60), the similarity is not thresholded directly. A calibration table for the
+IR camera (`models/calibration.json`, keyed by the camera's USB `vid:pid`, with a default; this
+laptop's `30c9:00f3`) maps the best similarity to the estimated false-accept rate of one comparison
+by linear interpolation between its (FPR, TAR, similarity) rows; times 240, the comparisons one
+attempt can make (15 prints × 16 pairs), that is the attempt's FAR (`PrintMatch::far`). The face is
+recognised when it is below `TARGET_FAR` = 1e-5. The shipped table comes from grayscale LFW
+([calibration.md](calibration.md), "Calibration table"); its 0.50 row is the 1e-5 point, so this is
+the former `MATCH_THRESHOLD` 0.50 (one comparison FAR ≈ 4e-8, simulated per-attempt FAR ≈ 1.8e-6,
+FRR 0.23% per probe frame against 15 prints). Every per-frame log line and `watch`'s `log.jsonl`
+carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the daemon reply keeps the
+similarity only.
 
 ### 7. Decision (F25, F47, F48)
 
@@ -198,8 +256,8 @@ from zero. So the owner's prints never recognise a photo held up next, and the o
 never count for it. Pairs without a face keep the current track. The 16-pair limit counts the
 whole session.
 
-1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the best similarity
-   over them is > 0.50.
+1. **Recognise:** once the track has ≥ 4 prints (good or weak frames) and the estimated FAR of
+   the best similarity over them is < 1e-5 (similarity > 0.50 with the shipped table).
 2. **Liveness:** votes count only from the recognising frame on. ≥ 2 live votes → `MATCH <best
    similarity>`; else ≥ 3 spoof votes → `NOTLIVE`.
 3. **Give up** after 16 frame pairs (Windows: 48 frames or a counter > 16; one pair is two frames):
@@ -220,9 +278,8 @@ exposure change (F49) and the "closer to another user" check (1:1 by design).
 After a `MATCH`, the best-matching print of a live-voting frame is added to the template, once
 per session, if:
 
-- it is a borderline match: similarity in (0.50, 0.55] (`AUGMENT_MARGIN` 0.05). Windows augments
-  only when the estimated FAR is in [FAR/2, FAR]; a fixed band above the cosine threshold stands
-  in for that;
+- it is a borderline match, as in Windows: estimated FAR in [5e-6, 1e-5) (`PrintMatch::is_borderline`,
+  F53); with the shipped table that is similarity 0.50–0.52;
 - generation of the stored print it matched + 1 ≤ 3 (enrolled prints are 0).
 
 New prints get `source: "augment"`; at most 10 augmented prints per user, the oldest augmented
@@ -253,7 +310,7 @@ print from a failed face attempt after the user signs in another way. Here:
      values are not in the binaries. 0.40 is the per-attempt FAR ≈ 1e-5 point of
      [calibration.md](calibration.md) (simulated 9.1e-6 for 15 prints × 16 frames), the FAR Windows
      targets for unlocking (F27);
-   - no other enrolled user matches it above `MATCH_THRESHOLD`.
+   - no other enrolled user matches it (estimated FAR < 1e-5, as a recognition).
 
    It replies `ADDED 0.432` or `REFUSED no_pending | not_enrolled | too_far <s> | other_user <user> <s>`;
    the PAM module only logs the reply.
@@ -310,9 +367,9 @@ must be re-enrolled the same way.
 stores one print per pair.
 
 Before storing, it compares every new print with the templates of the other enrolled users, as
-Windows' `CheckForDuplicateEnrollment`. If one matches above `MATCH_THRESHOLD` (0.50), enrollment
-fails and names the closest such user: `this face matches enrolled user alice (similarity 0.641);
-use --force to enroll it anyway`. `--force` stores the prints anyway (twins, or one person with two
+Windows' `CheckForDuplicateEnrollment`. If one matches (estimated FAR < 1e-5, similarity > 0.50 with
+the shipped table), enrollment fails and names the closest such user: `this face matches enrolled user
+alice (similarity 0.641, FAR 2.3e-7); use --force to enroll it anyway`. `--force` stores the prints anyway (twins, or one person with two
 accounts). Re-enrolling a user compares only with the others. Checked on saved frames: the owner's
 lit frames from one sitting against a template from another sitting match at 0.641; the six
 faces of the stranger photo score −0.05…0.03 against the owner and are not refused.
@@ -320,7 +377,7 @@ faces of the stranger photo score −0.05…0.03 against the owner and are not r
 ## Inspecting
 
 `linux_hello watch [--seconds 30]` prints one line per pair: face brightness lit/ambient, `d`,
-status or rejection reason, RGB P(real), vote, similarity, the face track, whether the track's
-face is recognised and its liveness state. It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
+status or rejection reason, RGB P(real), vote, similarity and its estimated FAR per attempt, the
+face track, whether the track's face is recognised and its liveness state. It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
 `/tmp/linux_hello_watch`). When a session reaches a verdict it prints it and starts a new one.
 `watch` does not augment the template.

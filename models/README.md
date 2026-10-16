@@ -9,6 +9,9 @@ Not committed (two exceed GitHub's 100 MB limit). Run `../scripts/download_model
 | `antispoof/facenox_antispoof.onnx` | Liveness | [facenox/face-antispoof-onnx](https://github.com/facenox/face-antispoof-onnx) `models/best/98.20/best_model.onnx` @ `2f8dd93` | `af2381b8…42b6` |
 | `antispoof/MiniFASNetV2.onnx` | Liveness | [garciafido/minifasnet-v2-anti-spoofing-onnx](https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx) | `d7b3cd9b…c7b` |
 
+`calibration.json` (committed) holds the similarity → false-accept-rate tables per IR camera for `w600k_r50`
+(`docs/calibration.md`, "Calibration table").
+
 ## Preprocessing notes
 
 - **SCRFD:** 640×640 letterbox, RGB, `(x − 127.5) / 128`. Nine outputs in fixed order:
