@@ -1,6 +1,8 @@
 //! Unix-socket service used by the PAM module.
 //!
-//! Protocol, one line each way: the client sends `AUTH <user>`, the daemon answers with a
+//! Protocol, one line each way: the client sends `AUTH <user>` for one face check, or
+//! `AUTH <user> <seconds>` for a presence wait of up to that long (lock screen, console login;
+//! [`Authenticator::verify_within`], at most [`MAX_WAIT`]). The daemon answers with a
 //! [`Verdict`] (`MATCH 0.850`, `NOMATCH 0.120`, `NOTLIVE`, `NOFACE <reason>`, `NOTENROLLED`,
 //! `UNAVAILABLE lid_closed`), `BUSY` (another request is using the cameras) or
 //! `ERROR <message>`. The first word decides; `<reason>` is one of `no_face`, `too_dark`,
@@ -38,6 +40,10 @@ use crate::{Authenticator, Embedding, Verdict};
 
 /// How long after the failed face check the password success may add its print.
 pub const PENDING_MAX_AGE: Duration = Duration::from_secs(60);
+/// The longest presence wait one `AUTH <user> <seconds>` may ask for, so that a user process
+/// cannot hold the cameras for longer per request: the lock screen's own limit on Windows, which
+/// asks for a confirmation after 120 s (F56).
+pub const MAX_WAIT: Duration = Duration::from_secs(120);
 
 /// The print of the last `NOMATCH`, waiting for the PAM module to report a password success.
 struct Pending {
@@ -111,8 +117,15 @@ fn answer(state: &Mutex<State>, mut stream: UnixStream) {
 }
 
 enum Request {
-    Auth { user: String },
-    EnrollOnFailure { user: String, token: String },
+    /// `wait`: the presence wait, `None` for one session
+    Auth {
+        user: String,
+        wait: Option<Duration>,
+    },
+    EnrollOnFailure {
+        user: String,
+        token: String,
+    },
 }
 
 impl Request {
@@ -122,8 +135,8 @@ impl Request {
             return Ok(());
         }
         match self {
-            Request::Auth { user } if uid_of(user) == Some(peer) => Ok(()),
-            Request::Auth { user } => bail!("AUTH {user} from uid {peer}: a user may only ask about itself"),
+            Request::Auth { user, .. } if uid_of(user) == Some(peer) => Ok(()),
+            Request::Auth { user, .. } => bail!("AUTH {user} from uid {peer}: a user may only ask about itself"),
             Request::EnrollOnFailure { .. } => bail!("ENROLL_ON_FAILURE from uid {peer}: only root may add prints"),
         }
     }
@@ -136,7 +149,13 @@ fn request(stream: &mut UnixStream) -> Result<Request> {
     BufReader::new(stream.take(256)).read_line(&mut line)?;
     let mut words = line.split_whitespace();
     match (words.next(), words.next(), words.next(), words.next()) {
-        (Some("AUTH"), Some(user), None, None) if valid_username(user) => Ok(Request::Auth { user: user.to_string() }),
+        (Some("AUTH"), Some(user), seconds, None) if valid_username(user) => {
+            let wait = match seconds {
+                Some(s) => Some(Duration::from_secs(s.parse::<u64>().context("AUTH wait")?).min(MAX_WAIT)),
+                None => None,
+            };
+            Ok(Request::Auth { user: user.to_string(), wait })
+        }
         (Some("ENROLL_ON_FAILURE"), Some(user), Some(token), None) if valid_username(user) => {
             Ok(Request::EnrollOnFailure { user: user.to_string(), token: token.to_string() })
         }
@@ -147,18 +166,22 @@ fn request(stream: &mut UnixStream) -> Result<Request> {
 fn handle(state: &mut State, request: &Request) -> Result<String> {
     let State { auth, pending } = state;
     match request {
-        Request::Auth { user } => {
+        Request::Auth { user, wait } => {
             // Re-read the store for enrollments made meanwhile; `verify` saves it again after a
             // successful unlock adds a print (a sealed store stays sealed).
             auth.pipeline.reload_store()?;
+            let verify = |auth: &mut Authenticator| match wait {
+                Some(wait) => auth.verify_within(user, Instant::now() + *wait),
+                None => auth.verify(user),
+            };
             let Some(pending) = pending else {
-                let verdict = auth.verify(user)?.verdict;
-                info!(user, %verdict, "request");
+                let verdict = verify(auth)?.verdict;
+                info!(user, ?wait, %verdict, "request");
                 return Ok(verdict.to_string());
             };
             *pending = None;
-            let outcome = auth.verify(user)?;
-            info!(user, verdict = %outcome.verdict, on_failure_candidate = outcome.failed_print.is_some(), "request");
+            let outcome = verify(auth)?;
+            info!(user, ?wait, verdict = %outcome.verdict, on_failure_candidate = outcome.failed_print.is_some(), "request");
             let (Verdict::NoMatch { .. }, Some(print)) = (outcome.verdict, outcome.failed_print) else {
                 return Ok(outcome.verdict.to_string());
             };
@@ -261,7 +284,7 @@ mod tests {
     fn a_user_may_only_ask_about_itself_and_root_about_anyone() {
         assert_eq!(uid_of("root"), Some(0));
         assert_eq!(uid_of("no-such-user-linux-hello"), None);
-        let auth = |user: &str| Request::Auth { user: user.to_string() };
+        let auth = |user: &str| Request::Auth { user: user.to_string(), wait: None };
         let enroll = Request::EnrollOnFailure { user: "root".into(), token: "t".into() };
         assert!(auth("root").check_peer(0).is_ok());
         assert!(auth("nobody").check_peer(0).is_ok());
@@ -276,5 +299,23 @@ mod tests {
                 assert!(auth(&user).check_peer(me).is_ok());
             }
         }
+    }
+    #[test]
+    fn auth_requests_carry_an_optional_bounded_wait() {
+        let parse = |line: &str| {
+            let (mut a, mut b) = UnixStream::pair().unwrap();
+            writeln!(b, "{line}").unwrap();
+            request(&mut a)
+        };
+        let wait = |line| match parse(line) {
+            Ok(Request::Auth { wait, .. }) => wait,
+            _ => panic!("{line}"),
+        };
+        assert_eq!(wait("AUTH cole"), None);
+        assert_eq!(wait("AUTH cole 5"), Some(Duration::from_secs(5)));
+        assert_eq!(wait("AUTH cole 100000"), Some(MAX_WAIT));
+        assert!(parse("AUTH cole soon").is_err());
+        assert!(parse("AUTH cole 5 more").is_err());
+        assert!(matches!(parse("ENROLL_ON_FAILURE cole tok"), Ok(Request::EnrollOnFailure { .. })));
     }
 }

@@ -524,6 +524,19 @@ impl Authenticator {
     /// template if it was a borderline match (F53) and save the store. After `NOMATCH`, return
     /// the session's enroll-on-failure candidate.
     pub fn verify(&mut self, user: &str) -> Result<Outcome> {
+        self.run(user, None)
+    }
+
+    /// [`Self::verify`] as a presence wait for a lock screen or console login (F55, F57: Windows
+    /// keeps tracking until the UI stops it): sessions run back to back with the cameras kept
+    /// open while they end in `NOFACE` (nobody there yet, face turned away) and `deadline` has
+    /// not passed; the session running at the deadline finishes. A wrong or spoofed face ends the
+    /// wait as it ends a single check, so a stranger gets no more tries than with `sudo`.
+    pub fn verify_within(&mut self, user: &str, deadline: Instant) -> Result<Outcome> {
+        self.run(user, Some(deadline))
+    }
+
+    fn run(&mut self, user: &str, deadline: Option<Instant>) -> Result<Outcome> {
         if lid::lid_closed() && lid::built_in(&self.cameras.device) {
             return Ok(Verdict::LidClosed.into());
         }
@@ -531,16 +544,23 @@ impl Authenticator {
             return Ok(Verdict::NotEnrolled.into());
         }
         let mut cams = OpenCameras::open(&self.cameras)?;
-        let mut session = Session::default();
-        let verdict = loop {
-            let capture = cams.capture()?;
-            let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
-            cams.expose_on(check.largest().map(|f| &f.analysis.face));
-            let verdict = session.add(&check);
-            info!(user, "{}", describe(&check, &session));
-            if let Some(verdict) = verdict {
-                break verdict;
+        let (verdict, session) = loop {
+            let mut session = Session::default();
+            let verdict = loop {
+                let capture = cams.capture()?;
+                let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+                cams.expose_on(check.largest().map(|f| &f.analysis.face));
+                let verdict = session.add(&check);
+                info!(user, "{}", describe(&check, &session));
+                if let Some(verdict) = verdict {
+                    break verdict;
+                }
+            };
+            let waiting = deadline.is_some_and(|d| Instant::now() < d);
+            if !(waiting && matches!(verdict, Verdict::NoFace { .. })) {
+                break (verdict, session);
             }
+            info!(user, %verdict, "no usable face yet; next session");
         };
         drop(cams);
         let augmentation = session.decided().and_then(Attempt::augmentation);
