@@ -5,7 +5,7 @@
 use crate::Face;
 
 /// A face continues the track when its box overlaps the last box by at least this IoU.
-const MIN_IOU: f32 = 0.3;
+pub(crate) const MIN_IOU: f32 = 0.3;
 /// Pairs without a face before the track is dropped: Windows purges a face after 1000 ms
 /// without updates (F37), and one pair is two frames at 15 fps (133 ms).
 const MAX_MISSED_PAIRS: u32 = 7;
@@ -41,7 +41,7 @@ impl FaceTracker {
 }
 
 /// Intersection over union of two `[x1, y1, x2, y2]` boxes.
-fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+pub(crate) fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
     let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
     let inter = w * h;

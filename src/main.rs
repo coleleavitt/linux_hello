@@ -195,7 +195,7 @@ fn main() -> Result<()> {
         Commands::Camera => {
             let capture = OpenCameras::open(&cameras)?.capture()?;
             save_capture(&capture, &PathBuf::from("/tmp"), "linux_hello")?;
-            println!("Saved /tmp/linux_hello_{{lit,ambient,diff,rgb}}.png (pair {:?} apart)", capture.pair.gap);
+            println!("Saved /tmp/linux_hello_{{lit,ambient,diff,rgb}}.png (pair {:?} apart)", capture.pair.gap());
         }
 
         Commands::Daemon { socket, enroll_on_failure } => {
@@ -230,7 +230,7 @@ fn main() -> Result<()> {
                     log,
                     "{}",
                     serde_json::json!({
-                        "n": n, "t": t, "gap_ms": capture.pair.gap.as_secs_f32() * 1000.0,
+                        "n": n, "t": t, "gap_ms": capture.pair.gap().as_secs_f32() * 1000.0,
                         "face": a.face.as_ref().map(|f| f.bbox),
                         "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
                         "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),

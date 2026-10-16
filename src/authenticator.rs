@@ -372,6 +372,7 @@ mod tests {
         FrameCheck {
             analysis: Analysis {
                 face: face(bbox),
+                windows_face: None,
                 lighting: Some(Lighting { lit: 80.0, ambient }),
                 problem: None,
                 print: Some(Embedding { features: vec![similarity] }),
@@ -390,7 +391,7 @@ mod tests {
     fn rejected(problem: FaceProblem) -> FrameCheck {
         let face = if problem == FaceProblem::NoFace { None } else { face(OWNER) };
         FrameCheck {
-            analysis: Analysis { face, lighting: None, problem: Some(problem), print: None },
+            analysis: Analysis { face, windows_face: None, lighting: None, problem: Some(problem), print: None },
             liveness: None,
             windows: None,
             vote: Vote::Abstain,
