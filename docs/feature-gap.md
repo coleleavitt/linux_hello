@@ -20,7 +20,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | RGB camera in parallel for colour liveness (F22) | Done: `OpenCameras` opens RGB first, then IR; RGB dark-frame skip (`DARK_RATIO 0.5`, 4 skips) | — |
 | Secure camera path (`SECURE_MODE`, SecureUSBVideo trustlet, VTL1 frame buffers) (F8, F36) | N/A: needs VBS/trustlets; no Linux equivalent for UVC | Closest: run capture + matching only in the root daemon (already so) |
 | Driver face-detection property (`FACEDETECTION`, id 29) (F8) | N/A: not used for auth; camera does not expose it | — |
-| ROI / exposure control on the face (`SensorController`, `ToggleFaceDetectionOnDriverIfCapable`) (Q1) | Missing | V4L2 `exposure_absolute`/ROI controls if the IR node exposes them (it shows few controls); low value |
+| ROI / exposure control on the face (`SensorController`, `ToggleFaceDetectionOnDriverIfCapable`) (Q1) | **Done**: `IrCamera::expose_on` sets the UVC region-of-interest rectangle to the last face box with auto-exposure on, after every pair (L6); defaults restored at open and close; no-op without the controls | — |
 
 ## Frame pairing & ambient light
 

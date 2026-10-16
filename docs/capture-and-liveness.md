@@ -43,6 +43,23 @@ frame (L2, L3); this is the same signal Windows reads as `InfraredMediaFrame.IsI
   as the lit one (sum of every 5th pixel of every 5th row, as in Windows' `FrameStrobe`, F15).
   Windows uses its brightness guess only for file replay.
 
+**Exposure on the face (L6).** The IR node exposes the UVC 1.5 region-of-interest control
+(`region_of_interest_rectangle`, `region_of_interest_auto_ctrls` bit 0 = auto-exposure). After
+every pair with a face, `IrCamera::expose_on` sets the rectangle to the SCRFD box of the lit
+frame (clamped to the frame, ≥ 2×2), as Windows' `SensorController` meters on the face (Q1).
+Auto-exposure then targets the face rather than the whole frame: with the owner at ≈ 60 cm in a
+dark room the face brightness (F43) went from 139 with whole-frame metering to 110 with the face
+rectangle; a change shows after ≈ 10 frames and settles after ≈ 20–28 frames (0.67 s / 1.5 s),
+so it mostly helps the second half of a session and the next one (the camera keeps its exposure
+between streams, L7). Both controls are written in one `VIDIOC_S_EXT_CTRLS` (they are one UVC
+control; the v4l crate cannot read rect or bitmask controls, so `camera.rs` uses its raw
+bindings). Re-setting the rectangle every pair as the box jitters costs 0.5 ms and does not
+disturb the exposure (measured over 40 re-sets). The driver default (`(0,0)/640x360`, auto on) is
+written when the camera opens, in case an earlier run died, and when it closes. A camera without
+the controls logs once (debug) and meters the whole frame; a camera that rejects a rectangle
+logs once (warn) and keeps whatever it has.
+
+
 ### 2. Frame gates (F45, F46)
 
 The face (largest SCRFD detection) is found on the lit frame. A pair gives no print and no vote if:

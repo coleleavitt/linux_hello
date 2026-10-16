@@ -26,7 +26,7 @@ pub mod tracker;
 
 pub use antispoof::{AntiSpoof, LivenessModel};
 pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCameras, Outcome, Session};
-pub use camera::{Camera, CameraType, IrCamera, IrPair};
+pub use camera::{Camera, CameraType, IrCamera, IrFrame, IrPair};
 pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
 pub use lighting::{Lighting, LightingStatus};

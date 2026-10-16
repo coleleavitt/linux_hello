@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::{
-    Camera, CameraType, Embedding, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
+    Camera, CameraType, Embedding, Face, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
     LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote, MATCH_THRESHOLD,
 };
 
@@ -72,6 +72,13 @@ impl OpenCameras {
         let pair = self.ir.capture_pair()?;
         let rgb = self.capture_liveness()?;
         Ok(Capture { pair, rgb })
+    }
+
+    /// Meter the IR exposure on the face found in the last pair ([`IrCamera::expose_on`]).
+    pub fn expose_on(&mut self, face: Option<&Face>) {
+        if let Some(face) = face {
+            self.ir.expose_on(face.bbox);
+        }
     }
 
     /// The RGB camera underexposes 2-3 frames about every 5 s, and the liveness models reject
@@ -290,6 +297,7 @@ impl Authenticator {
         let verdict = loop {
             let capture = cams.capture()?;
             let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
+            cams.expose_on(check.analysis.face.as_ref());
             let verdict = session.add(&check);
             let attempt = session.attempt();
             info!(
@@ -333,6 +341,9 @@ impl Authenticator {
                 break;
             }
             let analysis = self.pipeline.analyze(&ir.capture_pair()?)?;
+            if let Some(face) = &analysis.face {
+                ir.expose_on(face.bbox);
+            }
             match (analysis.status(), analysis.print) {
                 (Some(LightingStatus::Good), Some(print)) => prints.push(print),
                 _ => info!(problem = ?analysis.problem, lighting = ?analysis.lighting, "enrollment frame skipped"),
