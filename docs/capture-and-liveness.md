@@ -345,6 +345,11 @@ Frame total > 0 is a live vote, < 0 a spoof vote. Weak and rejected frames do no
 liveness models are not run for them), so with the Windows Hello models a frame is live only when
 the lighting status and the Windows nets agree.
 
+The physics checks of [liveness-physics.md](liveness-physics.md) (eye glint, emitter falloff,
+flicker, IR/RGB material, micro-motion, parallax, blink) are scored on every face with a print
+after the vote and logged; a check with a threshold (none today without `--trained-gate`) turns a
+live vote into an abstention, −1 as Windows' colour net.
+
 With the Windows Hello models the open RGB models do not run: Windows' colour net (slot 13) is the
 RGB veto, as in Windows, and counting both would weigh the same RGB evidence twice. This matters
 in backlight: on 147 live frames of the owner with a lamp behind the head, FaceNox gave P(real)
@@ -650,7 +655,8 @@ the terminal of the `sudo` call.
 
 `linux_hello watch [--seconds 30]` prints one line per pair with one part per analysed face: its
 track id, face brightness lit/ambient, `d`, status or rejection reason, RGB P(real), vote,
-similarity and its estimated FAR, whether the track is recognised and its liveness state
-(`log.jsonl` has the same under `faces`). It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
+similarity and its estimated FAR, whether the track is recognised and its liveness state, then
+the physics checks' scores (`glint=0.53 shape=0.69 …`, [liveness-physics.md](liveness-physics.md))
+(`log.jsonl` has the same under `faces`, the scores under `physics`). It saves `NNNN_{lit,ambient,diff,rgb}.png` and `log.jsonl` to `--out` (default
 `/tmp/linux_hello_watch`). When a session reaches a verdict it prints it and starts a new one.
 `watch` does not augment the template.

@@ -16,6 +16,11 @@ shown by the bench. The attack recordings (`captures/bench/<label>_<n>`, sibling
 which checks earn a threshold; until then every check is log-only, and each section says
 what the genuine recordings show and what the attack set showed.
 
+**Cost.** The seven checks together add less than 5 ms per pair (within the run-to-run noise
+of `physics_replay`, ≈ 125 ms per pair with the Windows Hello models on this loaded machine);
+the flicker check re-reads every 4th pixel of the session's frames each pair, the rest read a
+few patches. The session's last 16 pairs are kept in memory for the history (≈ 1.1 MB each).
+
 **Genuine recordings used.** Dark room: `re/validation_frames` (`watch_*` frontal frames of the
 owner at ≈ 40–60 cm, 4 pairs; the `ir_*` frames are cut at the chin and fail the edge gate, so
 they give no print and no scores). Café with incandescent-style lamps (ambient face brightness
