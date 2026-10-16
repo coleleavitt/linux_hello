@@ -2,7 +2,8 @@
 //!
 //! A Rust implementation of face-based authentication using open-source ONNX models:
 //! - Face detection: SCRFD (InsightFace)
-//! - Face embedding: ArcFace (InsightFace)
+//! - Face embedding: ArcFace (InsightFace), with Microsoft's recogniser as a second opinion when the
+//!   converted Windows Hello models are present
 //! - Anti-spoofing: FaceNox / Silent-Face (RGB veto) plus the IR lighting gate
 //!
 //! The capture, liveness and matching pipeline is described in `docs/capture-and-liveness.md`.
@@ -90,6 +91,10 @@ pub struct Face {
 pub struct Embedding {
     /// Normalized feature vector (typically 512-dim)
     pub features: Vec<f32>,
+    /// Microsoft's recogniser's feature of the same face (256 floats, L2-normalised), when the
+    /// Windows Hello models ran ([`ms_models::MsRecognizer`])
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<Vec<f32>>,
 }
 
 impl Embedding {
@@ -195,11 +200,11 @@ mod tests {
 
     #[test]
     fn test_embedding_similarity() {
-        let a = Embedding { features: vec![1.0, 0.0, 0.0] };
-        let b = Embedding { features: vec![1.0, 0.0, 0.0] };
+        let a = Embedding { features: vec![1.0, 0.0, 0.0], windows: None };
+        let b = Embedding { features: vec![1.0, 0.0, 0.0], windows: None };
         assert!((a.similarity(&b) - 1.0).abs() < 1e-6);
 
-        let c = Embedding { features: vec![0.0, 1.0, 0.0] };
+        let c = Embedding { features: vec![0.0, 1.0, 0.0], windows: None };
         assert!(a.similarity(&c).abs() < 1e-6);
     }
 }

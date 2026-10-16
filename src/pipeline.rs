@@ -40,7 +40,8 @@ pub struct Analysis {
     /// Why there is no print; `None` when there is one
     pub problem: Option<FaceProblem>,
     /// Embedding of the face: from `lit − min(lit, ambient)` with good lighting, from the lit
-    /// frame with weak lighting (F40)
+    /// frame with weak lighting (F40); with the Windows Hello models also Microsoft's feature of
+    /// the same image
     pub print: Option<Embedding>,
 }
 
@@ -59,7 +60,8 @@ pub struct FaceCheck {
     /// Windows Hello anti-spoofing frame vote; only for good-lighting frames
     pub windows: Option<MsFrame>,
     pub vote: Vote,
-    /// Closest print of the user's template, with its estimated FAR
+    /// Closest print of the user's template, with its estimated FAR and, with the Windows Hello
+    /// models, Microsoft's second opinion
     pub best: Option<PrintMatch>,
 }
 
@@ -205,7 +207,11 @@ impl FacePipeline {
             LightingStatus::Good => subtract_ambient(&pair.lit, &ambient),
             _ => pair.lit.clone(),
         };
-        let print = self.embedder.embed_face(&gray_to_rgb(&image), &face)?;
+        let mut print = self.embedder.embed_face(&gray_to_rgb(&image), &face)?;
+        // Microsoft's recogniser takes the same image (F40 a) at Windows' points (F23).
+        if let Some(w) = &mut self.windows {
+            print.windows = Some(w.recognizer.embed(&image, &points)?.to_vec());
+        }
         Ok(Analysis { face, windows_face, lighting: Some(lighting), problem: None, print: Some(print) })
     }
 
@@ -257,7 +263,8 @@ impl FacePipeline {
                 faces.push(FaceCheck { analysis, liveness: None, windows: None, vote: Vote::Abstain, best: None });
                 continue;
             };
-            let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration));
+            let windows_table = self.windows.as_ref().map(|w| &w.recognizer.calibration);
+            let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration, windows_table));
             if analysis.status() != Some(LightingStatus::Good) {
                 let vote = Vote::from_evidence(false, None, None);
                 faces.push(FaceCheck { analysis, liveness: None, windows: None, vote, best });

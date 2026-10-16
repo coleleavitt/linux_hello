@@ -274,6 +274,22 @@ on-failure) 0.525, so the bound stays honest as the template grows. Every per-fr
 `watch`'s `log.jsonl` carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the
 daemon reply keeps the similarity only.
 
+**Second opinion (F28, F50, F51).** With the Windows Hello models, every print also carries Microsoft's
+own recognition feature: the v5 net (`MsRecognizer`, [winhello-models/cefa.md](winhello-models/cefa.md)
+§7) on the same recognition image, cropped at the Windows IR detector's five points, 256 floats
+L2-normalised, stored as `windows` next to `features`. A probe with such a feature is compared with the
+prints that have one by Windows' engine distance `1 − cos` (F50), the minimum over them (F28), and
+Microsoft's calibration table from the model container (FAR 1e-5 at distance 0.350,
+[calibration.md](calibration.md) "Microsoft's table") gives its FAR. The face is recognised only when
+ArcFace's FAR is below 1e-5 **and**, if there is a second opinion, Microsoft's FAR is too
+(`PrintMatch::recognised`; Windows' `targetFAR > GFP`, F27). Prints enrolled without the models, and
+probes taken without them, have no second opinion and are decided by ArcFace alone, so older stores keep
+working. The duplicate-enrollment check and enroll-on-failure's relaxed threshold use ArcFace only. The log
+line adds `ms=0.013 ms_far=7.8e-7` (`-` without a second opinion). On the validation frames (cefa.md §7) the
+two agree on the owner within one sitting and on the strangers; the chin-cut `ir_*` frames against a
+full-face template pass ArcFace (0.61–0.64) but not Microsoft's net (distance 0.42–0.45), the frames
+Windows itself would drop at the edge gate (§2). Cost: 4–6 ms per frame.
+
 ### 7. Decision (F25, F47, F48)
 
 The order follows Windows' `MakeDecisions`: recognise first, then liveness on the same face.
@@ -287,10 +303,12 @@ track. Each track has its own attempt (`Session`, `Attempt`): its prints, best s
 liveness votes start from zero, so the owner's prints never recognise a photo held up next to the
 owner or in the owner's place, and the owner's live votes never count for it. Rejected faces (no
 print) continue their track by place. The 16-pair limit counts the whole session (twice, after a
-re-attempt, below). Analysing a second face costs ≈ 31 ms per pair on top of ≈ 55 ms for one
-(ArcFace 20 ms, the Windows nets 5 ms, warp and subtraction 2 ms; SCRFD and the Windows IR
-detector run once per frame, 28 ms); a third face that fails the size gate costs 4 ms
-(`examples/check_frames` on `watch_0014_ir_lit.png` with stranger faces pasted in, release build).
+re-attempt, below). Analysing a second face costs ≈ 31–37 ms per pair on top of ≈ 60 ms for one
+(per face: ArcFace 20 ms, Microsoft's recogniser ≈ 5 ms, the Windows nets 4 ms, occlusion 1 ms,
+warp and subtraction 2 ms; SCRFD and the Windows IR detector run once per frame, 28 ms); a third
+face that fails the size gate costs ≈ 5 ms (`examples/check_frames` on `watch_0014_ir_lit.png`
+with stranger faces pasted in, release build, machine under load; 55 ms for one face before the
+recogniser was added).
 
 The print check is an addition: Windows tracks by geometry alone (`FaceTrackerInternal`). 0.50
 is the calibration table's 1e-5-per-attempt point (per-comparison FAR 4e-8 on grayscale LFW,

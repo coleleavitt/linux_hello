@@ -1,8 +1,10 @@
 //! Face template store (persistent storage).
 //!
 //! The file is a JSON map from user to [`Template`]: `{"<user>": {"prints": [{"features": [512
-//! floats], "generation": 0, "source": "enroll"}, ...]}}`. Stores from before multi-print
-//! templates (one averaged `features` vector per user) are not read; re-enroll. With the `tpm` feature it can instead be sealed:
+//! floats], "windows": [256 floats], "generation": 0, "source": "enroll"}, ...]}}` (`windows`,
+//! Microsoft's recogniser's feature, only on prints taken with the Windows Hello models). Stores
+//! from before multi-print templates (one averaged `features` vector per user) are not read;
+//! re-enroll. With the `tpm` feature it can instead be sealed:
 //! encrypted under a key that only this machine's TPM can unseal (see [`crate::tpm`]). A sealed
 //! store stays sealed when it is saved again.
 
@@ -204,8 +206,9 @@ impl FaceStore {
         self.faces.get_mut(user_id)
     }
 
-    /// The other enrolled user that one of `prints` matches (FAR under the target, as a
-    /// recognition), with the match; the closest one if several do (`CheckForDuplicateEnrollment`).
+    /// The other enrolled user that one of `prints` matches (ArcFace FAR under the target, as a
+    /// recognition without the second opinion), with the match; the closest one if several do
+    /// (`CheckForDuplicateEnrollment`).
     pub fn duplicate(&self, user: &str, prints: &[Embedding], table: &CalibrationTable) -> Option<(&str, PrintMatch)> {
         self.faces
             .iter()
@@ -213,7 +216,7 @@ impl FaceStore {
             .filter_map(|(other, template)| {
                 let best = prints
                     .iter()
-                    .filter_map(|p| template.best_match(p, table))
+                    .filter_map(|p| template.best_match(p, table, None))
                     .max_by(|a, b| a.similarity.total_cmp(&b.similarity))?;
                 Some((other.as_str(), best))
             })
@@ -227,7 +230,7 @@ impl FaceStore {
     pub fn add_on_failure(&mut self, user: &str, print: &Embedding, table: &CalibrationTable) -> OnFailure {
         let Some(template) = self.faces.get(user) else { return OnFailure::NotEnrolled };
         let similarity = template
-            .best_match_where(print, table, |p| p.source != PrintSource::OnFailure)
+            .best_match_where(print, table, None, |p| p.source != PrintSource::OnFailure)
             .map_or(f32::NEG_INFINITY, |m| m.similarity);
         if similarity < ENROLL_ON_FAILURE_THRESHOLD {
             return OnFailure::TooFar { similarity };
@@ -264,7 +267,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("linux_hello_store_{}", std::process::id()));
         let path = dir.join("faces.json");
         let mut store = FaceStore::load(&path).unwrap();
-        store.add("alice".into(), Template::enrolled([crate::Embedding { features: vec![0.6, 0.8] }]));
+        store.add("alice".into(), Template::enrolled([crate::Embedding { features: vec![0.6, 0.8], windows: None }]));
         store.save().unwrap();
         let reloaded = FaceStore::load(&path).unwrap();
         assert_eq!(reloaded.get("alice").unwrap().prints[0].features, vec![0.6, 0.8]);
@@ -278,7 +281,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_the_closest_other_user() {
-        let emb = |features: &[f32]| crate::Embedding { features: features.to_vec() };
+        let emb = |features: &[f32]| crate::Embedding { features: features.to_vec(), windows: None };
         let mut store = FaceStore::load(std::env::temp_dir().join("linux_hello_store_unused.json")).unwrap();
         store.add("alice".into(), Template::enrolled([emb(&[1.0, 0.0, 0.0])]));
         store.add("bob".into(), Template::enrolled([emb(&[0.6, 0.8, 0.0])]));
@@ -302,7 +305,7 @@ mod tests {
 
     #[test]
     fn on_failure_needs_the_relaxed_match_and_no_other_user() {
-        let emb = |features: &[f32]| crate::Embedding { features: features.to_vec() };
+        let emb = |features: &[f32]| crate::Embedding { features: features.to_vec(), windows: None };
         let mut store = FaceStore::load(std::env::temp_dir().join("linux_hello_store_unused.json")).unwrap();
         store.add("alice".into(), Template::enrolled([emb(&[1.0, 0.0, 0.0])]));
         store.add("bob".into(), Template::enrolled([emb(&[0.0, 1.0, 0.0])]));
@@ -339,7 +342,7 @@ mod tests {
         .unwrap();
         let mut store = FaceStore::load(&path).unwrap();
         assert_eq!(store.get("alice").unwrap().prints.len(), 2);
-        store.get_mut("alice").unwrap().add_on_failure(&crate::Embedding { features: vec![1.0, 0.0] });
+        store.get_mut("alice").unwrap().add_on_failure(&crate::Embedding { features: vec![1.0, 0.0], windows: None });
         store.save().unwrap();
         assert_eq!(FaceStore::load(&path).unwrap().get("alice").unwrap().prints[2].source, PrintSource::OnFailure);
         fs::remove_dir_all(dir).unwrap();

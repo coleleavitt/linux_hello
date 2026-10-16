@@ -110,7 +110,7 @@ mod tests {
     }
 
     fn print(features: &[f32]) -> Embedding {
-        Embedding { features: features.to_vec() }
+        Embedding { features: features.to_vec(), windows: None }
     }
 
     /// One face without a print.
