@@ -10,7 +10,8 @@
 //!                       SegoeIcons.ttf (Segoe Fluent Icons), segmdl2.ttf; added to fontconfig
 //!   screen/img100.jpg   Windows/Web/Screen: the lock-screen background
 //!   user-pictures/user-192.png   ProgramData/Microsoft/User Account Pictures: the default avatar
-//!   hello/frames/NNN.png | hello/hello.png   the Hello face icon (animation frames or one image)
+//!   hello/hello-face.png, hello/HelloFaceAnimation.gif   the Hello face (still, and the
+//!                       animation that plays while looking)
 //! ```
 
 use std::ffi::{c_char, c_int, c_void, CString};
@@ -23,10 +24,8 @@ use crate::config::{Config, INSTALLED_ASSETS};
 /// Where the Hello face icon comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hello {
-    /// Windows' animation frames, in order.
-    Frames(Vec<PathBuf>),
-    /// One image.
-    Image(PathBuf),
+    /// Windows' own files: the still face and/or the animation played while looking.
+    Windows { still: Option<PathBuf>, animation: Option<PathBuf> },
     /// A glyph of an icon font from the assets (`hello_glyph` in the config).
     Glyph { family: String, ch: char },
     /// The greeter's own Cairo drawing.
@@ -68,15 +67,19 @@ impl Assets {
     /// One line for the log and the dev window: what is Windows' and what is the fallback.
     pub fn describe(&self) -> String {
         let dir = self.dir.as_ref().map_or("none".to_string(), |d| d.display().to_string());
+        // Paths relative to the assets directory.
+        let short =
+            |p: &PathBuf| self.dir.as_ref().and_then(|d| p.strip_prefix(d).ok()).unwrap_or(p).display().to_string();
         let fonts = if self.fonts.is_empty() { "system sans".to_string() } else { self.fonts.join(", ") };
         let hello = match &self.hello {
-            Hello::Frames(frames) => format!("{} frames", frames.len()),
-            Hello::Image(path) => path.display().to_string(),
+            Hello::Windows { still, animation } => {
+                [still, animation].into_iter().flatten().map(short).collect::<Vec<_>>().join(" + ")
+            }
             Hello::Glyph { family, ch } => format!("U+{:04X} of {family}", *ch as u32),
             Hello::Vector => "built-in icon".to_string(),
         };
-        let background = self.background.as_ref().map_or("solid colour".to_string(), |p| p.display().to_string());
-        let picture = self.user_picture.as_ref().map_or("initials".to_string(), |p| p.display().to_string());
+        let background = self.background.as_ref().map_or("solid colour".to_string(), short);
+        let picture = self.user_picture.as_ref().map_or("initials".to_string(), short);
         format!("assets: {dir}; fonts: {fonts}; hello: {hello}; background: {background}; default picture: {picture}")
     }
 }
@@ -93,22 +96,13 @@ pub fn find() -> Option<PathBuf> {
 }
 
 fn hello_source(dir: &Path, glyph: &str, fonts: &[String]) -> Hello {
-    let mut frames: Vec<PathBuf> = std::fs::read_dir(dir.join("hello/frames"))
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "png"))
-                .collect()
-        })
-        .unwrap_or_default();
-    frames.sort();
-    if !frames.is_empty() {
-        return Hello::Frames(frames);
-    }
-    let image = dir.join("hello/hello.png");
-    if image.is_file() {
-        return Hello::Image(image);
+    let still = dir.join("hello/hello-face.png");
+    let animation = dir.join("hello/HelloFaceAnimation.gif");
+    if still.is_file() || animation.is_file() {
+        return Hello::Windows {
+            still: still.is_file().then_some(still),
+            animation: animation.is_file().then_some(animation),
+        };
     }
     if let Some(ch) = u32::from_str_radix(glyph.trim_start_matches("U+"), 16).ok().and_then(char::from_u32) {
         if let Some(family) = fonts.iter().find(|f| f.contains("Icons") || f.contains("MDL2")) {

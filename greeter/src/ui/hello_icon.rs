@@ -1,20 +1,19 @@
-//! The Hello face icon: Windows' own frames or image when the assets have them, a glyph of
-//! its icon font, or our Cairo drawing. It animates while looking and smiles when recognised.
+//! The Hello face icon: Windows' own still and animation when the assets have them, a glyph
+//! of its icon font, or our Cairo drawing. The animation plays while looking.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::gdk::prelude::GdkCairoContextExt;
-use gtk::gdk_pixbuf::Pixbuf;
+use gtk::gdk_pixbuf::{Pixbuf, PixbufAnimation, PixbufAnimationIter};
 use gtk::prelude::*;
 use gtk::{glib, pango};
 
 use crate::assets::Hello;
 use crate::state::Face;
 
-/// Logical size in pixels; frames and images are scaled to it.
+/// Logical size in pixels; Windows' images are scaled to it.
 pub const SIZE: i32 = 56;
-const FRAME_RATE: f64 = 30.0;
 
 pub struct HelloIcon {
     pub widget: gtk::Widget,
@@ -23,14 +22,17 @@ pub struct HelloIcon {
 
 struct Shared {
     face: Face,
-    frames: Vec<Pixbuf>,
-    /// Microseconds of the frame clock when the current animation began.
+    still: Option<Pixbuf>,
+    animation: Option<PixbufAnimation>,
+    /// The running animation (looking, recognised).
+    playing: Option<PixbufAnimationIter>,
+    /// Seconds since the looking animation of the Cairo face began.
     started: Option<i64>,
 }
 
 impl HelloIcon {
     pub fn new(source: &Hello) -> HelloIcon {
-        let shared = Rc::new(RefCell::new(Shared { face: Face::Idle, frames: vec![], started: None }));
+        let mut shared = Shared { face: Face::Idle, still: None, animation: None, playing: None, started: None };
         let widget: gtk::Widget = match source {
             Hello::Glyph { family, ch } => {
                 let label = gtk::Label::new(Some(&ch.to_string()));
@@ -40,18 +42,18 @@ impl HelloIcon {
                 label.set_attributes(Some(&attrs));
                 label.upcast()
             }
-            Hello::Frames(paths) => {
-                shared.borrow_mut().frames =
-                    paths.iter().filter_map(|p| Pixbuf::from_file_at_scale(p, SIZE, SIZE, true).ok()).collect();
-                drawing_area(&shared).upcast()
+            Hello::Windows { still, animation } => {
+                shared.still = still.as_ref().and_then(|p| Pixbuf::from_file_at_scale(p, SIZE, SIZE, true).ok());
+                shared.animation = animation.as_ref().and_then(|p| PixbufAnimation::from_file(p).ok());
+                gtk::DrawingArea::new().upcast()
             }
-            Hello::Image(path) => {
-                shared.borrow_mut().frames =
-                    Pixbuf::from_file_at_scale(path, SIZE, SIZE, true).ok().into_iter().collect();
-                drawing_area(&shared).upcast()
-            }
-            Hello::Vector => drawing_area(&shared).upcast(),
+            Hello::Vector => gtk::DrawingArea::new().upcast(),
         };
+        let shared = Rc::new(RefCell::new(shared));
+        if let Some(area) = widget.downcast_ref::<gtk::DrawingArea>() {
+            let draw = Rc::clone(&shared);
+            area.set_draw_func(move |area, cr, width, height| draw.borrow().draw(area, cr, width, height));
+        }
         widget.set_size_request(SIZE, SIZE);
         widget.add_css_class("hello-icon");
         HelloIcon { widget, shared }
@@ -64,17 +66,36 @@ impl HelloIcon {
         }
         shared.face = face.clone();
         shared.started = None;
+        shared.playing = None;
+        // Windows' GIF plays once and ends on the smile: looped while looking, once when
+        // recognised.
+        let animate = matches!(face, Face::Looking | Face::Welcome);
+        if animate {
+            shared.playing = shared.animation.as_ref().map(|a| a.iter(Some(std::time::SystemTime::now())));
+        }
         drop(shared);
         self.widget.set_opacity(if matches!(face, Face::Failed(_)) { 0.55 } else { 1.0 });
         self.widget.queue_draw();
-        if matches!(face, Face::Looking) {
+        if animate {
             let shared = Rc::clone(&self.shared);
+            let face = face.clone();
             self.widget.add_tick_callback(move |widget, clock| {
                 let mut s = shared.borrow_mut();
-                if s.face != Face::Looking {
+                if s.face != face {
                     return glib::ControlFlow::Break;
                 }
                 s.started.get_or_insert(clock.frame_time());
+                if let Some(playing) = &s.playing {
+                    let now = std::time::SystemTime::now();
+                    playing.advance(now);
+                    // No delay once a non-looping animation has shown its last frame.
+                    if playing.delay_time().is_none() {
+                        if face == Face::Welcome {
+                            return glib::ControlFlow::Break;
+                        }
+                        s.playing = s.animation.as_ref().map(|a| a.iter(Some(now)));
+                    }
+                }
                 widget.queue_draw();
                 glib::ControlFlow::Continue
             });
@@ -82,49 +103,55 @@ impl HelloIcon {
     }
 }
 
-fn drawing_area(shared: &Rc<RefCell<Shared>>) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::new();
-    let shared = Rc::clone(shared);
-    area.set_draw_func(move |area, cr, width, height| {
-        let s = shared.borrow();
-        let elapsed = s.started.map_or(0.0, |t0| (area.frame_clock().map_or(t0, |c| c.frame_time()) - t0) as f64 / 1e6);
-        if s.frames.is_empty() {
-            draw_vector(cr, width as f64, height as f64, &s.face, elapsed);
-        } else {
-            let index = if s.face == Face::Looking { (elapsed * FRAME_RATE) as usize % s.frames.len() } else { 0 };
-            let frame = &s.frames[index];
-            cr.set_source_pixbuf(frame, (width - frame.width()) as f64 / 2.0, (height - frame.height()) as f64 / 2.0);
-            let _ = cr.paint();
+impl Shared {
+    fn draw(&self, area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, height: i32) {
+        let frame = match (&self.playing, &self.still) {
+            (Some(playing), _) => Some(playing.pixbuf()),
+            (None, Some(still)) => Some(still.clone()),
+            (None, None) => None,
+        };
+        match frame {
+            Some(frame) => {
+                let scale = f64::from(width.min(height)) / f64::from(frame.width().max(frame.height()));
+                cr.translate(
+                    (f64::from(width) - scale * f64::from(frame.width())) / 2.0,
+                    (f64::from(height) - scale * f64::from(frame.height())) / 2.0,
+                );
+                cr.scale(scale, scale);
+                cr.set_source_pixbuf(&frame, 0.0, 0.0);
+                let _ = cr.paint();
+            }
+            None => {
+                let elapsed = self
+                    .started
+                    .map_or(0.0, |t0| (area.frame_clock().map_or(t0, |c| c.frame_time()) - t0) as f64 / 1e6);
+                draw_vector(cr, f64::from(width), f64::from(height), &self.face, elapsed);
+            }
         }
-    });
-    area
+    }
 }
 
-/// A smiling face outline in the Windows Hello style: while looking the eyes glance from
-/// side to side; recognised, the eyes close happily and the smile widens.
+/// The Windows Hello face: two eyes and a smile (as `hello-face.svg`, no outline). While
+/// looking the eyes glance from side to side; recognised, they close happily.
 fn draw_vector(cr: &gtk::cairo::Context, width: f64, height: f64, face: &Face, elapsed: f64) {
-    let radius = width.min(height) / 2.0 - 2.0;
+    let radius = width.min(height) / 2.0;
     cr.translate(width / 2.0, height / 2.0);
     cr.scale(radius, radius);
     cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.set_line_width(2.4 / radius);
+    cr.set_line_width(0.17);
     cr.set_line_cap(gtk::cairo::LineCap::Round);
 
-    cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
-    let _ = cr.stroke();
-
-    let glance = if *face == Face::Looking { 0.12 * (elapsed * 1.6).sin() } else { 0.0 };
-    for x in [-0.36, 0.36] {
+    let glance = if *face == Face::Looking { 0.1 * (elapsed * 1.6).sin() } else { 0.0 };
+    for x in [-0.42, 0.42] {
         if *face == Face::Welcome {
-            cr.arc(x, -0.1, 0.16, 1.15 * std::f64::consts::PI, 1.85 * std::f64::consts::PI);
+            cr.arc(x, -0.3, 0.16, 1.15 * std::f64::consts::PI, 1.85 * std::f64::consts::PI);
             let _ = cr.stroke();
         } else {
-            cr.arc(x + glance, -0.18, 0.09, 0.0, std::f64::consts::TAU);
+            cr.arc(x + glance, -0.42, 0.13, 0.0, std::f64::consts::TAU);
             let _ = cr.fill();
         }
     }
-
-    let (from, to) = if *face == Face::Welcome { (0.12, 0.88) } else { (0.2, 0.8) };
-    cr.arc(0.0, 0.08, 0.55, from * std::f64::consts::PI, to * std::f64::consts::PI);
+    // The smile: an arc through (-0.78, 0.1) and (0.78, 0.1), bottoming out at y = 0.62.
+    cr.arc(0.0, -0.45, 1.07, 0.26 * std::f64::consts::PI, 0.74 * std::f64::consts::PI);
     let _ = cr.stroke();
 }

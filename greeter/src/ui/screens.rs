@@ -17,10 +17,10 @@ pub const SIGNING_IN: &str = "Signing in...";
 pub const USE_PASSWORD: &str = "Sign in with your password";
 
 pub const CSS: &str = r#"
-* { font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif; }
+* { font-family: "Segoe UI Variable", "Segoe UI", sans-serif; }
 window { background: transparent; }
 label { color: white; }
-.clock { font-family: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", sans-serif; font-size: 96px; font-weight: 300; }
+.clock { font-size: 96px; font-weight: 300; font-variation-settings: "opsz" 36; }
 .date { font-size: 28px; font-weight: 400; }
 .user-name { font-size: 28px; font-weight: 350; margin-top: 12px; }
 .status { font-size: 15px; }
@@ -114,7 +114,7 @@ fn avatar(account: &Account, assets: &Assets) -> gtk::DrawingArea {
                 let _ = cr.paint();
                 let layout = area.create_pango_layout(Some(&initials));
                 let mut font = gtk::pango::FontDescription::new();
-                font.set_family("Segoe UI Variable Display, Segoe UI, sans-serif");
+                font.set_family("Segoe UI Variable, Segoe UI, sans-serif");
                 font.set_absolute_size(f64::from(SIZE) * 0.42 * f64::from(gtk::pango::SCALE));
                 layout.set_font_description(Some(&font));
                 let (text_width, text_height) = layout.pixel_size();

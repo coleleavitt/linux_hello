@@ -88,15 +88,16 @@ by `scripts/extract_windows_hello_assets.py` — inventory in
 
 | In the directory | Source on Windows | Used for | Without it |
 |---|---|---|---|
-| `fonts/*.ttf` | `Windows/Fonts/SegUIVar.ttf` (Segoe UI Variable), `segoeui*.ttf`, `SegoeIcons.ttf`, `segmdl2.ttf` | added to fontconfig at start (`FcConfigAppFontAddDir`, before GTK builds its font map); the CSS asks for "Segoe UI Variable Display" (clock), "Segoe UI Variable Text", "Segoe UI" | the system sans (here Noto Sans) |
+| `fonts/*.ttf` | `Windows/Fonts/SegUIVar.ttf` (Segoe UI Variable), `segoeui*.ttf`, `SegoeIcons.ttf`, `segmdl2.ttf` | added to fontconfig at start (`FcConfigAppFontAddDir`, before GTK builds its font map); the CSS asks for "Segoe UI Variable" (fontconfig lists its Display/Text/Small instances as styles of that one family; the clock sets `opsz` 36, the Display instance) then "Segoe UI" | the system sans (here Noto Sans) |
 | `screen/img100.jpg` (`background` in the config) | `Windows/Web/Screen/` | the lock-screen background, blurred and dimmed on the sign-in screen | a solid dark blue |
 | `user-pictures/user-192.png` | `ProgramData/Microsoft/User Account Pictures/` | the user tile when the user has no `~/.face`, `~/.face.icon` or AccountsService icon | a grey disc with the initials |
-| `hello/frames/NNN.png`, else `hello/hello.png` | LogonUI / the credential provider (to be extracted) | the Hello face icon; frames play at 30 fps while looking | a glyph of the icon font (`hello_glyph = "EB68"`-style code point in the config, when `SegoeIcons.ttf`/`segmdl2.ttf` is in `fonts/`), else the greeter's own Cairo face (eyes glance while looking, smiles when recognised) |
+| `hello/hello-face.png`, `hello/HelloFaceAnimation.gif` | the credential provider's tile icon and LogonUI's animation (48 frames, 30 ms) | the Hello face icon; the GIF plays while looking, the still otherwise | a glyph of the icon font (`hello_glyph = "EB68"`-style code point in the config, when `SegoeIcons.ttf`/`segmdl2.ttf` is in `fonts/`), else the greeter's own Cairo face (eyes glance while looking, smiles when recognised) |
 
 The log says what is in use at start (`assets: …; fonts: …; hello: …; background: …`), and the
-`--window` dev window shows the same line in its corner. Verified with a scratch directory
-holding two fonts renamed to the Segoe families, a generated `img100.jpg`, 12 frames and a
-user picture: all four were picked up (screenshot below).
+`--window` dev window shows the same line in its corner. Verified with the extracted
+directory (fontconfig lists NUIMDL2Assets, Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI,
+Segoe UI Symbol, Segoe UI Variable; screenshots below) and with a scratch one (fonts renamed
+to the Segoe families, a generated image, a picture) for the matching itself.
 
 ## Configuration: `/etc/greetd/hello-greeter.toml`
 
@@ -173,15 +174,16 @@ session: it would take the keyboard. `grim -o winit` screenshots the nested outp
 `--window` the greeter makes a layer-shell overlay (greetd mode) or locks the compositor it
 runs in (`--lock`), which also works in the nested niri.
 
-Screenshots (nested niri, fake greetd, 1600×1000 at scale 2, 2026-10-16):
+Screenshots (nested niri, fake greetd, 1600×1000 at scale 2, 2026-10-16), with the real
+assets (Bloom `img100.jpg`, Segoe UI Variable, the default user picture, the Hello face) and
+without them:
 
 | | |
 |---|---|
-| lock screen | `docs/img/greeter-lock.png` |
-| sign-in, looking | `docs/img/greeter-looking.png` |
+| lock screen | `docs/img/greeter-lock.png`, fallback `greeter-lock-fallback.png` |
+| sign-in, looking (the GIF plays) | `docs/img/greeter-looking.png`, fallback `greeter-looking-fallback.png` |
 | sign-in, face not recognised, password | `docs/img/greeter-failed.png` |
 | wrong password | `docs/img/greeter-wrong-password.png` |
-| with a scratch assets directory (fonts, background, frames, picture) | `docs/img/greeter-assets.png` |
 
 ## What matches Windows and what does not
 
