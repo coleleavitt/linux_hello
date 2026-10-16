@@ -123,7 +123,9 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
   print in the template × 16 frame pairs) comes from a calibration table built on grayscale LFW
   photos ([docs/calibration.md](docs/calibration.md)), not yet on IR captures.
 - The RGB camera underexposes 2–3 frames about every 5 s; `OpenCameras` skips frames much darker
-  than the recent average, and a frame with no face in the RGB image counts as a veto.
+  than the recent average, and a frame with no face in the RGB image counts as a veto. An RGB
+  camera that delivers no frame for 1 s is dropped for the session (the colour net is skipped;
+  without the Windows Hello models the open RGB models then veto every frame).
 - Templates are stored unencrypted (root-only file) unless the store is sealed with the TPM
   (optional, see below).
 

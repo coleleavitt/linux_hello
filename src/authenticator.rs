@@ -5,8 +5,9 @@ use anyhow::{bail, Result};
 use image::RgbImage;
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use crate::camera;
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
 use crate::pipeline::Analysis;
@@ -16,6 +17,12 @@ use crate::{
 };
 
 const LIVENESS_BUFFERS: u32 = 2;
+/// How long to wait for an RGB frame. The RGB stream's first frame comes ≈ 50 ms after the IR
+/// stream has started (≈ 245 ms when it starts first; docs/capture-and-liveness.md §1). Once,
+/// early on, the RGB camera never delivered a frame and the unlock hung; after this long the
+/// session goes on without RGB, so the colour net is skipped as Windows skips a classifier whose
+/// input is missing (F25 status 6/7).
+const RGB_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_DARK_SKIPS: usize = 4;
 const DARK_RATIO: f32 = 0.5;
 /// Prints one enrollment collects (F54: 16 per enrolment in the v5 parameter block).
@@ -64,12 +71,16 @@ impl OpenCameras {
         // first frame takes ≈ 245 ms when it starts first and ≈ 50 ms after the IR stream
         // (docs/capture-and-liveness.md §1).
         let ir = IrCamera::open(&setup.device, setup.ir_metadata.as_deref())?;
-        let liveness = setup
-            .liveness_device
-            .as_ref()
-            .map(|d| Camera::open_with(d, CameraType::Rgb, 1, LIVENESS_BUFFERS))
-            .transpose()?;
+        let liveness = setup.liveness_device.as_deref().map(Self::open_rgb).transpose()?.flatten();
         Ok(Self { ir, liveness, rgb_level: None })
+    }
+
+    /// The RGB camera after its first frame, or `None` if that frame did not come within
+    /// [`RGB_FRAME_TIMEOUT`].
+    fn open_rgb(device: &str) -> Result<Option<Camera>> {
+        let mut camera = Camera::open_with(device, CameraType::Rgb, 0, LIVENESS_BUFFERS)?;
+        camera.set_timeout(RGB_FRAME_TIMEOUT);
+        without_rgb_on_timeout(camera.skip(1).map(|()| camera), "no first RGB frame")
     }
 
     pub fn capture(&mut self) -> Result<Capture> {
@@ -87,23 +98,44 @@ impl OpenCameras {
 
     /// The RGB camera underexposes 2-3 frames about every 5 s, and the liveness models reject
     /// those. Skip frames much darker than the recent average (up to a few in a row).
+    /// A camera that stops delivering frames ([`RGB_FRAME_TIMEOUT`]) is dropped for the session.
     fn capture_liveness(&mut self) -> Result<Option<RgbImage>> {
         let Some(cam) = self.liveness.as_mut() else { return Ok(None) };
-        let mut frame = cam.capture_rgb()?;
-        for _ in 0..MAX_DARK_SKIPS {
-            let level = brightness(&frame);
-            match self.rgb_level {
-                Some(avg) if level < DARK_RATIO * avg => {
-                    debug!(level, avg, "skipping underexposed RGB frame");
-                    frame = cam.capture_rgb()?;
-                }
-                _ => {
-                    self.rgb_level = Some(self.rgb_level.map_or(level, |avg| 0.8 * avg + 0.2 * level));
-                    break;
+        let frame = (|| {
+            let mut frame = cam.capture_rgb()?;
+            for _ in 0..MAX_DARK_SKIPS {
+                let level = brightness(&frame);
+                match self.rgb_level {
+                    Some(avg) if level < DARK_RATIO * avg => {
+                        debug!(level, avg, "skipping underexposed RGB frame");
+                        frame = cam.capture_rgb()?;
+                    }
+                    _ => {
+                        self.rgb_level = Some(self.rgb_level.map_or(level, |avg| 0.8 * avg + 0.2 * level));
+                        break;
+                    }
                 }
             }
+            Ok(frame)
+        })();
+        let frame = without_rgb_on_timeout(frame, "RGB frame stalled")?;
+        if frame.is_none() {
+            self.liveness = None;
         }
-        Ok(Some(frame))
+        Ok(frame)
+    }
+}
+
+/// `Ok(None)` with a warning when the RGB capture timed out, so that the session goes on without
+/// the RGB camera; any other error is passed on.
+fn without_rgb_on_timeout<T>(result: Result<T>, what: &str) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if camera::timed_out(&e) => {
+            warn!(timeout = ?RGB_FRAME_TIMEOUT, "{what}: continuing without the RGB camera (no colour-net veto)");
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -895,5 +927,15 @@ mod tests {
         assert!(session(0.51).attempt().augmentation().is_some());
         assert!(session(0.60).attempt().augmentation().is_none());
         assert!(session(0.45).attempt().augmentation().is_none());
+    }
+
+    #[test]
+    fn rgb_timeout_drops_the_camera_other_errors_fail() {
+        use anyhow::Context;
+        let timeout = || Err::<(), _>(std::io::Error::from(std::io::ErrorKind::TimedOut)).context("VIDIOC_DQBUF");
+        assert!(matches!(without_rgb_on_timeout(timeout(), "test"), Ok(None)));
+        assert!(matches!(without_rgb_on_timeout(Ok(1), "test"), Ok(Some(1))));
+        let other = Err::<(), _>(std::io::Error::from(std::io::ErrorKind::NotFound)).context("VIDIOC_DQBUF");
+        assert!(without_rgb_on_timeout(other, "test").is_err());
     }
 }

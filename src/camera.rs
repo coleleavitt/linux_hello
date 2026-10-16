@@ -105,6 +105,12 @@ impl Camera {
         Ok(())
     }
 
+    /// Give up waiting for a frame after `timeout`; the capture then fails with an error for
+    /// which [`timed_out`] is true.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.stream.set_timeout(timeout);
+    }
+
     /// Capture a single frame as grayscale
     fn capture_gray(&mut self) -> Result<GrayFrame> {
         let (buf, meta) = self.stream.next()?;
@@ -370,6 +376,11 @@ fn roi_controls(handle: &Handle, get: bool, which: u32, rect: &mut v4l2_rect, au
         *auto = controls[1].__bindgen_anon_1.value;
     }
     Ok(())
+}
+
+/// Whether a capture error is the stream timeout set by [`Camera::set_timeout`].
+pub fn timed_out(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::TimedOut))
 }
 
 /// Sum of every 5th pixel of every 5th row, like Windows' `FrameStrobe` (F15).
