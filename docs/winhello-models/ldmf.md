@@ -177,8 +177,14 @@ Which tracker is the helper (JDA again or `RetinaEngine`) depends on feature fla
 * Pose (`DecodeRotationVec` 0x18001a8a8): dofs·std + mean → rotation vector r;
   M = K_img⁻¹·K_box·R(r) with K_box = [[W+H,0,ax],[0,W+H,ay]], K_img = [[W+H,0,W/2],[0,W+H,H/2]];
   outputs (atan2(M₁₂, M₂₂), asin(M₀₂), −atan2(M₀₁, M₀₀)) in degrees. Formula fitted to and verified against the
-  function under Unicorn: max error 2.4e-5° on 200 random inputs. Which output is yaw/pitch/roll is UNKNOWN
-  (first = rotation about x, second about y, third about z).
+  function under Unicorn: max error 2.4e-5° on 200 random inputs.
+* Angle names (OBSERVED, disassembly): `ProcessResultCandidates` passes `&cand+0x38`, `+0x3C`, `+0x40` as the three
+  outputs (`lea 0x178/0x17c/0x180(%rsp)` at 0x18000611c–0x180006136, candidate at rsp+0x140, call 0x18000615b;
+  candidates are 72-byte records, `FindCachedResultCandidate` 0x18001e93c). `ComputeOrientation` 0x18003d6f0 reads
+  +0x38 → `FaceOrientationResult`+0 with flags +14/+15 = `> 25` / `< −25` (pitch), +0x3C → +4 with flags +12/+13 =
+  `> 20` / `< −20` (yaw), +0x40 → +8 (roll), and writes 0 to the frontal margin (+16). So **pitch = rotation about
+  x, yaw = rotation about y, roll = rotation about z**, in that output order. Visual check on the stranger photo
+  (INFERRED): the profile face gets yaw 53°, the two faces tilted in the image plane roll −33…−34°.
 
 ## 8. Usage
 
@@ -241,10 +247,37 @@ merge, RetinaEngine decode/NMS. Assumed / open:
 - `max_face` layer limit: the DLL bounds layers via `ImageMetadata::Initialize` 0x18000358c with arguments not
   traced; we use face size ≤ min(H, W, 2584).
 - Window-tracker suppression and layer prioritisation (§5) are omitted.
-- Names of the 31/27 landmarks beyond 0–4, and of the three pose angles.
+- Names of the 31/27 landmarks beyond 0–4.
 - Which tracker is the "helper" in `FaceDetectorWithHelper` and the exact feature-flag gating of RetinaEngine.
 - `ShouldRejectCandidate`'s orientation part (`GetFrameOrientation`) and search-area containment test.
 - The meaning of header +0x60 (timestamp is a guess) and the unused 4-byte vector.
+
+## 11. Rust port and frontal gate (`src/ms_models/retina.rs`)
+
+linux_hello loads `ldmf/ort/MODEL_FILES_110.ort` (`MsRetinaDetector`, part of `WindowsHelloModels`; installed by
+`contrib/install.sh`) and decodes it as in §7. `MsRetinaFace::orientation` is the `FaceOrientationResult` of
+`ComputeOrientation` (pitch, yaw, roll, flags). `FacePipeline::analyze` runs the detector on the lit frame after
+the size, edge, lighting and occlusion gates, takes the Retina face that overlaps the SCRFD face best (IoU ≥ 0.5)
+and rejects the frame with `NOFACE not_frontal` when that face is not frontal **or when there is no such face**:
+in Windows the Retina detector is the tracker, so a face it does not report (e.g. landmarks outside the frame,
+`ShouldRejectCandidate`) has no orientation and is never processed. Not ported: the ROI search area, the
+histogram-equalised helper pass and `ShouldRejectCandidate`'s orientation/containment tests; Rust keeps float
+boxes where the DLL truncates them to int (only the IoU match and the any-overlap selection see this).
+
+Validation (`examples/ms_check` on `validation_frames`, release build, ORT CPU):
+
+| frame | Retina face (IoU vs SCRFD) | pitch | yaw | roll | frontal |
+|---|---|---|---|---|---|
+| watch_0014 | 0.91 | −14.5 | 3.8 | −2.1 | yes |
+| watch_0147 | 0.91 | −10.8 | 4.9 | −3.3 | yes |
+| watch_0258 | 0.91 | −13.1 | 4.7 | −2.9 | yes |
+| watch_0435 | 0.91 | −14.3 | 1.9 | −3.4 | yes |
+| ir_11/13/15/17/19 | none (landmarks below the frame) | | | | no (also rejected earlier by the edge gate) |
+| strangers photo (gray), 6 faces | 0.84–0.92 | −35.1…−0.6 | −16.8…52.8 | −36.1…15.6 | 2 of 6 |
+
+All 4 owner frames with the whole face in view pass; `FacePipeline::analyze` accepts them and rejects a crop of
+the stranger photo's profile face with `not_frontal`. Rust angles equal `retina.py` within 6.2e-6° on every face
+(f32 vs f64 decode). Run time of the detector: 2.3–3.1 ms per 640×360 frame (7–12 ms for the 1280×886 photo).
 
 ## Finding ledger
 
@@ -261,3 +294,4 @@ merge, RetinaEngine decode/NMS. Assumed / open:
 | L9 | RetinaEngine input = raw 0–255 floats, threshold 0.925, strides/anchors per type | OBSERVED | ProcessNextFrame, Initialize |
 | L10 | 6-DoF output is img2pose-like (mean/std, K = W+H focal) | INFERRED | constants + DecodeRotationVec structure |
 | L11 | pairing 101↔110/112, 102↔111/113 | INFERRED | shared type enum |
+| L12 | `DecodeRotationVec` outputs 1/2/3 = pitch/yaw/roll of `FaceOrientationResult` (frontal: |yaw| ≤ 20°, |pitch| ≤ 25°) | OBSERVED | ProcessResultCandidates call 0x18000615b, ComputeOrientation 0x18003d6f0 (§7) |

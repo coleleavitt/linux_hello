@@ -106,7 +106,8 @@ what this does and does not protect, PCR binding, enabling the TPM in the BIOS, 
 - No IR anti-spoofing model: Windows votes "live" with two IR CNNs (proprietary). Here the IR
   evidence is only the lighting status, and the RGB models can only veto. A print or mask that
   reflects IR like skin passes the gate; the RGB veto has to catch it.
-- No head-pose or occlusion check, and no face tracking across frames (Windows has all three).
+- The head-pose and occlusion checks run only with the converted Windows Hello models
+  (`models/windows_hello/converted`, git-ignored); there is no face tracking across frames.
 - Ambient subtraction has no motion compensation (Windows warps with an affine transform); fast
   head movement between the two frames (67 ms) leaves edges in the difference image.
 - The similarity threshold is a raw cosine value (0.50), not a per-user false-accept estimate like
