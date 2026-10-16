@@ -282,7 +282,8 @@ impl Authenticator {
     }
 
     /// Enroll `frames` prints from frame pairs that pass every frame gate with good lighting.
-    pub fn enroll(&mut self, user: &str, frames: usize) -> Result<()> {
+    /// Unless `force`, refuse a face that matches another enrolled user.
+    pub fn enroll(&mut self, user: &str, frames: usize, force: bool) -> Result<()> {
         let mut ir = IrCamera::open(&self.cameras.device, self.cameras.ir_metadata.as_deref())?;
         self.pipeline.set_enrolling(true);
         let mut prints = Vec::new();
@@ -305,7 +306,7 @@ impl Authenticator {
                 prints.len()
             );
         }
-        self.pipeline.enroll(user, prints)
+        self.pipeline.enroll(user, prints, force)
     }
 }
 

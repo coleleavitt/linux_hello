@@ -221,6 +221,14 @@ must be re-enrolled the same way.
 `--frames` pairs that pass every frame gate with good lighting (at most 4 pairs per print), and
 stores one print per pair.
 
+Before storing, it compares every new print with the templates of the other enrolled users, as
+Windows' `CheckForDuplicateEnrollment`. If one matches above `MATCH_THRESHOLD` (0.50), enrollment
+fails and names the closest such user: `this face matches enrolled user alice (similarity 0.641);
+use --force to enroll it anyway`. `--force` stores the prints anyway (twins, or one person with two
+accounts). Re-enrolling a user compares only with the others. Checked on saved frames: the owner's
+lit frames from one sitting against a template from another sitting match at 0.641; the six
+faces of the stranger photo score −0.05…0.03 against the owner and are not refused.
+
 ## Inspecting
 
 `linux_hello watch [--seconds 30]` prints one line per pair: face brightness lit/ambient, `d`,

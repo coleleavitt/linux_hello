@@ -172,10 +172,16 @@ impl FacePipeline {
         Ok(total / self.liveness.len() as f32)
     }
 
-    /// Store one print per enrollment frame (no averaging, F28) and save.
-    pub fn enroll(&mut self, user_id: &str, prints: Vec<Embedding>) -> Result<()> {
+    /// Store one print per enrollment frame (no averaging, F28) and save. Unless `force`, refuse
+    /// prints that match another enrolled user (`CheckForDuplicateEnrollment`).
+    pub fn enroll(&mut self, user_id: &str, prints: Vec<Embedding>, force: bool) -> Result<()> {
         if prints.is_empty() {
             bail!("no enrollment prints");
+        }
+        if let (false, Some((other, similarity))) = (force, self.store.duplicate(user_id, &prints)) {
+            bail!(
+                "this face matches enrolled user {other} (similarity {similarity:.3}); use --force to enroll it anyway"
+            );
         }
         let count = prints.len();
         self.store.add(user_id.to_string(), Template::enrolled(prints));

@@ -65,6 +65,9 @@ enum Commands {
         /// Frame pairs to keep as prints (each must pass the IR lighting gate)
         #[arg(long, default_value_t = 5)]
         frames: usize,
+        /// Enroll even if the face matches another enrolled user
+        #[arg(long)]
+        force: bool,
     },
     /// Remove an enrolled face
     Remove { user: String },
@@ -148,9 +151,9 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Enroll { user, frames } => {
+        Commands::Enroll { user, frames, force } => {
             let pipeline = pipeline(Vec::new())?;
-            Authenticator { pipeline, cameras }.enroll(&user, frames)?;
+            Authenticator { pipeline, cameras }.enroll(&user, frames, force)?;
             println!("Enrolled {user} with {frames} prints into {}", store.display());
         }
 

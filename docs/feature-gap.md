@@ -80,7 +80,7 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Multi-pose enrolment, 16 prints, quality-gated frames, registration per hardware model (F54, Q5) | Partial: 5 individual prints, each from a gated good-lighting frame; no pose guidance | Guide the user through slight poses; more prints |
-| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | Missing | Compare new prints against other users' prints at the FAR threshold |
+| Duplicate-enrolment check (`CheckForDuplicateEnrollment`) | **Done**: `enroll` refuses when a new print matches another user's template above `MATCH_THRESHOLD` (0.50) and names that user; `--force` overrides | — |
 | Per-hardware-model registrations (`Registration`, `HardwareModelContainer`) (F51) | N/A (single camera) | Store camera id with prints if a second camera is used |
 
 ## Template update

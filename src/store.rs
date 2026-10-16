@@ -14,7 +14,7 @@ use tracing::debug;
 
 #[cfg(feature = "tpm")]
 use crate::tpm::{DataKey, SealedFile};
-use crate::Template;
+use crate::{Embedding, Template, MATCH_THRESHOLD};
 
 /// Persistent face template store
 pub struct FaceStore {
@@ -168,6 +168,21 @@ impl FaceStore {
         self.faces.get_mut(user_id)
     }
     
+    /// The other enrolled user that one of `prints` matches (similarity above [`MATCH_THRESHOLD`]),
+    /// with the similarity; the closest one if several do (`CheckForDuplicateEnrollment`).
+    pub fn duplicate(&self, user: &str, prints: &[Embedding]) -> Option<(&str, f32)> {
+        self.faces
+            .iter()
+            .filter(|(other, _)| *other != user)
+            .filter_map(|(other, template)| {
+                let best =
+                    prints.iter().filter_map(|p| template.best_match(p)).map(|m| m.similarity).reduce(f32::max)?;
+                Some((other.as_str(), best))
+            })
+            .filter(|(_, similarity)| *similarity > MATCH_THRESHOLD)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
     /// List all user IDs
     pub fn list_users(&self) -> Vec<&str> {
         self.faces.keys().map(|s| s.as_str()).collect()
@@ -203,5 +218,21 @@ mod tests {
         let err = FaceStore::load(&path).err().unwrap();
         assert!(format!("{err:#}").contains("re-enrolled"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn duplicate_names_the_closest_other_user() {
+        let emb = |features: &[f32]| crate::Embedding { features: features.to_vec() };
+        let mut store = FaceStore::load(std::env::temp_dir().join("linux_hello_store_unused.json")).unwrap();
+        store.add("alice".into(), Template::enrolled([emb(&[1.0, 0.0, 0.0])]));
+        store.add("bob".into(), Template::enrolled([emb(&[0.6, 0.8, 0.0])]));
+        // Similarity 0.8 to alice, 0.96 to bob.
+        let probe = [emb(&[0.0, 0.0, 1.0]), emb(&[0.8, 0.6, 0.0])];
+        let rounded = |d: Option<(&str, f32)>| d.map(|(user, s)| (user.to_string(), (s * 100.0).round() as i32));
+        assert_eq!(rounded(store.duplicate("carol", &probe)), Some(("bob".into(), 96)));
+        // Re-enrolling bob only compares with the others.
+        assert_eq!(rounded(store.duplicate("bob", &probe)), Some(("alice".into(), 80)));
+        // At or below the threshold is not a duplicate.
+        assert_eq!(store.duplicate("carol", &[emb(&[0.5, 0.0, 0.866])]), None);
     }
 }
