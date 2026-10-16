@@ -9,7 +9,7 @@ use tracing::{debug, info};
 
 use crate::lid;
 use crate::matcher::MIN_PRINTS;
-use crate::pipeline::Analysis;
+use crate::pipeline::{Analysis, FaceCheck};
 use crate::{
     Camera, CameraType, Embedding, Face, FacePipeline, FaceProblem, FaceTracker, FrameCheck, IrCamera, IrPair,
     LightingStatus, LivenessSession, LivenessState, PrintMatch, Verdict, Vote,
@@ -114,62 +114,106 @@ pub const MAX_PAIRS: u32 = 16;
 /// `IdentifyAsGuest(3)`): a mask or a hand will not go away within the pair budget.
 pub const OCCLUDED_GIVE_UP: u32 = 4;
 
-/// One authentication: up to [`MAX_PAIRS`] frame pairs, once more after a re-attempt (F49). The
-/// largest face is tracked across pairs by place and by print ([`FaceTracker`]) and each track
+/// One authentication: up to [`MAX_PAIRS`] frame pairs, once more after a re-attempt (F49). Every
+/// analysed face is tracked across pairs by place and by print ([`FaceTracker`]) and each track
 /// gets its own [`Attempt`] (F37, F47), so the prints and votes of one face never count for
-/// another (the owner's face, then a photo held up next to it or in its place).
+/// another (the owner's face, then a photo held up next to it or in its place). The verdict comes
+/// from the track of the user: the one recognised, or at the pair limit the one matching best.
 #[derive(Default)]
 pub struct Session {
     tracker: FaceTracker,
-    /// Track of the current attempt
-    track: Option<u32>,
-    attempt: Attempt,
-    /// What the tracked face did over the attempt's frames
-    motion: FaceMotion,
-    /// Consecutive occluded frames of the track
-    occluded: u32,
+    /// Every track of the session by id
+    tracks: BTreeMap<u32, Track>,
+    /// Track ids of the faces of the last pair, in face order
+    current: Vec<u32>,
+    /// The track whose attempt gave the verdict
+    decided: Option<u32>,
     /// Pairs since the session, or the re-attempt, started
     pairs: u32,
     reattempted: bool,
-    /// Frame rejection reasons over the whole session, for `NOFACE <reason>`
+    /// Rejection reasons of the largest face over the whole session, for `NOFACE <reason>`
     problems: HashMap<FaceProblem, u32>,
+}
+
+/// One tracked face's state over the session.
+#[derive(Default)]
+struct Track {
+    attempt: Attempt,
+    /// What the face did over the attempt's frames
+    motion: FaceMotion,
+    /// Consecutive occluded frames
+    occluded: u32,
 }
 
 impl Session {
     /// Count one frame pair; returns the verdict once there is one.
     pub fn add(&mut self, check: &FrameCheck) -> Option<Verdict> {
         self.pairs += 1;
-        if let Some(problem) = check.analysis.problem {
+        if let Some(problem) = check.largest().map_or(Some(FaceProblem::NoFace), |f| f.analysis.problem) {
             *self.problems.entry(problem).or_default() += 1;
         }
-        let track = self.tracker.update(check.analysis.face.as_ref(), check.analysis.print.as_ref());
-        if track.is_some() && track != self.track {
-            if self.track.is_some() {
-                debug!(?track, "new face track: starting over");
-            }
-            self.track = track;
-            self.attempt = Attempt::default();
-            self.motion = FaceMotion::default();
-            self.occluded = 0;
+        let faces: Vec<_> = check.faces.iter().map(|f| (&f.analysis.face, f.analysis.print.as_ref())).collect();
+        self.current = self.tracker.update(&faces);
+        for (id, face) in self.current.iter().zip(&check.faces) {
+            let track = self.tracks.entry(*id).or_insert_with(|| {
+                debug!(id, "new face track");
+                Track::default()
+            });
+            track.motion.add(&face.analysis.face, check.frame, face.analysis.lighting.map(|l| l.lit));
+            track.occluded = if face.analysis.problem == Some(FaceProblem::Occluded) { track.occluded + 1 } else { 0 };
+            track.attempt.add(face);
         }
-        if let Some(face) = &check.analysis.face {
-            self.motion.add(face, check.analysis.frame, check.analysis.lighting.map(|l| l.lit));
-        }
-        self.occluded = if check.analysis.problem == Some(FaceProblem::Occluded) { self.occluded + 1 } else { 0 };
-        if self.occluded >= OCCLUDED_GIVE_UP && !self.attempt.recognised() {
+        // Every face of the pair occluded for OCCLUDED_GIVE_UP pairs while no face is recognised (F46).
+        let occluded = self.current.iter().all(|id| self.tracks[id].occluded >= OCCLUDED_GIVE_UP);
+        if !self.current.is_empty() && occluded && self.tracks.values().all(|t| !t.attempt.recognised()) {
             return Some(Verdict::NoFace { problem: FaceProblem::Occluded });
         }
-        let verdict =
-            self.attempt.add(check).or_else(|| (self.pairs >= MAX_PAIRS).then(|| self.attempt.give_up(&self.problems)));
+        // A face is recognised only if no other face of the pair matches the user better (F48).
+        let fars: Vec<Option<f64>> = self.current.iter().map(|id| self.tracks[id].attempt.far()).collect();
+        let mut verdict = None;
+        for (i, (id, face)) in self.current.iter().zip(&check.faces).enumerate() {
+            let contested = fars[i].is_some_and(|mine| {
+                fars.iter().enumerate().any(|(j, other)| j != i && other.is_some_and(|other| other < mine))
+            });
+            let track = self.tracks.get_mut(id).expect("inserted above");
+            if let Some(v) = track.attempt.decide(face.vote, contested) {
+                verdict = Some((*id, v));
+                break;
+            }
+        }
+        let verdict = verdict.or_else(|| (self.pairs >= MAX_PAIRS).then(|| self.give_up()));
         match verdict {
-            Some(Verdict::NoMatch { .. } | Verdict::NotLive) if !self.reattempted && self.motion.changed() => {
-                info!(?verdict, moved = self.motion.moved(), exposure = self.motion.exposure_changed(), "re-attempt");
+            Some((id, verdict @ (Verdict::NoMatch { .. } | Verdict::NotLive)))
+                if !self.reattempted && self.tracks[&id].motion.changed() =>
+            {
+                let motion = &self.tracks[&id].motion;
+                info!(?verdict, track = id, moved = motion.moved(), exposure = motion.exposure_changed(), "re-attempt");
                 self.reattempted = true;
                 self.pairs = 0;
-                self.attempt = Attempt::default();
+                self.tracks.get_mut(&id).expect("decided").attempt = Attempt::default();
                 None
             }
-            verdict => verdict,
+            Some((id, verdict)) => {
+                self.decided = Some(id);
+                Some(verdict)
+            }
+            None => None,
+        }
+    }
+
+    /// The verdict when the session runs out of frame pairs, from the track of the user: the
+    /// recognised one, else the best match among the tracks with enough prints; without one,
+    /// `NOFACE` with the most frequent rejection reason.
+    fn give_up(&self) -> (u32, Verdict) {
+        let deciding = self.tracks.iter().filter(|(_, t)| t.attempt.prints >= MIN_PRINTS).max_by(|(_, a), (_, b)| {
+            a.attempt.rank().0.cmp(&b.attempt.rank().0).then(a.attempt.rank().1.total_cmp(&b.attempt.rank().1))
+        });
+        match deciding {
+            Some((id, track)) => (*id, track.attempt.give_up()),
+            None => {
+                let problem = self.problems.iter().max_by_key(|(_, n)| **n).map_or(FaceProblem::NoFace, |(p, _)| *p);
+                (*self.current.first().unwrap_or(&0), Verdict::NoFace { problem })
+            }
         }
     }
 
@@ -178,23 +222,23 @@ impl Session {
         self.reattempted
     }
 
-    /// Id of the tracked face the current attempt belongs to.
-    pub fn track(&self) -> Option<u32> {
-        self.track
+    /// The track of each face of the last pair, in face order, with its attempt.
+    pub fn attempts(&self) -> impl Iterator<Item = (u32, &Attempt)> {
+        self.current.iter().map(|id| (*id, &self.tracks[id].attempt))
     }
 
-    /// The attempt of the current track.
-    pub fn attempt(&self) -> &Attempt {
-        &self.attempt
+    /// The attempt of the track that gave the verdict.
+    pub fn decided(&self) -> Option<&Attempt> {
+        self.decided.map(|id| &self.tracks[&id].attempt)
     }
 
     /// The enroll-on-failure candidate (F31) of a session that saw only one face: Windows aborts
     /// enroll-on-failure when other faces were seen (`AbortingSinceOtherFacesWereSeenDuringTrackedSession`).
     pub fn failed_print(&self) -> Option<&Embedding> {
-        if self.track != Some(1) {
-            return None;
+        match self.tracks.values().collect::<Vec<_>>()[..] {
+            [only] => only.attempt.failed_print(),
+            _ => None,
         }
-        self.attempt.failed_print()
     }
 }
 
@@ -297,8 +341,8 @@ pub struct Attempt {
 }
 
 impl Attempt {
-    /// Count one frame pair of this face; returns the verdict once liveness decides.
-    pub fn add(&mut self, check: &FrameCheck) -> Option<Verdict> {
+    /// Record one frame pair of this face; [`Self::decide`] then draws the conclusions.
+    pub fn add(&mut self, check: &FaceCheck) {
         if let Some(print) = &check.analysis.print {
             self.prints += 1;
             if let Some(m) = check.best {
@@ -312,10 +356,17 @@ impl Attempt {
             }
         }
         self.votes.add(check.vote);
+    }
+
+    /// `MakeDecisions` for this face after [`Self::add`]: the user is recognised once the face has
+    /// [`MIN_PRINTS`] prints and its best print matches, unless `contested` (another tracked face
+    /// matches the user better, F48); the frame's `vote` counts from the recognising frame on.
+    /// Returns the verdict once liveness decides.
+    pub fn decide(&mut self, vote: Vote, contested: bool) -> Option<Verdict> {
         if !self.recognised {
-            self.recognised = self.prints >= MIN_PRINTS && self.best.is_some_and(|m| m.recognised());
+            self.recognised = !contested && self.prints >= MIN_PRINTS && self.best.is_some_and(|m| m.recognised());
         }
-        let state = if self.recognised { self.session.add(check.vote) } else { LivenessState::Pending };
+        let state = if self.recognised { self.session.add(vote) } else { LivenessState::Pending };
         match state {
             LivenessState::Live => Some(Verdict::Match { similarity: self.best.expect("recognised").similarity }),
             LivenessState::Spoof => Some(Verdict::NotLive),
@@ -329,6 +380,16 @@ impl Attempt {
 
     pub fn liveness(&self) -> LivenessState {
         self.session.state()
+    }
+
+    /// Estimated FAR of the face's best print so far.
+    pub fn far(&self) -> Option<f64> {
+        self.best.map(|m| m.far)
+    }
+
+    /// Which face is the user's when none has unlocked: recognised first, then the best similarity.
+    fn rank(&self) -> (bool, f32) {
+        (self.recognised, self.best.map_or(f32::MIN, |m| m.similarity))
     }
 
     /// The print to add to the template after a match: the best-matching live frame, only when
@@ -345,42 +406,48 @@ impl Attempt {
         self.live_best.as_ref().filter(|_| real && !self.recognised).map(|(print, _)| print)
     }
 
-    /// The verdict when the session runs out of frame pairs; `problems` are the session's frame
-    /// rejection reasons.
-    fn give_up(&self, problems: &HashMap<FaceProblem, u32>) -> Verdict {
+    /// The verdict when the session runs out of frame pairs with this face having
+    /// [`MIN_PRINTS`] prints.
+    fn give_up(&self) -> Verdict {
         if self.recognised {
             return Verdict::NotLive;
         }
-        if self.prints >= MIN_PRINTS {
-            return self.best.map_or(Verdict::NotEnrolled, |m| Verdict::NoMatch { similarity: m.similarity });
-        }
-        let problem = problems.iter().max_by_key(|(_, n)| **n).map_or(FaceProblem::NoFace, |(p, _)| *p);
-        Verdict::NoFace { problem }
+        self.best.map_or(Verdict::NotEnrolled, |m| Verdict::NoMatch { similarity: m.similarity })
     }
 }
 
-/// One line per frame pair: face brightness lit/ambient, emitter gain, lighting status or
-/// rejection reason, RGB P(real), vote, similarity and its estimated FAR.
-pub fn describe(check: &FrameCheck) -> String {
+/// One line per frame pair, one part per face: its track, face brightness lit/ambient, emitter
+/// gain, lighting status or rejection reason, RGB P(real), vote, similarity and its estimated
+/// FAR, whether the track is recognised and its liveness state; `no_face` without a face.
+pub fn describe(check: &FrameCheck, session: &Session) -> String {
+    if check.faces.is_empty() {
+        return "no_face".to_string();
+    }
     let num = |v: Option<f32>, digits: usize| v.map_or("-".to_string(), |v| format!("{v:.digits$}"));
-    let a = &check.analysis;
-    let l = a.lighting;
-    let status = match (a.problem, a.status()) {
-        (Some(p), _) => p.as_str().to_string(),
-        (None, Some(s)) => format!("{s:?}").to_lowercase(),
-        (None, None) => "-".to_string(),
+    let face = |check: &FaceCheck, (track, attempt): (u32, &Attempt)| {
+        let a = &check.analysis;
+        let l = a.lighting;
+        let status = match (a.problem, a.status()) {
+            (Some(p), _) => p.as_str().to_string(),
+            (None, Some(s)) => format!("{s:?}").to_lowercase(),
+            (None, None) => "-".to_string(),
+        };
+        format!(
+            "track={track} lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={} \
+             far={} recognised={} liveness={:?}",
+            num(l.map(|l| l.lit), 1),
+            num(l.map(|l| l.ambient), 1),
+            num(l.map(|l| l.gain()), 1),
+            num(check.liveness, 3),
+            check.windows.as_ref().map_or("-".to_string(), |w| w.total.to_string()),
+            check.vote,
+            num(check.best.map(|b| b.similarity), 3),
+            check.best.map_or("-".to_string(), |b| format!("{:.1e}", b.far)),
+            attempt.recognised(),
+            attempt.liveness(),
+        )
     };
-    format!(
-        "lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={} far={}",
-        num(l.map(|l| l.lit), 1),
-        num(l.map(|l| l.ambient), 1),
-        num(l.map(|l| l.gain()), 1),
-        num(check.liveness, 3),
-        check.windows.as_ref().map_or("-".to_string(), |w| w.total.to_string()),
-        check.vote,
-        num(check.best.map(|b| b.similarity), 3),
-        check.best.map_or("-".to_string(), |b| format!("{:.1e}", b.far)),
-    )
+    check.faces.iter().zip(session.attempts()).map(|(c, a)| face(c, a)).collect::<Vec<_>>().join(" | ")
 }
 
 /// What [`Authenticator::verify`] found.
@@ -419,23 +486,16 @@ impl Authenticator {
         let verdict = loop {
             let capture = cams.capture()?;
             let check = self.pipeline.check(user, &capture.pair, capture.rgb.as_ref())?;
-            cams.expose_on(check.analysis.face.as_ref());
+            cams.expose_on(check.largest().map(|f| &f.analysis.face));
             let verdict = session.add(&check);
-            let attempt = session.attempt();
-            info!(
-                user,
-                track = ?session.track(),
-                recognised = attempt.recognised(),
-                liveness = ?attempt.liveness(),
-                "{}",
-                describe(&check)
-            );
+            info!(user, "{}", describe(&check, &session));
             if let Some(verdict) = verdict {
                 break verdict;
             }
         };
         drop(cams);
-        if let (Verdict::Match { .. }, Some((print, matched))) = (verdict, session.attempt().augmentation()) {
+        let augmentation = session.decided().and_then(Attempt::augmentation);
+        if let (Verdict::Match { .. }, Some((print, matched))) = (verdict, augmentation) {
             let added = self.pipeline.augment(user, print, matched)?;
             info!(
                 user,
@@ -488,11 +548,11 @@ impl Authenticator {
         self.pipeline.set_enrolling(true);
         let start = Instant::now();
         while collected.len() - existing < wanted && start.elapsed() < ENROLL_TIMEOUT {
-            let analysis = self.pipeline.analyze(&ir.capture_pair()?)?;
-            if let Some(face) = &analysis.face {
-                ir.expose_on(face.bbox);
+            let analysis = self.pipeline.analyze(&ir.capture_pair()?)?.into_iter().next();
+            if let Some(a) = &analysis {
+                ir.expose_on(a.face.bbox);
             }
-            let lighting = analysis.lighting;
+            let lighting = analysis.as_ref().and_then(|a| a.lighting);
             match take_print(&mut collected, analysis) {
                 None => progress(collected.len() - existing, wanted),
                 Some(reason) => {
@@ -520,10 +580,11 @@ impl Authenticator {
     }
 }
 
-/// Add the print of one enrollment frame to `collected`, if the frame has good lighting and
-/// shows a view of the face not yet collected ([`DUPLICATE_PRINT`]); otherwise the reason it was
-/// skipped.
-fn take_print(collected: &mut Vec<Embedding>, analysis: Analysis) -> Option<&'static str> {
+/// Add the print of one enrollment frame's largest face to `collected`, if the frame has good
+/// lighting and shows a view of the face not yet collected ([`DUPLICATE_PRINT`]); otherwise the
+/// reason it was skipped.
+fn take_print(collected: &mut Vec<Embedding>, analysis: Option<Analysis>) -> Option<&'static str> {
+    let Some(analysis) = analysis else { return Some("no_face") };
     match (analysis.status(), analysis.print) {
         (Some(LightingStatus::Good), Some(print)) => {
             if collected.iter().any(|p| p.similarity(&print) > DUPLICATE_PRINT) {
@@ -568,26 +629,30 @@ mod tests {
     const OWNER: [f32; 4] = [200.0, 100.0, 300.0, 230.0];
     const PHOTO: [f32; 4] = [400.0, 120.0, 480.0, 220.0];
 
-    fn face(bbox: [f32; 4]) -> Option<Face> {
-        Some(Face { bbox, score: 1.0, landmarks: [[0.0; 2]; 5] })
+    fn face(bbox: [f32; 4]) -> Face {
+        Face { bbox, score: 1.0, landmarks: [[0.0; 2]; 5] }
     }
 
-    /// A usable pair of the face at `bbox` with good (`live`) or weak lighting, matching at
-    /// `similarity` against a 15-print template (FAR from the shipped table: 0.50 ↔ 1e-5). The
-    /// print's first component tells the owner (1) from another person (−1): prints of one person
-    /// score > 1 to each other, of two people < 0, around the tracker's 0.5; the second keeps the
-    /// frame's similarity so a test can tell which print was picked.
-    fn usable_as(person: f32, bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
+    /// A pair of the faces given, largest first.
+    fn pair(faces: Vec<FaceCheck>) -> FrameCheck {
+        FrameCheck { frame: FRAME, faces }
+    }
+
+    /// A usable face at `bbox` with good (`live`) or weak lighting, matching at `similarity`
+    /// against a 15-print template (FAR from the shipped table: 0.50 ↔ 1e-5). The print's first
+    /// component tells the owner (1) from another person (−1): prints of one person score > 1 to
+    /// each other, of two people < 0, around the tracker's 0.5; the second keeps the frame's
+    /// similarity so a test can tell which print was picked.
+    fn person(identity: f32, bbox: [f32; 4], vote: Vote, similarity: f32) -> FaceCheck {
         let ambient = if vote == Vote::Abstain { 60.0 } else { 5.0 };
         let far = crate::calibration::lfw_gray().far(similarity, 15);
-        FrameCheck {
+        FaceCheck {
             analysis: Analysis {
-                frame: FRAME,
                 face: face(bbox),
                 windows_face: None,
                 lighting: Some(Lighting { lit: 80.0, ambient }),
                 problem: None,
-                print: Some(Embedding { features: vec![person, similarity] }),
+                print: Some(Embedding { features: vec![identity, similarity] }),
             },
             liveness: None,
             windows: None,
@@ -597,17 +662,27 @@ mod tests {
     }
 
     /// The owner's face at `bbox`.
+    fn owner(bbox: [f32; 4], vote: Vote, similarity: f32) -> FaceCheck {
+        person(1.0, bbox, vote, similarity)
+    }
+
+    /// Someone else's face at `bbox`.
+    fn stranger(bbox: [f32; 4], vote: Vote, similarity: f32) -> FaceCheck {
+        person(-1.0, bbox, vote, similarity)
+    }
+
+    /// A pair with the owner's face at `bbox` alone.
     fn usable_at(bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
-        usable_as(1.0, bbox, vote, similarity)
+        pair(vec![owner(bbox, vote, similarity)])
     }
 
     fn usable(vote: Vote, similarity: f32) -> FrameCheck {
         usable_at(OWNER, vote, similarity)
     }
 
-    /// Someone else's face at `bbox`.
+    /// A pair with someone else's face at `bbox` alone.
     fn stranger_at(bbox: [f32; 4], vote: Vote, similarity: f32) -> FrameCheck {
-        usable_as(-1.0, bbox, vote, similarity)
+        pair(vec![stranger(bbox, vote, similarity)])
     }
 
     /// The owner's box shifted right by `dx` pixels.
@@ -615,12 +690,11 @@ mod tests {
         [OWNER[0] + dx, OWNER[1], OWNER[2] + dx, OWNER[3]]
     }
 
-    fn rejected_at(bbox: [f32; 4], problem: FaceProblem) -> FrameCheck {
-        let face = if problem == FaceProblem::NoFace { None } else { face(bbox) };
-        FrameCheck {
+    /// A face at `bbox` that gave no print.
+    fn rejected_face(bbox: [f32; 4], problem: FaceProblem) -> FaceCheck {
+        FaceCheck {
             analysis: Analysis {
-                frame: FRAME,
-                face,
+                face: face(bbox),
                 windows_face: None,
                 lighting: None,
                 problem: Some(problem),
@@ -633,8 +707,24 @@ mod tests {
         }
     }
 
+    /// A pair whose only face, at `bbox`, gave no print; no face at all for `NoFace`.
+    fn rejected_at(bbox: [f32; 4], problem: FaceProblem) -> FrameCheck {
+        let faces = if problem == FaceProblem::NoFace { vec![] } else { vec![rejected_face(bbox, problem)] };
+        pair(faces)
+    }
+
     fn rejected(problem: FaceProblem) -> FrameCheck {
         rejected_at(OWNER, problem)
+    }
+
+    /// The attempt of the largest face of the last pair.
+    fn attempt(s: &Session) -> &Attempt {
+        s.attempts().next().expect("a face in the last pair").1
+    }
+
+    /// The track of the largest face of the last pair.
+    fn track(s: &Session) -> Option<u32> {
+        s.attempts().next().map(|(id, _)| id)
     }
 
     #[test]
@@ -643,10 +733,10 @@ mod tests {
         for _ in 1..MIN_PRINTS {
             assert_eq!(s.add(&usable(Vote::Live, 0.9)), None);
         }
-        assert!(!s.attempt().recognised());
+        assert!(!attempt(&s).recognised());
         // Votes before recognition do not count: this frame recognises and is the first live vote.
         assert_eq!(s.add(&usable(Vote::Live, 0.7)), None);
-        assert!(s.attempt().recognised());
+        assert!(attempt(&s).recognised());
         assert_eq!(s.add(&usable(Vote::Live, 0.6)), Some(Verdict::Match { similarity: 0.9 }));
     }
 
@@ -656,7 +746,7 @@ mod tests {
         for _ in 0..MIN_PRINTS {
             s.add(&usable(Vote::Abstain, 0.9));
         }
-        assert!(s.attempt().recognised());
+        assert!(attempt(&s).recognised());
         assert_eq!(s.add(&usable(Vote::Spoof, 0.9)), None);
         assert_eq!(s.add(&usable(Vote::Spoof, 0.9)), None);
         assert_eq!(s.add(&usable(Vote::Spoof, 0.9)), Some(Verdict::NotLive));
@@ -696,7 +786,7 @@ mod tests {
             assert_eq!(s.add(&usable_at(shifted(10.0 * i as f32), Vote::Live, 0.3)), None);
         }
         assert!(s.reattempted());
-        assert_eq!(s.attempt().prints, 0, "fresh counters");
+        assert_eq!(attempt(&s).prints, 0, "fresh counters");
         // The second budget ends the session, however much the face moves.
         for i in 1..MAX_PAIRS {
             assert_eq!(s.add(&usable_at(shifted(150.0 + 10.0 * i as f32), Vote::Live, 0.3)), None);
@@ -718,7 +808,8 @@ mod tests {
         // Still face, but the lit brightness swings between 60 and 100 (σ = 20 > 12).
         let swinging = |i: u32| {
             let mut check = usable(Vote::Live, 0.3);
-            check.analysis.lighting = Some(Lighting { lit: if i % 2 == 0 { 60.0 } else { 100.0 }, ambient: 5.0 });
+            check.faces[0].analysis.lighting =
+                Some(Lighting { lit: if i % 2 == 0 { 60.0 } else { 100.0 }, ambient: 5.0 });
             check
         };
         let mut s = Session::default();
@@ -745,12 +836,12 @@ mod tests {
         for i in 0..MIN_PRINTS {
             s.add(&usable_at(shifted(40.0 * i as f32), Vote::Abstain, 0.9));
         }
-        assert!(s.attempt().recognised());
+        assert!(attempt(&s).recognised());
         for _ in 0..2 {
             assert_eq!(s.add(&usable_at(shifted(160.0), Vote::Spoof, 0.9)), None);
         }
         assert_eq!(s.add(&usable_at(shifted(160.0), Vote::Spoof, 0.9)), None);
-        assert!(s.reattempted() && !s.attempt().recognised());
+        assert!(s.reattempted() && !attempt(&s).recognised());
         // A second NOTLIVE is final.
         for _ in 0..MIN_PRINTS {
             s.add(&usable_at(shifted(160.0), Vote::Abstain, 0.9));
@@ -773,9 +864,9 @@ mod tests {
     #[test]
     fn enrollment_takes_good_frames_with_a_new_view_only() {
         let good = |features: &[f32]| {
-            let mut check = usable(Vote::Live, 0.3);
+            let mut check = owner(OWNER, Vote::Live, 0.3);
             check.analysis.print = Some(Embedding { features: features.to_vec() });
-            check.analysis
+            Some(check.analysis)
         };
         let mut collected = Vec::new();
         assert_eq!(take_print(&mut collected, good(&[1.0, 0.0])), None);
@@ -785,9 +876,10 @@ mod tests {
         assert_eq!(take_print(&mut collected, good(&[0.97, 0.243])), None);
         assert_eq!(collected.len(), 2);
         // Weak lighting has a print but is not enrolled from; rejected frames name their reason.
-        assert_eq!(take_print(&mut collected, usable(Vote::Abstain, 0.3).analysis), Some("weak_lighting"));
-        assert_eq!(take_print(&mut collected, rejected(FaceProblem::TooDark).analysis), Some("too_dark"));
-        assert_eq!(take_print(&mut collected, rejected(FaceProblem::NoFace).analysis), Some("no_face"));
+        let largest = |check: FrameCheck| check.faces.into_iter().next().map(|f| f.analysis);
+        assert_eq!(take_print(&mut collected, largest(usable(Vote::Abstain, 0.3))), Some("weak_lighting"));
+        assert_eq!(take_print(&mut collected, largest(rejected(FaceProblem::TooDark))), Some("too_dark"));
+        assert_eq!(take_print(&mut collected, largest(rejected(FaceProblem::NoFace))), Some("no_face"));
         assert_eq!(collected.len(), 2);
     }
 
@@ -818,7 +910,7 @@ mod tests {
         for _ in 0..OCCLUDED_GIVE_UP + 2 {
             assert_eq!(recognised.add(&occluded()), None);
         }
-        assert!(recognised.attempt().recognised());
+        assert!(attempt(&recognised).recognised());
     }
 
     #[test]
@@ -830,12 +922,12 @@ mod tests {
         for _ in 1..MIN_PRINTS {
             assert_eq!(s.add(&usable(Vote::Live, 0.9)), None);
         }
-        let owner = s.track();
+        let owner = track(&s);
         for _ in 0..MIN_PRINTS + 2 {
             assert_eq!(s.add(&usable_at(PHOTO, Vote::Live, 0.1)), None);
         }
-        assert_ne!(s.track(), owner);
-        assert!(!s.attempt().recognised());
+        assert_ne!(track(&s), owner);
+        assert!(!attempt(&s).recognised());
     }
 
     #[test]
@@ -848,17 +940,18 @@ mod tests {
             s.add(&usable(Vote::Abstain, 0.9));
         }
         assert_eq!(s.add(&usable(Vote::Live, 0.9)), None);
-        let owner = s.track();
+        let owner = track(&s);
         assert_eq!(s.add(&stranger_at(OWNER, Vote::Live, 0.2)), None);
-        assert_ne!(s.track(), owner);
-        assert!(!s.attempt().recognised());
-        // A rejected frame (no print) continues the photo's track by place; the owner's face
-        // back in place is yet another track.
-        let photo = s.track();
+        assert_ne!(track(&s), owner);
+        assert!(!attempt(&s).recognised());
+        // A rejected frame (no print) continues the photo's track by place. The owner's face
+        // back in place within a second continues the owner's track (F37), whose second live
+        // vote unlocks.
+        let photo = track(&s);
         assert_eq!(s.add(&rejected(FaceProblem::TooDark)), None);
-        assert_eq!(s.track(), photo);
-        assert_eq!(s.add(&usable(Vote::Live, 0.9)), None);
-        assert_ne!(s.track(), photo);
+        assert_eq!(track(&s), photo);
+        assert_eq!(s.add(&usable(Vote::Live, 0.9)), Some(Verdict::Match { similarity: 0.9 }));
+        assert_eq!(track(&s), owner);
     }
 
     #[test]
@@ -868,14 +961,76 @@ mod tests {
         for _ in 0..MIN_PRINTS {
             assert_eq!(s.add(&usable(Vote::Live, 0.9)), None);
         }
-        assert!(s.attempt().recognised());
-        assert_eq!(s.attempt().liveness(), LivenessState::Pending);
+        assert!(attempt(&s).recognised());
+        assert_eq!(attempt(&s).liveness(), LivenessState::Pending);
         assert_eq!(s.add(&usable_at(PHOTO, Vote::Live, 0.3)), None);
-        assert!(!s.attempt().recognised());
-        // The pair limit counts the whole session; the verdict is the last face's.
+        assert!(!attempt(&s).recognised());
+        // The pair limit counts the whole session; the verdict is the recognised face's.
         let rest: Vec<_> = (MIN_PRINTS + 2..MAX_PAIRS).map(|_| s.add(&usable_at(PHOTO, Vote::Live, 0.3))).collect();
         assert!(rest.iter().all(Option::is_none));
-        assert_eq!(s.add(&usable_at(PHOTO, Vote::Live, 0.3)), Some(Verdict::NoMatch { similarity: 0.3 }));
+        assert_eq!(s.add(&usable_at(PHOTO, Vote::Live, 0.3)), Some(Verdict::NotLive));
+    }
+
+    #[test]
+    fn two_faces_are_judged_apart_and_the_user_unlocks() {
+        // The owner and a stranger side by side: the stranger's prints and votes never count for
+        // the owner, and the owner's track unlocks on its own.
+        let mut s = Session::default();
+        for _ in 1..MIN_PRINTS {
+            assert_eq!(s.add(&pair(vec![owner(OWNER, Vote::Live, 0.9), stranger(PHOTO, Vote::Live, 0.1)])), None);
+        }
+        assert_eq!(s.attempts().map(|(id, a)| (id, a.recognised())).collect::<Vec<_>>(), vec![(1, false), (2, false)]);
+        assert_eq!(s.add(&pair(vec![owner(OWNER, Vote::Live, 0.9), stranger(PHOTO, Vote::Live, 0.1)])), None);
+        assert_eq!(s.attempts().map(|(id, a)| (id, a.recognised())).collect::<Vec<_>>(), vec![(1, true), (2, false)]);
+        // The stranger alone in a pair casts no vote for the owner; the owner's next live vote unlocks.
+        assert_eq!(s.add(&pair(vec![stranger(PHOTO, Vote::Live, 0.1)])), None);
+        assert_eq!(
+            s.add(&pair(vec![stranger(PHOTO, Vote::Live, 0.1), owner(OWNER, Vote::Live, 0.9)])),
+            Some(Verdict::Match { similarity: 0.9 })
+        );
+        assert!(s.decided().is_some_and(Attempt::recognised));
+        // Two faces seen: no enroll-on-failure candidate.
+        assert!(s.failed_print().is_none());
+    }
+
+    #[test]
+    fn the_better_matching_face_is_the_user() {
+        // Two faces both match the user (the owner and a photo of the owner, or a look-alike,
+        // identity 2: close enough to the owner's prints for the tracker, apart by place):
+        // only the one with the lower FAR is recognised (F48 `MakeDecisions`).
+        let mut s = Session::default();
+        for _ in 0..MIN_PRINTS {
+            assert_eq!(
+                s.add(&pair(vec![owner(OWNER, Vote::Abstain, 0.7), person(2.0, PHOTO, Vote::Abstain, 0.9)])),
+                None
+            );
+        }
+        assert_eq!(s.attempts().map(|(id, a)| (id, a.recognised())).collect::<Vec<_>>(), vec![(1, false), (2, true)]);
+        // Once the better face is gone from the pair, the other one is recognised.
+        assert_eq!(s.add(&pair(vec![owner(OWNER, Vote::Abstain, 0.7)])), None);
+        assert!(attempt(&s).recognised());
+        // At the pair limit the verdict comes from the best-matching track with enough prints.
+        let mut limit = Session::default();
+        for _ in 1..MAX_PAIRS {
+            limit.add(&pair(vec![stranger(OWNER, Vote::Live, 0.2), person(2.0, PHOTO, Vote::Live, 0.4)]));
+        }
+        let last = limit.add(&pair(vec![stranger(OWNER, Vote::Live, 0.2), person(2.0, PHOTO, Vote::Live, 0.4)]));
+        assert_eq!(last, Some(Verdict::NoMatch { similarity: 0.4 }));
+    }
+
+    #[test]
+    fn occlusion_gives_up_only_when_every_face_is_occluded() {
+        let mut s = Session::default();
+        for _ in 0..OCCLUDED_GIVE_UP + 1 {
+            let faces = vec![rejected_face(OWNER, FaceProblem::Occluded), stranger(PHOTO, Vote::Live, 0.1)];
+            assert_eq!(s.add(&pair(faces)), None);
+        }
+        for _ in 1..OCCLUDED_GIVE_UP {
+            let faces = vec![rejected_face(OWNER, FaceProblem::Occluded), rejected_face(PHOTO, FaceProblem::Occluded)];
+            assert_eq!(s.add(&pair(faces)), None);
+        }
+        let faces = vec![rejected_face(OWNER, FaceProblem::Occluded), rejected_face(PHOTO, FaceProblem::Occluded)];
+        assert_eq!(s.add(&pair(faces)), Some(Verdict::NoFace { problem: FaceProblem::Occluded }));
     }
 
     #[test]
@@ -906,7 +1061,7 @@ mod tests {
         for _ in 0..MIN_PRINTS {
             two.add(&usable(Vote::Live, 0.45));
         }
-        assert!(two.attempt().failed_print().is_some());
+        assert!(attempt(&two).failed_print().is_some());
         assert!(two.failed_print().is_none());
 
         // Recognised (then not live): not a recognition failure.
@@ -928,8 +1083,8 @@ mod tests {
             s
         };
         // FAR in [5e-6, 1e-5): similarity in (0.50, 0.52) with the shipped table.
-        assert!(session(0.51).attempt().augmentation().is_some());
-        assert!(session(0.60).attempt().augmentation().is_none());
-        assert!(session(0.45).attempt().augmentation().is_none());
+        assert!(attempt(&session(0.51)).augmentation().is_some());
+        assert!(attempt(&session(0.60)).augmentation().is_none());
+        assert!(attempt(&session(0.45)).augmentation().is_none());
     }
 }

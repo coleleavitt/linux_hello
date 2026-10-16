@@ -240,34 +240,38 @@ fn main() -> Result<()> {
             while start.elapsed().as_secs() < seconds {
                 let capture = cams.capture()?;
                 let check = pipeline.check(&user, &capture.pair, capture.rgb.as_ref())?;
-                cams.expose_on(check.analysis.face.as_ref());
+                cams.expose_on(check.largest().map(|f| &f.analysis.face));
                 let verdict = session.add(&check);
                 let t = start.elapsed().as_secs_f32();
-                let (track, recognised, liveness) =
-                    (session.track(), session.attempt().recognised(), session.attempt().liveness());
-                println!(
-                    "{n:4} t={t:5.2}s {} track={track:?} recognised={recognised} liveness={liveness:?}",
-                    describe(&check)
-                );
+                println!("{n:4} t={t:5.2}s {}", describe(&check, &session));
                 save_capture(&capture, &out, &format!("{n:04}"))?;
-                let a = &check.analysis;
-                let l = a.lighting;
+                let faces: Vec<_> = check
+                    .faces
+                    .iter()
+                    .zip(session.attempts())
+                    .map(|(f, (track, attempt))| {
+                        let a = &f.analysis;
+                        let l = a.lighting;
+                        serde_json::json!({
+                            "track": track, "face": a.face.bbox,
+                            "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
+                            "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
+                            "rgb_real": f.liveness, "vote": format!("{:?}", f.vote),
+                            "windows": f.windows.as_ref().map(|w| serde_json::json!({
+                                "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
+                                "border": w.scores.border, "hh": w.scores.hh,
+                            })),
+                            "similarity": f.best.map(|b| b.similarity), "far": f.best.map(|b| b.far),
+                            "recognised": attempt.recognised(), "liveness": format!("{:?}", attempt.liveness()),
+                        })
+                    })
+                    .collect();
                 writeln!(
                     log,
                     "{}",
                     serde_json::json!({
                         "n": n, "t": t, "gap_ms": capture.pair.gap().as_secs_f32() * 1000.0,
-                        "face": a.face.as_ref().map(|f| f.bbox),
-                        "lit": l.map(|l| l.lit), "ambient": l.map(|l| l.ambient), "d": l.map(|l| l.gain()),
-                        "status": a.status().map(|s| format!("{s:?}")), "problem": a.problem.map(|p| p.as_str()),
-                        "rgb_real": check.liveness, "vote": format!("{:?}", check.vote),
-                        "windows": check.windows.as_ref().map(|w| serde_json::json!({
-                            "total": w.total, "diffusion_ir": w.scores.diffusion_ir, "color": w.scores.color,
-                            "border": w.scores.border, "hh": w.scores.hh,
-                        })),
-                        "similarity": check.best.map(|b| b.similarity), "far": check.best.map(|b| b.far),
-                        "track": track,
-                        "recognised": recognised, "liveness": format!("{liveness:?}"),
+                        "faces": faces,
                         "verdict": verdict.map(|v| v.to_string()),
                     })
                 )?;

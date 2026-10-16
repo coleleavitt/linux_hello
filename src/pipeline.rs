@@ -14,7 +14,7 @@ use crate::lighting::{self, subtract_ambient, Lighting, LightingStatus};
 use crate::tracker::{iou, MIN_IOU};
 use crate::{
     gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
-    MsRetinaFace, OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
+    MsRetinaDetector, MsRetinaFace, OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
 };
 
 /// Minimum face box width in pixels (F46, F54).
@@ -24,13 +24,15 @@ const MIN_FACE_RATIO: f32 = 0.12;
 /// The face box must stay this fraction of the eye distance away from every frame edge (F46).
 const EDGE_MARGIN_EYES: f32 = 0.2;
 
-/// What a frame pair gives for recognition.
+/// Faces of one lit frame that are analysed, largest first: Windows tracks every face it detects
+/// (F47, F48); the bound keeps the time per pair under control (one ArcFace run per face).
+pub const MAX_FACES: usize = 3;
+
+/// What a frame pair gives for recognition of one face.
 #[derive(Debug, Clone)]
 pub struct Analysis {
-    /// Width and height of the IR frame, to normalise face positions (F49)
-    pub frame: [u32; 2],
-    /// Largest face, detected on the lit frame
-    pub face: Option<Face>,
+    /// The face as SCRFD detects it on the lit frame
+    pub face: Face,
     /// The same face as the Windows IR detector reports it (box and five points), when the
     /// Windows Hello models run: Windows' crops and landmarks come from it (F23, F43, F58)
     pub windows_face: Option<Face>,
@@ -48,9 +50,9 @@ impl Analysis {
     }
 }
 
-/// Scores from one frame pair; `None` where a stage did not run.
+/// Scores of one face of a frame pair; `None` where a stage did not run.
 #[derive(Debug, Clone)]
-pub struct FrameCheck {
+pub struct FaceCheck {
     pub analysis: Analysis,
     /// Mean P(real) of the RGB liveness models; only for good-lighting frames
     pub liveness: Option<f32>,
@@ -61,6 +63,22 @@ pub struct FrameCheck {
     pub best: Option<PrintMatch>,
 }
 
+/// One frame pair through every stage.
+#[derive(Debug, Clone)]
+pub struct FrameCheck {
+    /// Width and height of the IR frame, to normalise face positions (F49)
+    pub frame: [u32; 2],
+    /// The analysed faces, largest first (at most [`MAX_FACES`]); empty without a face
+    pub faces: Vec<FaceCheck>,
+}
+
+impl FrameCheck {
+    /// The largest face of the pair.
+    pub fn largest(&self) -> Option<&FaceCheck> {
+        self.faces.first()
+    }
+}
+
 pub struct FacePipeline {
     detector: FaceDetector,
     embedder: FaceEmbedder,
@@ -69,8 +87,8 @@ pub struct FacePipeline {
     store: FaceStore,
     /// Similarity → FAR for this camera (F51)
     calibration: CalibrationTable,
-    /// The face of the last lit frame, for the ambient warp of the next pair (F13)
-    previous: Option<LitFace>,
+    /// The faces of the last lit frame, for the ambient warp of the next pair (F13)
+    previous: Vec<LitFace>,
 }
 
 /// Where a lit frame's face was, for the motion compensation of the ambient frame (F13).
@@ -93,7 +111,7 @@ impl FacePipeline {
         let detector = FaceDetector::load(detector_path)?;
         let embedder = FaceEmbedder::load(embedder_path)?;
         let store = FaceStore::load(store_path)?;
-        Ok(Self { detector, embedder, liveness, windows: None, store, calibration, previous: None })
+        Ok(Self { detector, embedder, liveness, windows: None, store, calibration, previous: Vec::new() })
     }
 
     /// Add the Windows Hello anti-spoofing vote and the occlusion and frontal gates.
@@ -110,12 +128,6 @@ impl FacePipeline {
         }
     }
 
-    /// Detect the largest face in the image.
-    pub fn largest_face(&mut self, image: &RgbImage) -> Result<Option<Face>> {
-        let faces = self.detector.detect(image)?;
-        Ok(faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))))
-    }
-
     pub fn is_enrolled(&self, user: &str) -> bool {
         self.store.get(user).is_some()
     }
@@ -125,41 +137,55 @@ impl FacePipeline {
         self.store.reload()
     }
 
-    /// Find the face on the lit frame, apply the size and edge gates (F46), the lighting status
-    /// (F44, F45) and, with the Windows Hello models, the occlusion and frontal gates (F46, F59), and
-    /// embed the face if the frame is usable.
+    /// Find the faces on the lit frame, largest first, and take each of the [`MAX_FACES`] largest
+    /// through the size and edge gates (F46), the lighting status (F44, F45) and, with the Windows
+    /// Hello models, the occlusion and frontal gates (F46, F59); a face that passes is embedded.
     ///
     /// With the Windows Hello models the lighting status, the occlusion crop and the frontal check use
     /// the face of the Windows IR detector that overlaps the SCRFD face (the detector Windows tracks
     /// with, F58); without them SCRFD's box and points stand in. The ambient frame is moved onto the
     /// lit one before it is measured and subtracted (F13, F40).
-    pub fn analyze(&mut self, pair: &IrPair) -> Result<Analysis> {
-        let frame = [pair.lit.width(), pair.lit.height()];
-        let faces = self.detector.detect_gray(&pair.lit)?;
-        let Some(face) = faces.into_iter().max_by(|a, b| area(a).total_cmp(&area(b))) else {
-            return Ok(Analysis {
-                frame,
-                face: None,
-                windows_face: None,
-                lighting: None,
-                problem: Some(FaceProblem::NoFace),
-                print: None,
-            });
+    pub fn analyze(&mut self, pair: &IrPair) -> Result<Vec<Analysis>> {
+        let mut faces = self.detector.detect_gray(&pair.lit)?;
+        faces.sort_by(|a, b| area(b).total_cmp(&area(a)));
+        faces.truncate(MAX_FACES);
+        // The Windows IR detector runs once per frame, as Windows' tracker does (F58).
+        let retina = match &mut self.windows {
+            Some(w) if !faces.is_empty() => w.retina.detect(&pair.lit)?,
+            _ => Vec::new(),
         };
+        let previous = std::mem::take(&mut self.previous);
+        let mut analyses = Vec::with_capacity(faces.len());
+        for face in faces {
+            let overlap = |r: &&MsRetinaFace| iou(&r.face.bbox, &face.bbox);
+            let retina = retina
+                .iter()
+                .max_by(|a, b| overlap(a).total_cmp(&overlap(b)))
+                .filter(|r| overlap(r) >= MsRetinaDetector::MATCH_IOU);
+            analyses.push(self.analyze_face(pair, face, retina, &previous)?);
+        }
+        Ok(analyses)
+    }
+
+    /// One face through the gates; `retina` is the Windows IR detector's face overlapping it,
+    /// `previous` the faces of the previous lit frame.
+    fn analyze_face(
+        &mut self,
+        pair: &IrPair,
+        face: Face,
+        retina: Option<&MsRetinaFace>,
+        previous: &[LitFace],
+    ) -> Result<Analysis> {
         let rejected = |face, windows_face, lighting, problem| {
-            debug!(?problem, ?lighting, "frame rejected");
-            Ok(Analysis { frame, face: Some(face), windows_face, lighting, problem: Some(problem), print: None })
+            debug!(?problem, ?lighting, "face rejected");
+            Ok(Analysis { face, windows_face, lighting, problem: Some(problem), print: None })
         };
         if let Some(problem) = geometry_problem(&face, pair.lit.width(), pair.lit.height()) {
             return rejected(face, None, None, problem);
         }
-        let retina = match &mut self.windows {
-            Some(w) => w.retina.matching(&pair.lit, &face)?.map(|(f, _)| f),
-            None => None,
-        };
-        let windows_face = retina.as_ref().map(|f| f.face.clone());
+        let windows_face = retina.map(|f| f.face.clone());
         let points = windows_face.as_ref().unwrap_or(&face).landmarks;
-        let ambient = self.compensated_ambient(pair, &face.bbox, &points);
+        let ambient = self.compensated_ambient(pair, &face.bbox, &points, previous);
         let lighting = Lighting::measure(&pair.lit, &ambient, &points);
         let problem = match lighting.status() {
             LightingStatus::TooDark => Some(FaceProblem::TooDark),
@@ -167,7 +193,7 @@ impl FacePipeline {
             LightingStatus::Good | LightingStatus::Weak => None,
         };
         let problem = match (problem, &mut self.windows) {
-            (None, Some(w)) => windows_problem(w, &pair.lit, retina.as_ref())?,
+            (None, Some(w)) => windows_problem(w, &pair.lit, retina)?,
             (problem, _) => problem,
         };
         if let Some(problem) = problem {
@@ -178,14 +204,7 @@ impl FacePipeline {
             _ => pair.lit.clone(),
         };
         let print = self.embedder.embed_face(&gray_to_rgb(&image), &face)?;
-        Ok(Analysis {
-            frame,
-            face: Some(face),
-            windows_face,
-            lighting: Some(lighting),
-            problem: None,
-            print: Some(print),
-        })
+        Ok(Analysis { face, windows_face, lighting: Some(lighting), problem: None, print: Some(print) })
     }
 
     /// The ambient frame moved onto the lit one (`AdjustFaceForAmbientLight`, F13): the face's anchors
@@ -197,11 +216,15 @@ impl FacePipeline {
         pair: &'a IrPair,
         bbox: &[f32; 4],
         points: &[[f32; 2]; 5],
+        previous: &[LitFace],
     ) -> Cow<'a, GrayImage> {
         let anchors = lighting::anchors(points);
-        let previous = self.previous.replace(LitFace { at: pair.lit_at, bbox: *bbox, anchors });
+        self.previous.push(LitFace { at: pair.lit_at, bbox: *bbox, anchors });
         let Some(previous) = previous
-            .filter(|p| p.at < pair.lit_at && pair.lit_at - p.at < MAX_PAIR_GAP && iou(&p.bbox, bbox) >= MIN_IOU)
+            .iter()
+            .filter(|p| p.at < pair.lit_at && pair.lit_at - p.at < MAX_PAIR_GAP)
+            .max_by(|a, b| iou(&a.bbox, bbox).total_cmp(&iou(&b.bbox, bbox)))
+            .filter(|p| iou(&p.bbox, bbox) >= MIN_IOU)
         else {
             return Cow::Borrowed(&pair.ambient);
         };
@@ -214,42 +237,50 @@ impl FacePipeline {
         }
     }
 
-    /// Run every stage on one frame pair. The face is compared only with `user`'s template.
-    /// The liveness models run on good-lighting frames only (the others cannot vote live); the
-    /// RGB ones on `rgb`, the frame captured alongside the pair.
+    /// Run every stage on one frame pair, for every analysed face. Faces are compared only with
+    /// `user`'s template. The liveness models run on good-lighting faces only (the others cannot
+    /// vote live); the RGB ones on the face of `rgb`, the frame captured alongside the pair, that
+    /// lies nearest (normalised centre) to the IR face.
     pub fn check(&mut self, user: &str, pair: &IrPair, rgb: Option<&RgbImage>) -> Result<FrameCheck> {
-        let analysis = self.analyze(pair)?;
-        let (Some(print), Some(face)) = (&analysis.print, &analysis.face) else {
-            return Ok(FrameCheck { analysis, liveness: None, windows: None, vote: Vote::Abstain, best: None });
+        let frame = [pair.lit.width(), pair.lit.height()];
+        let analyses = self.analyze(pair)?;
+        let good = analyses.iter().any(|a| a.print.is_some() && a.status() == Some(LightingStatus::Good));
+        let rgb_faces = match rgb {
+            Some(image) if good => self.detector.detect(image)?,
+            _ => Vec::new(),
         };
-        // The Windows nets take Windows' landmarks for their crop (F23).
-        let face = analysis.windows_face.as_ref().unwrap_or(face);
-        let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration));
-        if analysis.status() != Some(LightingStatus::Good) {
-            let vote = Vote::from_evidence(false, None, None);
-            return Ok(FrameCheck { analysis, liveness: None, windows: None, vote, best });
-        }
-        let rgb_face = match rgb {
-            Some(image) => self.largest_face(image)?.map(|f| (image, f)),
-            None => None,
-        };
-        // The open RGB models stand in for Windows' colour net (slot 13). With the Windows Hello models
-        // that net vetoes instead, so the RGB evidence is not counted twice (F24, F25).
-        let open_rgb = self.windows.is_none() && !self.liveness.is_empty();
-        let liveness = open_rgb.then(|| self.rgb_liveness(rgb_face.as_ref())).transpose()?;
-        let windows = match &mut self.windows {
-            Some(w) => {
-                Some(w.liveness.frame(&pair.lit, Some(&pair.ambient), face, rgb_face.as_ref().map(|(i, f)| (*i, f)))?)
+        let mut faces = Vec::with_capacity(analyses.len());
+        for analysis in analyses {
+            let Some(print) = &analysis.print else {
+                faces.push(FaceCheck { analysis, liveness: None, windows: None, vote: Vote::Abstain, best: None });
+                continue;
+            };
+            let best = self.store.get(user).and_then(|t| t.best_match(print, &self.calibration));
+            if analysis.status() != Some(LightingStatus::Good) {
+                let vote = Vote::from_evidence(false, None, None);
+                faces.push(FaceCheck { analysis, liveness: None, windows: None, vote, best });
+                continue;
             }
-            None => None,
-        };
-        let vote = Vote::from_evidence(true, liveness, windows.as_ref().map(|w| w.total));
-        Ok(FrameCheck { analysis, liveness, windows, vote, best })
+            let rgb_face = rgb.and_then(|image| nearest(&rgb_faces, image, &analysis.face, frame).map(|f| (image, f)));
+            // The open RGB models stand in for Windows' colour net (slot 13). With the Windows Hello
+            // models that net vetoes instead, so the RGB evidence is not counted twice (F24, F25).
+            let open_rgb = self.windows.is_none() && !self.liveness.is_empty();
+            let liveness = open_rgb.then(|| self.rgb_liveness(rgb_face)).transpose()?;
+            // The Windows nets take Windows' landmarks for their crop (F23).
+            let face = analysis.windows_face.as_ref().unwrap_or(&analysis.face);
+            let windows = match &mut self.windows {
+                Some(w) => Some(w.liveness.frame(&pair.lit, Some(&pair.ambient), face, rgb_face)?),
+                None => None,
+            };
+            let vote = Vote::from_evidence(true, liveness, windows.as_ref().map(|w| w.total));
+            faces.push(FaceCheck { analysis, liveness, windows, vote, best });
+        }
+        Ok(FrameCheck { frame, faces })
     }
 
     /// Mean "real" probability over the RGB liveness models; 0 (a veto) when there is no RGB
     /// frame or no face in it.
-    fn rgb_liveness(&mut self, rgb: Option<&(&RgbImage, Face)>) -> Result<f32> {
+    fn rgb_liveness(&mut self, rgb: Option<(&RgbImage, &Face)>) -> Result<f32> {
         let Some((image, face)) = rgb else { return Ok(0.0) };
         let mut total = 0.0;
         for model in &mut self.liveness {
@@ -328,6 +359,20 @@ impl FacePipeline {
 
 fn area(f: &Face) -> f32 {
     (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+}
+
+/// The face of the RGB frame nearest to `ir_face` by box centre, each normalised by its frame
+/// size: the two cameras sit side by side with a similar field of view, and the frames are not
+/// registered to each other (`EvaluateColorFaceQuality` is not ported).
+fn nearest<'a>(rgb_faces: &'a [Face], rgb: &RgbImage, ir_face: &Face, ir_frame: [u32; 2]) -> Option<&'a Face> {
+    let centre =
+        |f: &Face, w: u32, h: u32| [(f.bbox[0] + f.bbox[2]) / 2.0 / w as f32, (f.bbox[1] + f.bbox[3]) / 2.0 / h as f32];
+    let [ix, iy] = centre(ir_face, ir_frame[0], ir_frame[1]);
+    let distance = |f: &Face| {
+        let [x, y] = centre(f, rgb.width(), rgb.height());
+        (x - ix) * (x - ix) + (y - iy) * (y - iy)
+    };
+    rgb_faces.iter().min_by(|a, b| distance(a).total_cmp(&distance(b)))
 }
 
 /// Gates that need the Windows Hello models, on `retina`, the Windows IR detector's face that overlaps

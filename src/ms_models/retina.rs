@@ -235,8 +235,12 @@ impl MsRetinaDetector {
         Ok(kept)
     }
 
-    /// The Retina face that best overlaps `face` (IoU ≥ 0.5), e.g. the SCRFD detection of the same
-    /// frame, with its IoU.
+    /// A Retina face is the same face as a detection of another detector (SCRFD) when their boxes
+    /// overlap by at least this IoU.
+    pub const MATCH_IOU: f32 = 0.5;
+
+    /// The Retina face that best overlaps `face` (IoU ≥ [`Self::MATCH_IOU`]), e.g. the SCRFD
+    /// detection of the same frame, with its IoU.
     pub fn matching(&mut self, image: &GrayImage, face: &Face) -> Result<Option<(MsRetinaFace, f32)>> {
         Ok(self
             .detect(image)?
@@ -245,7 +249,7 @@ impl MsRetinaDetector {
                 let iou = iou(&f.face.bbox, &face.bbox);
                 (f, iou)
             })
-            .filter(|(_, iou)| *iou >= 0.5)
+            .filter(|(_, iou)| *iou >= Self::MATCH_IOU)
             .max_by(|a, b| a.1.total_cmp(&b.1)))
     }
 
