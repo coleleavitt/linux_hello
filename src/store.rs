@@ -12,9 +12,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::matcher::ENROLL_ON_FAILURE_THRESHOLD;
 #[cfg(feature = "tpm")]
 use crate::tpm::{DataKey, SealedFile};
-use crate::{Embedding, Template, MATCH_THRESHOLD};
+use crate::{Embedding, PrintSource, Template, MATCH_THRESHOLD};
+
+/// Result of [`FaceStore::add_on_failure`]; the daemon sends it to the PAM module.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnFailure {
+    Added {
+        similarity: f32,
+    },
+    NotEnrolled,
+    /// Below [`ENROLL_ON_FAILURE_THRESHOLD`]
+    TooFar {
+        similarity: f32,
+    },
+    /// Matches another enrolled user
+    OtherUser {
+        user: String,
+        similarity: f32,
+    },
+}
+
+impl std::fmt::Display for OnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OnFailure::Added { similarity } => write!(f, "ADDED {similarity:.3}"),
+            OnFailure::NotEnrolled => f.write_str("REFUSED not_enrolled"),
+            OnFailure::TooFar { similarity } => write!(f, "REFUSED too_far {similarity:.3}"),
+            OnFailure::OtherUser { user, similarity } => write!(f, "REFUSED other_user {user} {similarity:.3}"),
+        }
+    }
+}
 
 /// Persistent face template store
 pub struct FaceStore {
@@ -183,6 +213,24 @@ impl FaceStore {
             .max_by(|a, b| a.1.total_cmp(&b.1))
     }
 
+    /// Enroll-on-failure (F31): add `print`, from a failed face attempt of `user` that the
+    /// password then confirmed, if it is at least [`ENROLL_ON_FAILURE_THRESHOLD`] similar to the
+    /// user's enrolled and augmented prints and matches no other user. Does not save.
+    pub fn add_on_failure(&mut self, user: &str, print: &Embedding) -> OnFailure {
+        let Some(template) = self.faces.get(user) else { return OnFailure::NotEnrolled };
+        let similarity = template
+            .best_match_where(print, |p| p.source != PrintSource::OnFailure)
+            .map_or(f32::NEG_INFINITY, |m| m.similarity);
+        if similarity < ENROLL_ON_FAILURE_THRESHOLD {
+            return OnFailure::TooFar { similarity };
+        }
+        if let Some((other, similarity)) = self.duplicate(user, std::slice::from_ref(print)) {
+            return OnFailure::OtherUser { user: other.to_string(), similarity };
+        }
+        self.faces.get_mut(user).expect("checked above").add_on_failure(print);
+        OnFailure::Added { similarity }
+    }
+
     /// List all user IDs
     pub fn list_users(&self) -> Vec<&str> {
         self.faces.keys().map(|s| s.as_str()).collect()
@@ -234,5 +282,48 @@ mod tests {
         assert_eq!(rounded(store.duplicate("bob", &probe)), Some(("alice".into(), 80)));
         // At or below the threshold is not a duplicate.
         assert_eq!(store.duplicate("carol", &[emb(&[0.5, 0.0, 0.866])]), None);
+    }
+
+    #[test]
+    fn on_failure_needs_the_relaxed_match_and_no_other_user() {
+        let emb = |features: &[f32]| crate::Embedding { features: features.to_vec() };
+        let mut store = FaceStore::load(std::env::temp_dir().join("linux_hello_store_unused.json")).unwrap();
+        store.add("alice".into(), Template::enrolled([emb(&[1.0, 0.0, 0.0])]));
+        store.add("bob".into(), Template::enrolled([emb(&[0.0, 1.0, 0.0])]));
+        let prints = |store: &FaceStore| store.get("alice").unwrap().prints.len();
+
+        assert_eq!(store.add_on_failure("carol", &emb(&[1.0, 0.0, 0.0])), OnFailure::NotEnrolled);
+        // 0.30 to alice: too far.
+        assert!(matches!(store.add_on_failure("alice", &emb(&[0.3, 0.0, 0.954])), OnFailure::TooFar { .. }));
+        // 0.45 to alice but 0.6 to bob: matches another user.
+        let near_bob = emb(&[0.45, 0.6, 0.66]);
+        assert!(matches!(store.add_on_failure("alice", &near_bob), OnFailure::OtherUser { user, .. } if user == "bob"));
+        assert_eq!(prints(&store), 1);
+        // 0.45 to alice, 0.2 to bob: added.
+        let relaxed = emb(&[0.45, 0.2, 0.87]);
+        assert!(matches!(store.add_on_failure("alice", &relaxed), OnFailure::Added { .. }));
+        assert_eq!(prints(&store), 2);
+        // The added print does not count for the relaxed check: a probe 0.99 to it but 0.35 to the
+        // enrolled print is refused, so prints cannot drift away from the enrolled face.
+        assert!(matches!(store.add_on_failure("alice", &emb(&[0.35, 0.2, 0.915])), OnFailure::TooFar { .. }));
+    }
+
+    #[test]
+    fn stores_without_on_failure_prints_still_load() {
+        let dir = std::env::temp_dir().join(format!("linux_hello_store_compat_{}", std::process::id()));
+        let path = dir.join("faces.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &path,
+            r#"{"alice": {"prints": [{"features": [0.6, 0.8], "generation": 0, "source": "enroll"},
+            {"features": [0.8, 0.6], "generation": 1, "source": "augment"}]}}"#,
+        )
+        .unwrap();
+        let mut store = FaceStore::load(&path).unwrap();
+        assert_eq!(store.get("alice").unwrap().prints.len(), 2);
+        store.get_mut("alice").unwrap().add_on_failure(&crate::Embedding { features: vec![1.0, 0.0] });
+        store.save().unwrap();
+        assert_eq!(FaceStore::load(&path).unwrap().get("alice").unwrap().prints[2].source, PrintSource::OnFailure);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

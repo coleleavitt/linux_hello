@@ -27,6 +27,9 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# SO_PEERCRED for the daemon socket
+libc = "0.2"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -88,8 +88,8 @@ implemented on branch `parity` (see [capture-and-liveness.md](capture-and-livene
 | Windows behaviour | linux_hello status | What implementing it would take |
 |---|---|---|
 | Enroll-on-success: after a live success, borderline match (GFP in [FAR/2, FAR]), once per session, generation < 3, FIFO eviction (F31, F53) | **Done**: best live print with similarity in (0.50, 0.55], once per session, generation ≤ 3, ≤ 10 augmented (FIFO) | — |
-| Enroll-on-failure: add print after face fail + password success, relaxed threshold, must not match others (F31, `EnrollOnFailure*Threshold`) | Missing | PAM `pam_sm_setcred`/session hook after password success → daemon stores the last unmatched print, only if it clears a relaxed threshold |
-| Print categories (normal, on-failure, on-success, flags) used as verification conditions (F28) | Missing | Tag prints in the store |
+| Enroll-on-failure: add print after face fail + password success, relaxed threshold, must not match others (F31, `EnrollOnFailure*Threshold`) | **Done**, opt-in (`daemon --enroll-on-failure`): after `NOMATCH` of one real (≥ 2 live votes), unrecognised face, the best live print waits ≤ 60 s in the daemon; `pam_sm_setcred` after the password success of the same PAM transaction (token) commits it if similarity to the enrolled/augmented prints ≥ 0.40 and no other user matches; ≤ 5 such prints (FIFO); root only (`SO_PEERCRED`). Windows' threshold values are runtime policy data, not recovered | — |
+| Print categories (normal, on-failure, on-success, flags) used as verification conditions (F28) | Partial: prints are tagged `enroll`, `augment`, `on_failure`; all are matched alike; on-failure prints are left out of the enroll-on-failure check and never seed augmentation | Per-category thresholds if needed |
 
 ## Storage & key protection
 

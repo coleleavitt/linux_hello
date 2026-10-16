@@ -3,7 +3,8 @@
 
 description="linux_hello face authentication daemon"
 command="/usr/local/bin/linux_hello"
-command_args="daemon --socket /run/linux_hello.sock"
+# Extra daemon options from /etc/conf.d/linux_hello, e.g. LINUX_HELLO_ARGS="--enroll-on-failure"
+command_args="daemon --socket /run/linux_hello.sock ${LINUX_HELLO_ARGS}"
 command_background=true
 pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/linux_hello.log"

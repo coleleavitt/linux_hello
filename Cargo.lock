@@ -938,6 +938,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "image",
+ "libc",
  "ort",
  "serde",
  "serde_json",

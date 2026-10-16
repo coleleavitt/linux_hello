@@ -141,6 +141,15 @@ impl Session {
     pub fn attempt(&self) -> &Attempt {
         &self.attempt
     }
+
+    /// The enroll-on-failure candidate (F31) of a session that saw only one face: Windows aborts
+    /// enroll-on-failure when other faces were seen (`AbortingSinceOtherFacesWereSeenDuringTrackedSession`).
+    pub fn failed_print(&self) -> Option<&Embedding> {
+        if self.track != Some(1) {
+            return None;
+        }
+        self.attempt.failed_print()
+    }
 }
 
 /// The unlock decision for one tracked face (`MakeDecisions`, F47, F48): the user is recognised
@@ -153,7 +162,11 @@ pub struct Attempt {
     best: Option<f32>,
     recognised: bool,
     session: LivenessSession,
-    /// The best-matching print of a live-voting frame, the candidate for augmentation
+    /// Every vote of the face, also before recognition: whether a face that is never recognised
+    /// is real (`FaceNotDeemedAsARealFace`)
+    votes: LivenessSession,
+    /// The best-matching print of a live-voting frame, the candidate for augmentation and for
+    /// enroll-on-failure
     live_best: Option<(Embedding, PrintMatch)>,
 }
 
@@ -170,6 +183,7 @@ impl Attempt {
                 }
             }
         }
+        self.votes.add(check.vote);
         if !self.recognised {
             self.recognised = self.prints >= MIN_PRINTS && self.best.is_some_and(|s| s > MATCH_THRESHOLD);
         }
@@ -193,6 +207,14 @@ impl Attempt {
     /// it is a borderline match (F53).
     pub fn augmentation(&self) -> Option<(&Embedding, PrintMatch)> {
         self.live_best.as_ref().filter(|(_, m)| m.is_borderline()).map(|(print, m)| (print, *m))
+    }
+
+    /// The print to add after a failed attempt that the password then confirms (F31): the
+    /// best-matching print of a live-voting (good lighting) frame of a face that was not
+    /// recognised but would be live by its votes.
+    pub fn failed_print(&self) -> Option<&Embedding> {
+        let real = self.votes.state() == LivenessState::Live;
+        self.live_best.as_ref().filter(|_| real && !self.recognised).map(|(print, _)| print)
     }
 
     /// The verdict when the session runs out of frame pairs; `problems` are the session's frame
@@ -232,6 +254,20 @@ pub fn describe(check: &FrameCheck) -> String {
     )
 }
 
+/// What [`Authenticator::verify`] found.
+pub struct Outcome {
+    pub verdict: Verdict,
+    /// After `NOMATCH`: the print that enroll-on-failure may add once the password confirms the
+    /// user ([`Session::failed_print`])
+    pub failed_print: Option<Embedding>,
+}
+
+impl From<Verdict> for Outcome {
+    fn from(verdict: Verdict) -> Self {
+        Self { verdict, failed_print: None }
+    }
+}
+
 pub struct Authenticator {
     pub pipeline: FacePipeline,
     pub cameras: CameraSetup,
@@ -239,14 +275,15 @@ pub struct Authenticator {
 
 impl Authenticator {
     /// Refuse when the lid is closed over a built-in camera. Otherwise read frame pairs until the
-    /// [`Session`] decides. On a match, add the best live frame of the
-    /// matched face to the template if it was a borderline match (F53) and save the store.
-    pub fn verify(&mut self, user: &str) -> Result<Verdict> {
+    /// [`Session`] decides. On a match, add the best live frame of the matched face to the
+    /// template if it was a borderline match (F53) and save the store. After `NOMATCH`, return
+    /// the session's enroll-on-failure candidate.
+    pub fn verify(&mut self, user: &str) -> Result<Outcome> {
         if lid::lid_closed() && lid::built_in(&self.cameras.device) {
-            return Ok(Verdict::LidClosed);
+            return Ok(Verdict::LidClosed.into());
         }
         if !self.pipeline.is_enrolled(user) {
-            return Ok(Verdict::NotEnrolled);
+            return Ok(Verdict::NotEnrolled.into());
         }
         let mut cams = OpenCameras::open(&self.cameras)?;
         let mut session = Session::default();
@@ -278,7 +315,11 @@ impl Authenticator {
                 "template augmentation"
             );
         }
-        Ok(verdict)
+        let failed_print = match verdict {
+            Verdict::NoMatch { .. } => session.failed_print().cloned(),
+            _ => None,
+        };
+        Ok(Outcome { verdict, failed_print })
     }
 
     /// Enroll `frames` prints from frame pairs that pass every frame gate with good lighting.
@@ -438,6 +479,45 @@ mod tests {
         let rest: Vec<_> = (MIN_PRINTS + 2..MAX_PAIRS).map(|_| s.add(&usable_at(PHOTO, Vote::Live, 0.3))).collect();
         assert!(rest.iter().all(Option::is_none));
         assert_eq!(s.add(&usable_at(PHOTO, Vote::Live, 0.3)), Some(Verdict::NoMatch { similarity: 0.3 }));
+    }
+
+    #[test]
+    fn failed_print_needs_one_real_unrecognised_face() {
+        // Not recognised, two live votes: the best live print is the candidate.
+        let mut s = Session::default();
+        for similarity in [0.30, 0.45, 0.42, 0.35] {
+            s.add(&usable(Vote::Live, similarity));
+        }
+        assert_eq!(s.failed_print().map(|p| p.features[0]), Some(0.45));
+
+        // Weak lighting only: no live vote, not deemed real.
+        let mut weak = Session::default();
+        for _ in 0..MIN_PRINTS {
+            weak.add(&usable(Vote::Abstain, 0.45));
+        }
+        assert!(weak.failed_print().is_none());
+
+        // One live vote is not enough.
+        let mut once = Session::default();
+        once.add(&usable(Vote::Live, 0.45));
+        once.add(&usable(Vote::Abstain, 0.45));
+        assert!(once.failed_print().is_none());
+
+        // A second face was seen: none, even for the first face coming back.
+        let mut two = Session::default();
+        two.add(&usable_at(PHOTO, Vote::Live, 0.45));
+        for _ in 0..MIN_PRINTS {
+            two.add(&usable(Vote::Live, 0.45));
+        }
+        assert!(two.attempt().failed_print().is_some());
+        assert!(two.failed_print().is_none());
+
+        // Recognised (then not live): not a recognition failure.
+        let mut recognised = Session::default();
+        for _ in 0..MIN_PRINTS {
+            recognised.add(&usable(Vote::Live, 0.9));
+        }
+        assert!(recognised.failed_print().is_none());
     }
 
     #[test]

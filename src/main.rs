@@ -89,6 +89,10 @@ enum Commands {
     Daemon {
         #[arg(long, default_value = "/run/linux_hello.sock")]
         socket: PathBuf,
+        /// After a failed face check that the user then passes with the password, add the face
+        /// to the template (opt-in; see docs/sudo.md)
+        #[arg(long)]
+        enroll_on_failure: bool,
     },
     /// Log every frame pair's scores for SECONDS (for spoof testing); frames are saved to --out
     Watch {
@@ -144,7 +148,7 @@ fn main() -> Result<()> {
             let user = user.unwrap_or_else(current_user);
             let pipeline = pipeline(liveness()?)?;
             let start = Instant::now();
-            let verdict = Authenticator { pipeline, cameras }.verify(&user)?;
+            let verdict = Authenticator { pipeline, cameras }.verify(&user)?.verdict;
             println!("{user}: {verdict} ({:.2} s)", start.elapsed().as_secs_f32());
             if !matches!(verdict, Verdict::Match { .. }) {
                 std::process::exit(1);
@@ -191,9 +195,9 @@ fn main() -> Result<()> {
             println!("Saved /tmp/linux_hello_{{lit,ambient,diff,rgb}}.png (pair {:?} apart)", capture.pair.gap);
         }
 
-        Commands::Daemon { socket } => {
+        Commands::Daemon { socket, enroll_on_failure } => {
             let pipeline = pipeline(liveness()?)?;
-            daemon::serve(&mut Authenticator { pipeline, cameras }, &socket)?;
+            daemon::serve(&mut Authenticator { pipeline, cameras }, &socket, enroll_on_failure)?;
         }
 
         Commands::Watch { user, seconds, out } => {

@@ -25,7 +25,7 @@ pub mod ms_models;
 pub mod tpm;
 
 pub use antispoof::{AntiSpoof, LivenessModel};
-pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCameras, Session};
+pub use authenticator::{Attempt, Authenticator, CameraSetup, Capture, OpenCameras, Outcome, Session};
 pub use camera::{Camera, CameraType, IrCamera, IrPair};
 pub use detector::FaceDetector;
 pub use embedder::FaceEmbedder;
@@ -33,7 +33,7 @@ pub use lighting::{Lighting, LightingStatus};
 pub use liveness::{LivenessSession, LivenessState, Vote};
 pub use matcher::{Print, PrintMatch, PrintSource, Template, MATCH_THRESHOLD};
 pub use pipeline::{FacePipeline, FrameCheck};
-pub use store::FaceStore;
+pub use store::{FaceStore, OnFailure};
 pub use tracker::FaceTracker;
 pub use ms_models::{MsFrame, MsIrLiveness, MsModelScores};
 pub use ms_models::{OcclusionDetector, OcclusionType, OcclusionResult};

@@ -185,6 +185,48 @@ New prints get `source: "augment"`; at most 10 augmented prints per user, the ol
 print is dropped first; enrolled prints are never dropped. The store is saved right away (atomic
 rename, mode 0600); a TPM-sealed store stays sealed.
 
+### 9. Enroll-on-failure (F31, opt-in)
+
+Off unless the daemon runs with `--enroll-on-failure` (OpenRC: `LINUX_HELLO_ARGS="--enroll-on-failure"`
+in `/etc/conf.d/linux_hello`). Windows' `EnrollOnFailure` / `AugmentUserProfileOnFailure` add a
+print from a failed face attempt after the user signs in another way. Here:
+
+1. A session ends in `NOMATCH`. Its candidate is the best-matching print of a live-voting (good
+   lighting) frame, if the face was "deemed real" by its own votes (≥ 2 live votes counted over all
+   its frames, `FaceNotDeemedAsARealFace`) and it was the only face track of the session
+   (`AbortingSinceOtherFacesWereSeenDuringTrackedSession`). The daemon keeps it in memory with a
+   random 128-bit token and replies `NOMATCH 0.430 <token>`. Any later `AUTH` drops it.
+2. The PAM module keeps `<user> <token>` in the PAM handle. When the password (or another module)
+   then authenticates the user, the application calls `pam_setcred`; the module sends
+   `ENROLL_ON_FAILURE <user> <token>`. A face match never leaves a token behind, and a face check
+   later in the same transaction replaces it.
+3. The daemon accepts the command only from uid 0 (`SO_PEERCRED`), only for the same user and
+   token, and only ≤ 60 s after the face check. It adds the print if:
+   - its similarity to the user's enrolled and augmented prints is ≥ 0.40
+     (`ENROLL_ON_FAILURE_THRESHOLD`). Windows reads `EnrollOnFailureThresholdToMatch`,
+     `…RelaxedThresholdToMatch` and `…ThresholdToNotMatchOtherUsers` from a policy block that its
+     caller copies into the engine at runtime (`sub_180041800`, engine config floats 730–732); the
+     values are not in the binaries. 0.40 is the per-attempt FAR ≈ 1e-5 point of
+     [calibration.md](calibration.md) (simulated 9.1e-6 for 15 prints × 16 frames), the FAR Windows
+     targets for unlocking (F27);
+   - no other enrolled user matches it above `MATCH_THRESHOLD`.
+
+   It replies `ADDED 0.432` or `REFUSED no_pending | not_enrolled | too_far <s> | other_user <user> <s>`;
+   the PAM module only logs the reply.
+
+New prints get `source: "on_failure"` and generation 3, so a later match against them never adds
+an augmented print. At most 5 per user, the oldest dropped first. They are matched like any other
+print, but the 0.40 check ignores them, so a chain of on-failure prints cannot drift away from the
+enrolled face.
+
+**Risk.** Someone who knows the user's password and sits at the camera can get their own face
+added, and then unlock with the face. The 0.40 check limits this to faces that already look like
+the user's: for a stranger that happens about once in 100,000 attempts on LFW (the same rate
+Windows accepts for an unlock), while family members and look-alikes are the realistic case. A
+stranger who knows the password can already run sudo, but enroll-on-failure turns that into
+lasting face access, which the owner may not notice. Hence it is off by default. Prints from a
+photo or screen are not candidates when the liveness votes reject them.
+
 ## Daemon reply and PAM messages
 
 The first word is unchanged from earlier versions, so older PAM modules keep working:
@@ -192,7 +234,7 @@ The first word is unchanged from earlier versions, so older PAM modules keep wor
 | Reply | PAM | Message |
 |---|---|---|
 | `MATCH 0.812` | success | — |
-| `NOMATCH 0.310` | auth error | Face not recognized |
+| `NOMATCH 0.310`, `NOMATCH 0.430 <token>` (enroll-on-failure candidate) | auth error | Face not recognized |
 | `NOTLIVE` | auth error | Face not accepted as live |
 | `NOFACE too_dark` / `too_bright` / `too_far` / `edge` / `no_face` | auth error | Face too dark: move closer… / Face too bright: move back… / Face too small: move closer… / Face at the edge… / No face seen… |
 | `UNAVAILABLE lid_closed` | ignore | Face login not available: the lid is closed |
@@ -210,6 +252,8 @@ before this reply treats the unknown first word as "not available" too.
 ```json
 { "cole": { "prints": [ { "features": [512 floats], "generation": 0, "source": "enroll" }, ... ] } }
 ```
+
+`source` is `enroll`, `augment` or `on_failure`; stores written before enroll-on-failure read unchanged.
 
 Stores from before this format (one averaged `features` vector per user) are refused with an
 error that asks to re-enroll: `linux_hello enroll <user>` replaces the template. A sealed old store

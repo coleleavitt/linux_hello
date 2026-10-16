@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use crate::lighting::{subtract_ambient, Lighting, LightingStatus};
 use crate::{
     gray_to_rgb, AntiSpoof, Embedding, Face, FaceDetector, FaceEmbedder, FaceProblem, FaceStore, IrPair, MsFrame,
-    PrintMatch, Template, Vote, WindowsHelloModels,
+    OnFailure, PrintMatch, Template, Vote, WindowsHelloModels,
 };
 
 /// Minimum face box width in pixels (F46, F54).
@@ -199,6 +199,16 @@ impl FacePipeline {
         }
         self.store.save().context("saving face store")?;
         Ok(true)
+    }
+
+    /// Enroll-on-failure (F31): add `print` to the user's template if [`FaceStore::add_on_failure`]
+    /// accepts it, and save the store.
+    pub fn add_on_failure(&mut self, user_id: &str, print: &Embedding) -> Result<OnFailure> {
+        let result = self.store.add_on_failure(user_id, print);
+        if let OnFailure::Added { .. } = result {
+            self.store.save().context("saving face store")?;
+        }
+        Ok(result)
     }
 
     pub fn unenroll(&mut self, user_id: &str) -> Result<bool> {
