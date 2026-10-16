@@ -10,7 +10,8 @@
 //!                       SegoeIcons.ttf (Segoe Fluent Icons), segmdl2.ttf; added to fontconfig
 //!   screen/img100.jpg   Windows/Web/Screen: the lock-screen background
 //!   user-pictures/user-192.png   ProgramData/Microsoft/User Account Pictures: the default avatar
-//!   hello/eye/animation.json, hello/eye/seqNN/FFF.png   the Hello eye (ui/eye.rs)
+//!   hello/eye/solid.json   the Windows 11 Hello eye, the compiled composition as data (ui/eye_vector.rs)
+//!   hello/eye/animation.json, hello/eye/seqNN/FFF.png   the Windows 10 glyph eye, the fallback (ui/eye.rs)
 //!   hello/hello-face.png   the face logo of the "Sign-in options" button
 //! ```
 
@@ -24,7 +25,10 @@ use crate::config::{Config, INSTALLED_ASSETS};
 /// Where the Hello face icon comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hello {
-    /// Windows' own eye: the directory with `animation.json` and the frame sequences.
+    /// Windows 11's eye: `solid.json`, the Lottie composition reconstructed from
+    /// Windows.UI.Logon.dll (docs/windows-hello-ui.md §1.3).
+    Solid(PathBuf),
+    /// Windows 10's eye: the directory with `animation.json` and the glyph frame sequences.
     Eye(PathBuf),
     /// A glyph of an icon font from the assets (`hello_glyph` in the config).
     Glyph { family: String, ch: char },
@@ -83,7 +87,8 @@ impl Assets {
             |p: &PathBuf| self.dir.as_ref().and_then(|d| p.strip_prefix(d).ok()).unwrap_or(p).display().to_string();
         let fonts = if self.fonts.is_empty() { "system sans".to_string() } else { self.fonts.join(", ") };
         let hello = match &self.hello {
-            Hello::Eye(dir) => format!("{} (Windows' glyph animation)", short(dir)),
+            Hello::Solid(file) => format!("{} (Windows 11's eye, from the compiled composition)", short(file)),
+            Hello::Eye(dir) => format!("{} (Windows 10's glyph animation)", short(dir)),
             Hello::Glyph { family, ch } => format!("U+{:04X} of {family}", *ch as u32),
             Hello::Vector => "built-in icon".to_string(),
         };
@@ -106,6 +111,9 @@ pub fn find() -> Option<PathBuf> {
 
 fn hello_source(dir: &Path, glyph: &str, fonts: &[String]) -> Hello {
     let eye = dir.join("hello/eye");
+    if eye.join("solid.json").is_file() {
+        return Hello::Solid(eye.join("solid.json"));
+    }
     if eye.join("animation.json").is_file() {
         return Hello::Eye(eye);
     }

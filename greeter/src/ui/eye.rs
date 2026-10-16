@@ -1,8 +1,8 @@
 //! Windows' Hello eye, frame-exact: the font-glyph animation of `FontGlyphAnimator.dll`
 //! (`hello/eye/animation.json`: sequences of 33 ms frames rendered to `seqNN/FFF.png`, and
 //! the transition table — for the sequence showing and the state wanted, play one sequence
-//! then hold; docs/windows-hello-ui.md §1.3). The Windows 11 Lottie version is not
-//! reconstructed; this is the Windows 10 look and Windows' own fallback.
+//! then hold; docs/windows-hello-ui.md §1.3). This is the Windows 10 look and Windows' own
+//! fallback; the Windows 11 composition is [`super::eye_vector`].
 
 use std::cell::RefCell;
 use std::collections::HashMap;
