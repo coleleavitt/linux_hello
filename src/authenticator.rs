@@ -397,7 +397,8 @@ impl Attempt {
 }
 
 /// One line per frame pair: face brightness lit/ambient, emitter gain, lighting status or
-/// rejection reason, RGB P(real), vote, similarity and its estimated FAR.
+/// rejection reason, RGB P(real), vote, similarity and its estimated FAR, and Microsoft's
+/// distance and FAR when its recogniser gave a second opinion.
 pub fn describe(check: &FrameCheck) -> String {
     let num = |v: Option<f32>, digits: usize| v.map_or("-".to_string(), |v| format!("{v:.digits$}"));
     let a = &check.analysis;
@@ -408,7 +409,7 @@ pub fn describe(check: &FrameCheck) -> String {
         (None, None) => "-".to_string(),
     };
     format!(
-        "lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={} far={}",
+        "lit={} ambient={} d={} status={status} rgb_real={} windows={} vote={:?} similarity={} far={} ms={} ms_far={}",
         num(l.map(|l| l.lit), 1),
         num(l.map(|l| l.ambient), 1),
         num(l.map(|l| l.gain()), 1),
@@ -417,6 +418,8 @@ pub fn describe(check: &FrameCheck) -> String {
         check.vote,
         num(check.best.map(|b| b.similarity), 3),
         check.best.map_or("-".to_string(), |b| format!("{:.1e}", b.far)),
+        num(check.best.and_then(|b| b.windows).map(|w| w.distance), 3),
+        check.best.and_then(|b| b.windows).map_or("-".to_string(), |w| format!("{:.1e}", w.far)),
     )
 }
 
@@ -514,7 +517,7 @@ impl Authenticator {
                 bail!("{user}'s template already holds {} prints; enroll again without --add", template.prints.len());
             }
             let existing: Vec<Embedding> =
-                template.prints.iter().map(|p| Embedding { features: p.features.clone() }).collect();
+                template.prints.iter().map(|p| Embedding { features: p.features.clone(), windows: None }).collect();
             (existing, wanted.min(template.room()), 1)
         } else {
             (Vec::new(), wanted, MIN_PRINTS as usize)
@@ -622,12 +625,12 @@ mod tests {
                 windows_face: None,
                 lighting: Some(Lighting { lit: 80.0, ambient }),
                 problem: None,
-                print: Some(Embedding { features: vec![similarity] }),
+                print: Some(Embedding { features: vec![similarity], windows: None }),
             },
             liveness: None,
             windows: None,
             vote,
-            best: Some(PrintMatch { similarity, far, generation: 1 }),
+            best: Some(PrintMatch { similarity, far, generation: 1, windows: None }),
         }
     }
 
@@ -799,7 +802,7 @@ mod tests {
     fn enrollment_takes_good_frames_with_a_new_view_only() {
         let good = |features: &[f32]| {
             let mut check = usable(Vote::Live, 0.3);
-            check.analysis.print = Some(Embedding { features: features.to_vec() });
+            check.analysis.print = Some(Embedding { features: features.to_vec(), windows: None });
             check.analysis
         };
         let mut collected = Vec::new();

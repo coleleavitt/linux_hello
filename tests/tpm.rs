@@ -88,7 +88,7 @@ fn free_port_pair() -> Result<u16> {
 }
 
 fn template(seed: f32) -> Template {
-    Template::enrolled([Embedding { features: (0..512).map(|i| (i as f32 * seed).sin()).collect() }])
+    Template::enrolled([Embedding { features: (0..512).map(|i| (i as f32 * seed).sin()).collect(), windows: None }])
 }
 
 fn sealed_store(path: &Path, users: &[&str], pcrs: &[u8]) -> Result<()> {

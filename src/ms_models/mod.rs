@@ -17,6 +17,8 @@ pub mod retina;
 
 pub mod pose;
 
+pub mod recognizer;
+
 pub use ir_liveness::{MsFrame, MsIrLiveness, MsModelScores};
 
 pub use lbf::{Alignment, LbfAligner};
@@ -26,6 +28,8 @@ pub use occlusion::{OcclusionDetector, OcclusionResult, OcclusionType};
 pub use retina::{MsRetinaDetector, MsRetinaFace, RetinaModelType};
 
 pub use pose::IrFaceOrientation;
+
+pub use recognizer::MsRecognizer;
 
 use std::path::Path;
 
@@ -133,12 +137,14 @@ impl Reader {
 }
 
 /// The converted Windows Hello models that linux_hello runs: the anti-spoofing nets, the
-/// occlusion classifier and the IR Retina detector for the frontal check. They come from
-/// `scripts/extract_windows_hello_models.py` and the converters in `tools/winhello_models`.
+/// occlusion classifier, the IR Retina detector for the frontal check and the face recogniser
+/// for the second opinion in matching. They come from `scripts/extract_windows_hello_models.py`
+/// and the converters in `tools/winhello_models`.
 pub struct WindowsHelloModels {
     pub liveness: MsIrLiveness,
     pub occlusion: OcclusionDetector,
     pub retina: MsRetinaDetector,
+    pub recognizer: MsRecognizer,
 }
 
 impl WindowsHelloModels {
@@ -149,6 +155,7 @@ impl WindowsHelloModels {
             liveness: MsIrLiveness::load(dir.join("convnet"))?,
             occlusion: OcclusionDetector::load(dir.join("occlusion/MODEL_FILES_120.onnx"))?,
             retina: MsRetinaDetector::load(dir.join("ldmf/ort/MODEL_FILES_110.ort"), RetinaModelType::Standard)?,
+            recognizer: MsRecognizer::load(dir.join("cefa"))?,
         })
     }
 }

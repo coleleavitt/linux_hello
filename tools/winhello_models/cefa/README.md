@@ -2,7 +2,8 @@
 
 Unpacks `FaceRecognitionEngineAdapterResources*/MODEL_FILES_12x.cefa` into ONNX Runtime-loadable
 models. Outputs are Microsoft proprietary: they stay in the git-ignored
-`models/windows_hello/converted/`. linux_hello does not use them. Format and derivation:
+`models/windows_hello/converted/`. linux_hello runs the v5 recogniser (`MODEL_FILES_123.onnx` + `.json`)
+as a second opinion in matching when it is there (`src/ms_models/recognizer.rs`). Format and derivation:
 `docs/winhello-models/cefa.md`.
 
 Run from `tools/winhello_models/` with the shared venv:

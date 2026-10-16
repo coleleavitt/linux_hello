@@ -264,6 +264,22 @@ on-failure) 0.525, so the bound stays honest as the template grows. Every per-fr
 `watch`'s `log.jsonl` carry the FAR next to the similarity (`similarity=0.641 far=2.3e-7`); the
 daemon reply keeps the similarity only.
 
+**Second opinion (F28, F50, F51).** With the Windows Hello models, every print also carries Microsoft's
+own recognition feature: the v5 net (`MsRecognizer`, [winhello-models/cefa.md](winhello-models/cefa.md)
+§7) on the same recognition image, cropped at the Windows IR detector's five points, 256 floats
+L2-normalised, stored as `windows` next to `features`. A probe with such a feature is compared with the
+prints that have one by Windows' engine distance `1 − cos` (F50), the minimum over them (F28), and
+Microsoft's calibration table from the model container (FAR 1e-5 at distance 0.350,
+[calibration.md](calibration.md) "Microsoft's table") gives its FAR. The face is recognised only when
+ArcFace's FAR is below 1e-5 **and**, if there is a second opinion, Microsoft's FAR is too
+(`PrintMatch::recognised`; Windows' `targetFAR > GFP`, F27). Prints enrolled without the models, and
+probes taken without them, have no second opinion and are decided by ArcFace alone, so older stores keep
+working. The duplicate-enrollment check and enroll-on-failure's relaxed threshold use ArcFace only. The log
+line adds `ms=0.013 ms_far=7.8e-7` (`-` without a second opinion). On the validation frames (cefa.md §7) the
+two agree on the owner within one sitting and on the strangers; the chin-cut `ir_*` frames against a
+full-face template pass ArcFace (0.61–0.64) but not Microsoft's net (distance 0.42–0.45), the frames
+Windows itself would drop at the edge gate (§2). Cost: 4–6 ms per frame.
+
 ### 7. Decision (F25, F47, F48)
 
 The order follows Windows' `MakeDecisions`: recognise first, then liveness on the same face.

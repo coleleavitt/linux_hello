@@ -1,10 +1,12 @@
 //! Face templates: several prints per user, matched by the closest print (F28) and recognised by
-//! its estimated FAR (F27, F51), and updated after successful unlocks and, opt-in, after a failed
-//! face attempt confirmed by the password (F31).
+//! its estimated FAR (F27, F51), with Microsoft's recogniser as a second opinion when its
+//! features are there, and updated after successful unlocks and, opt-in, after a failed face
+//! attempt confirmed by the password (F31).
 
 use serde::{Deserialize, Serialize};
 
 use crate::calibration::{CalibrationTable, TARGET_FAR};
+use crate::ms_models::recognizer::distance;
 use crate::Embedding;
 
 /// A user is recognised once the session has this many prints and the best one matches (F48, F54).
@@ -43,9 +45,28 @@ pub enum PrintSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Print {
     pub features: Vec<f32>,
+    /// Microsoft's recogniser's feature of the same frame ([`Embedding::windows`]); prints stored
+    /// without the Windows Hello models have none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<Vec<f32>>,
     /// 0 for enrolled prints; an augmented print is one more than the print it matched
     pub generation: u8,
     pub source: PrintSource,
+}
+
+impl Print {
+    fn new(embedding: Embedding, generation: u8, source: PrintSource) -> Self {
+        Self { features: embedding.features, windows: embedding.windows, generation, source }
+    }
+}
+
+/// Microsoft's recogniser's opinion of a probe: its engine distance to the closest of the
+/// compared prints that carry a Windows feature (F28, F50) and Microsoft's FAR at that distance
+/// (F51).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowsMatch {
+    pub distance: f32,
+    pub far: f64,
 }
 
 /// The closest print of a template to a probe.
@@ -56,12 +77,15 @@ pub struct PrintMatch {
     /// ([`CalibrationTable::far`])
     pub far: f64,
     pub generation: u8,
+    /// The second opinion, when both the probe and a compared print have a Windows feature
+    pub windows: Option<WindowsMatch>,
 }
 
 impl PrintMatch {
-    /// Windows recognises a face whose estimated FAR is below the target (F27).
+    /// Windows recognises a face whose estimated FAR is below the target (F27); with a second
+    /// opinion, Microsoft's FAR must be below the target too.
     pub fn recognised(&self) -> bool {
-        self.far < TARGET_FAR
+        self.far < TARGET_FAR && self.windows.is_none_or(|w| w.far < TARGET_FAR)
     }
 
     /// A match just under the target, FAR in [target/2, target): the only kind that is added to
@@ -80,10 +104,7 @@ pub struct Template {
 impl Template {
     /// One print per enrollment frame, without averaging.
     pub fn enrolled(embeddings: impl IntoIterator<Item = Embedding>) -> Self {
-        let prints = embeddings
-            .into_iter()
-            .map(|e| Print { features: e.features, generation: 0, source: PrintSource::Enroll })
-            .collect();
+        let prints = embeddings.into_iter().map(|e| Print::new(e, 0, PrintSource::Enroll)).collect();
         Self { prints }
     }
 
@@ -91,11 +112,7 @@ impl Template {
     /// in all; returns how many were taken.
     pub fn add_enrolled(&mut self, embeddings: impl IntoIterator<Item = Embedding>) -> usize {
         let before = self.prints.len();
-        self.prints.extend(embeddings.into_iter().take(self.room()).map(|e| Print {
-            features: e.features,
-            generation: 0,
-            source: PrintSource::Enroll,
-        }));
+        self.prints.extend(embeddings.into_iter().take(self.room()).map(|e| Print::new(e, 0, PrintSource::Enroll)));
         self.prints.len() - before
     }
 
@@ -105,9 +122,18 @@ impl Template {
     }
 
     /// The highest cosine similarity over all prints (the minimum distance, F28), with the FAR of
-    /// an attempt against this many prints from `table`.
-    pub fn best_match(&self, probe: &Embedding, table: &CalibrationTable) -> Option<PrintMatch> {
-        self.best_match_where(probe, table, |_| true)
+    /// an attempt against this many prints from `table`. With `windows`, Microsoft's table, and a
+    /// probe with a Windows feature, also the second opinion: the minimum engine distance over
+    /// the prints with one (Windows' own rule, F28) and Microsoft's FAR for it. That FAR is the
+    /// table's value as Windows uses it (`GFP`, F51), not scaled by the comparison count: Windows'
+    /// × 1…4 counts verification conditions (F52), and there is one here.
+    pub fn best_match(
+        &self,
+        probe: &Embedding,
+        table: &CalibrationTable,
+        windows: Option<&CalibrationTable>,
+    ) -> Option<PrintMatch> {
+        self.best_match_where(probe, table, windows, |_| true)
     }
 
     /// The highest cosine similarity over the prints that `keep` selects.
@@ -115,18 +141,24 @@ impl Template {
         &self,
         probe: &Embedding,
         table: &CalibrationTable,
+        windows: Option<&CalibrationTable>,
         keep: impl Fn(&Print) -> bool,
     ) -> Option<PrintMatch> {
         let compared: Vec<&Print> = self.prints.iter().filter(|p| keep(p)).collect();
-        compared
+        let (similarity, generation) = compared
             .iter()
             .map(|p| (crate::cosine(&p.features, &probe.features), p.generation))
-            .max_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(similarity, generation)| PrintMatch {
-                similarity,
-                far: table.far(similarity, compared.len()),
-                generation,
-            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))?;
+        let windows = match (windows, &probe.windows) {
+            (Some(table), Some(feature)) => compared
+                .iter()
+                .filter_map(|p| p.windows.as_ref())
+                .map(|w| distance(w, feature))
+                .min_by(f32::total_cmp)
+                .map(|distance| WindowsMatch { distance, far: table.pair_far(1.0 - distance) }),
+            _ => None,
+        };
+        Some(PrintMatch { similarity, far: table.far(similarity, compared.len()), generation, windows })
     }
 
     /// Add `probe`, a live frame that matched a print of generation `matched.generation`
@@ -153,7 +185,7 @@ impl Template {
             let oldest = self.prints.iter().position(|p| p.source == source).expect("counted above");
             self.prints.remove(oldest);
         }
-        self.prints.push(Print { features: probe.features.clone(), generation, source });
+        self.prints.push(Print::new(probe.clone(), generation, source));
     }
 }
 
@@ -162,11 +194,17 @@ mod tests {
     use super::*;
 
     fn emb(features: &[f32]) -> Embedding {
-        Embedding { features: features.to_vec() }
+        Embedding { features: features.to_vec(), windows: None }
     }
 
     fn matched(similarity: f32, generation: u8) -> PrintMatch {
-        PrintMatch { similarity, far: crate::calibration::lfw_gray().far(similarity, 15), generation }
+        PrintMatch { similarity, far: crate::calibration::lfw_gray().far(similarity, 15), generation, windows: None }
+    }
+
+    /// Microsoft's v5 table around its FAR 1e-5 point (distance 0.350).
+    fn windows_table() -> CalibrationTable {
+        let rows = [(2.03519e-06, 0.995666, 0.305), (1e-05, 0.997664, 0.350), (3.08245e-05, 0.998230, 0.381)];
+        CalibrationTable::new("v5", rows.map(|(fpr, tar, d): (f64, f64, f32)| (fpr, tar, 1.0 - d))).unwrap()
     }
 
     #[test]
@@ -183,11 +221,55 @@ mod tests {
     fn best_match_is_the_max_over_prints() {
         let table = crate::calibration::lfw_gray();
         let template = Template::enrolled([emb(&[1.0, 0.0]), emb(&[0.0, 1.0]), emb(&[0.6, 0.8])]);
-        let m = template.best_match(&emb(&[0.0, 1.0]), &table).unwrap();
+        let m = template.best_match(&emb(&[0.0, 1.0]), &table, None).unwrap();
         assert!((m.similarity - 1.0).abs() < 1e-6);
         assert_eq!(m.far, table.far(m.similarity, 3));
         assert_eq!(m.generation, 0);
-        assert!(Template::default().best_match(&emb(&[1.0, 0.0]), &table).is_none());
+        assert_eq!(m.windows, None);
+        assert!(Template::default().best_match(&emb(&[1.0, 0.0]), &table, None).is_none());
+    }
+
+    #[test]
+    fn windows_opinion_is_the_min_distance_and_must_agree() {
+        let table = crate::calibration::lfw_gray();
+        let windows = windows_table();
+        let with = |features: &[f32], w: &[f32]| Embedding { features: features.to_vec(), windows: Some(w.to_vec()) };
+        // ArcFace is sure (0.9); the Windows features of the two prints are at distance 0.5 and 0.3.
+        let template = Template::enrolled([with(&[0.9, 0.436], &[0.5, 0.866]), with(&[1.0, 0.0], &[0.7, 0.714])]);
+        let probe = with(&[1.0, 0.0], &[1.0, 0.0]);
+        let m = template.best_match(&probe, &table, Some(&windows)).unwrap();
+        let w = m.windows.unwrap();
+        assert!((w.distance - 0.3).abs() < 1e-3, "closest Windows feature, not the ArcFace-best print's");
+        assert!(w.far < TARGET_FAR && m.far < TARGET_FAR && m.recognised());
+        // Distance 0.5 alone: Microsoft's table says FAR > 1e-5, so the face is not recognised.
+        let far = Template::enrolled([with(&[1.0, 0.0], &[0.5, 0.866])]);
+        let m = far.best_match(&probe, &table, Some(&windows)).unwrap();
+        assert!(m.far < TARGET_FAR && m.windows.unwrap().far > TARGET_FAR && !m.recognised());
+        assert!(!m.is_borderline());
+        // No second opinion without Microsoft's table, without a probe feature, or against prints
+        // without one; then ArcFace decides alone.
+        assert!(far.best_match(&probe, &table, None).unwrap().recognised());
+        assert!(far.best_match(&emb(&[1.0, 0.0]), &table, Some(&windows)).unwrap().recognised());
+        let old = Template::enrolled([emb(&[1.0, 0.0])]);
+        let m = old.best_match(&probe, &table, Some(&windows)).unwrap();
+        assert!(m.windows.is_none() && m.recognised());
+    }
+
+    #[test]
+    fn prints_keep_the_windows_feature() {
+        let with = |w: Option<&[f32]>| Embedding { features: vec![1.0, 0.0], windows: w.map(<[f32]>::to_vec) };
+        let mut template = Template::enrolled([with(Some(&[0.0, 1.0])), with(None)]);
+        template.add_enrolled([with(Some(&[1.0, 0.0]))]);
+        template.augment(&with(Some(&[0.6, 0.8])), matched(0.9, 0));
+        template.add_on_failure(&with(None));
+        let windows: Vec<Option<f32>> = template.prints.iter().map(|p| p.windows.as_ref().map(|w| w[0])).collect();
+        assert_eq!(windows, [Some(0.0), None, Some(1.0), Some(0.6), None]);
+        // Serialised, a print without the feature has no `windows` key, as stores from before it.
+        let json = serde_json::to_string(&template).unwrap();
+        assert_eq!(json.matches("\"windows\"").count(), 3);
+        let back: Template = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.prints[1].windows, None);
+        assert_eq!(back.prints[3].windows.as_deref(), Some(&[0.6, 0.8][..]));
     }
 
     #[test]
@@ -237,10 +319,11 @@ mod tests {
             template.prints.iter().filter(|p| p.source == PrintSource::OnFailure).map(|p| p.features[1]).collect();
         assert_eq!(kept, (1..=MAX_ON_FAILURE).map(|i| i as f32).collect::<Vec<_>>());
         let table = crate::calibration::lfw_gray();
-        let best = template.best_match(&emb(&[0.0, 1.0]), &table).unwrap();
+        let best = template.best_match(&emb(&[0.0, 1.0]), &table, None).unwrap();
         assert!(!template.augment(&emb(&[0.0, 1.0]), best));
         // The relaxed check can leave them out.
-        let enrolled = template.best_match_where(&emb(&[0.0, 1.0]), &table, |p| p.source != PrintSource::OnFailure);
+        let enrolled =
+            template.best_match_where(&emb(&[0.0, 1.0]), &table, None, |p| p.source != PrintSource::OnFailure);
         assert_eq!(enrolled.unwrap().similarity, 0.0);
     }
 }

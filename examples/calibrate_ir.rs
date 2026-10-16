@@ -15,6 +15,8 @@
 //!   every SCRFD face is embedded on the grayscale image, as the LFW table was built
 //!   (`examples/embed_dir`). These are pseudo-impostors, not IR captures.
 //!
+//! With the converted Windows Hello models, Microsoft's recogniser gives its second opinion (`ms`
+//! distance, `ms_far`) on pairs, and "recognised" means both opinions accept (`PrintMatch::recognised`).
 //! The template is `<user>`'s from the face store (`--store`, default the user's own store), or
 //! built from the prints of the frames in `--template-from DIR` (a dry run without enrolling).
 //! Prints one line per frame and a summary with the pass criteria of docs/calibration.md.
@@ -38,6 +40,7 @@ struct Scored {
     name: String,
     similarity: f32,
     far: f64,
+    recognised: bool,
 }
 
 struct Tools {
@@ -45,6 +48,8 @@ struct Tools {
     detector: FaceDetector,
     embedder: FaceEmbedder,
     table: CalibrationTable,
+    /// Microsoft's table for the second opinion of the Windows recogniser, when its models exist
+    windows: Option<CalibrationTable>,
 }
 
 /// The prints of every frame in `dir`, with what they are (`pair`, `lit`, `photo:<n>`).
@@ -112,20 +117,23 @@ fn ambient_of(dir: &Path, base: &str, lit: &GrayImage) -> Result<Option<GrayImag
     Ok(None)
 }
 
-/// Best match per frame, and every single comparison with a template print.
-fn score(
-    template: &Template,
-    table: &CalibrationTable,
-    prints: Vec<(String, String, Embedding)>,
-) -> (Vec<Scored>, Vec<f32>) {
+/// Best match per frame (ArcFace, and Microsoft's second opinion where both sides have its
+/// feature), and every single ArcFace comparison with a template print.
+fn score(template: &Template, tools: &Tools, prints: Vec<(String, String, Embedding)>) -> (Vec<Scored>, Vec<f32>) {
     let mut comparisons = Vec::new();
     let scored = prints
         .into_iter()
         .map(|(name, kind, print)| {
-            let m = template.best_match(&print, table).expect("template has prints");
-            println!("{name} ({kind}): similarity {:.3} far {:.1e}", m.similarity, m.far);
+            let m = template.best_match(&print, &tools.table, tools.windows.as_ref()).expect("template has prints");
+            let ms = m.windows.map_or(String::new(), |w| format!(" ms {:.3} ms_far {:.1e}", w.distance, w.far));
+            println!("{name} ({kind}): similarity {:.3} far {:.1e}{ms}", m.similarity, m.far);
             comparisons.extend(template.prints.iter().map(|p| cosine(&p.features, &print.features)));
-            Scored { name: format!("{name} ({kind})"), similarity: m.similarity, far: m.far }
+            Scored {
+                name: format!("{name} ({kind})"),
+                similarity: m.similarity,
+                far: m.far,
+                recognised: m.recognised(),
+            }
         })
         .collect();
     (scored, comparisons)
@@ -164,14 +172,18 @@ fn main() -> Result<()> {
         table.clone(),
     )?;
     let windows = models.join("windows_hello/converted");
-    if windows.exists() {
+    let windows_table = if windows.exists() {
         pipeline = pipeline.with_windows_hello(WindowsHelloModels::load(&windows)?);
-    }
+        Some(calibration::load_windows(windows.join("cefa/MODEL_FILES_123.json"))?)
+    } else {
+        None
+    };
     let mut tools = Tools {
         pipeline,
         detector: FaceDetector::load(models.join("det_10g.onnx"))?,
         embedder: FaceEmbedder::load(models.join("w600k_r50.onnx"))?,
         table,
+        windows: windows_table,
     };
 
     let template = match &template_from {
@@ -193,12 +205,12 @@ fn main() -> Result<()> {
 
     println!("== impostors: {}", impostors.display());
     let impostor_prints = prints(&mut tools, &impostors)?;
-    let (impostor, comparisons) = score(&template, &tools.table, impostor_prints);
+    let (impostor, comparisons) = score(&template, &tools, impostor_prints);
     let genuine = match &genuine {
         Some(dir) => {
             println!("== genuine: {}", dir.display());
             let genuine_prints = prints(&mut tools, dir)?;
-            score(&template, &tools.table, genuine_prints).0
+            score(&template, &tools, genuine_prints).0
         }
         None => Vec::new(),
     };
@@ -211,11 +223,11 @@ fn main() -> Result<()> {
         v.sort_by(f32::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(f32::NAN)
     };
-    let recognised: Vec<&Scored> = impostor.iter().filter(|s| s.far < TARGET_FAR).collect();
+    let recognised: Vec<&Scored> = impostor.iter().filter(|s| s.recognised).collect();
     let suspect: Vec<&Scored> = impostor.iter().filter(|s| s.similarity >= SUSPECT_SIMILARITY).collect();
     let addable = impostor.iter().filter(|s| s.similarity >= ENROLL_ON_FAILURE_THRESHOLD).count();
     println!(
-        "impostor frames: {} (best-of-template similarity median {:.3}, max {:.3}); recognised (far < {TARGET_FAR:.0e}): {}; \
+        "impostor frames: {} (best-of-template similarity median {:.3}, max {:.3}); recognised (far < {TARGET_FAR:.0e}, both opinions): {}; \
          ≥ {SUSPECT_SIMILARITY}: {}; ≥ enroll-on-failure {ENROLL_ON_FAILURE_THRESHOLD}: {addable}",
         impostor.len(),
         median(&impostor),
@@ -227,7 +239,7 @@ fn main() -> Result<()> {
         println!("  {}: similarity {:.3} far {:.1e}", s.name, s.similarity, s.far);
     }
     if !genuine.is_empty() {
-        let missed = genuine.iter().filter(|s| s.far >= TARGET_FAR).count();
+        let missed = genuine.iter().filter(|s| !s.recognised).count();
         println!(
             "genuine frames: {} (similarity min {:.3}, median {:.3}); not recognised on their own: {missed}",
             genuine.len(),
