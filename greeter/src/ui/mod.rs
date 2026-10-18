@@ -15,6 +15,18 @@ use crate::assets::Assets;
 use crate::auth::{self, Attempt, AuthEvent};
 use crate::config::Config;
 use crate::state::{Effect, Face, Input, Screen, State};
+
+/// `hello-greeter --lock --daemonize`: tell the waiting parent that the session is locked by
+/// writing one byte to the descriptor it passed in `HELLO_GREETER_READY_FD`.
+fn report_locked() {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    let Some(fd) = std::env::var("HELLO_GREETER_READY_FD").ok().and_then(|v| v.parse::<i32>().ok()) else { return };
+    std::env::remove_var("HELLO_GREETER_READY_FD");
+    // SAFETY: the parent created this descriptor with pipe(2) for this process alone.
+    let mut ready = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+    let _ = ready.write_all(b"1");
+}
 use crate::users::Account;
 
 mod background;
@@ -125,6 +137,7 @@ impl App {
                 lock.connect_locked(move |lock| {
                     info!("session locked");
                     on_locked.open_windows(Some(lock));
+                    report_locked();
                 });
                 let on_failed = app.clone();
                 lock.connect_failed(move |_| {

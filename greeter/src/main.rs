@@ -19,6 +19,10 @@ struct Cli {
     /// instead of greeting for greetd
     #[arg(long)]
     lock: bool,
+    /// With --lock: return once the session is locked, leaving the locker running (like
+    /// `swaylock -f`), so `swayidle before-sleep` can suspend safely after it
+    #[arg(long, requires = "lock")]
+    daemonize: bool,
     /// Development: a plain fullscreen window in the current session instead of a layer-shell
     /// surface or a session lock (greetd mode needs GREETD_SOCK, e.g. the fake greetd)
     #[arg(long)]
@@ -43,8 +47,42 @@ struct Cli {
     verbosity: String,
 }
 
+/// The environment variable that tells a daemonized locker which file descriptor to write one
+/// byte to once the session is locked.
+const READY_FD: &str = "HELLO_GREETER_READY_FD";
+
+/// `--daemonize`: run the locker as a child and return when it reports the lock (exit 0), or
+/// when it exits without locking (exit 1).
+fn daemonize() -> Result<()> {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    // SAFETY: a two-element array for pipe(2).
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("pipe");
+    }
+    let [read_fd, write_fd] = fds;
+    let args: Vec<_> = std::env::args_os().skip(1).filter(|a| a != "--daemonize").collect();
+    std::process::Command::new(std::env::current_exe()?)
+        .args(args)
+        .env(READY_FD, write_fd.to_string())
+        .spawn()
+        .context("starting the locker")?;
+    // SAFETY: both ends came from pipe(2) above and are owned here; the child has its own copies.
+    unsafe { libc::close(write_fd) };
+    let mut ready = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) });
+    let mut byte = [0u8; 1];
+    match ready.read(&mut byte) {
+        Ok(1) => Ok(()),
+        _ => anyhow::bail!("the locker exited without locking the session"),
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.daemonize && std::env::var_os(READY_FD).is_none() {
+        return daemonize();
+    }
     tracing_subscriber::fmt().with_env_filter(EnvFilter::new(&cli.verbosity)).with_writer(std::io::stderr).init();
 
     let config = Config::load(&cli.config)?;

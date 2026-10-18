@@ -230,3 +230,18 @@ and without them (`*-fallback.png`):
 | Lock → sign-in transition (0.5 s reveal, image scale 1→1.02) | slide-up + 250 ms blur; no scale |
 | Caps Lock warning | same |
 | Sounds, toasts, enrolment, PLAP, Cloud PC | none |
+
+### Replacing swaylock
+
+`hello-greeter --lock --daemonize` returns once the session is locked and leaves the locker
+running, like `swaylock -f`, so it can sit in `swayidle`'s `before-sleep` hook: the laptop never
+suspends unlocked. In niri:
+
+```kdl
+Mod+Alt+L allow-inhibiting=false { spawn "hello-greeter" "--lock"; }
+spawn-at-startup "swayidle" "-w" "timeout" "300" "hello-greeter --lock --daemonize" "timeout" "330" "niri msg action power-off-monitors" "resume" "niri msg action power-on-monitors" "before-sleep" "hello-greeter --lock --daemonize"
+```
+
+Unlike swaylock, it starts looking for the face on the first key press or mouse move, with no
+Enter needed, and shows the Windows Hello status lines. If another locker already holds the
+session, `--daemonize` exits with an error instead of hanging.
